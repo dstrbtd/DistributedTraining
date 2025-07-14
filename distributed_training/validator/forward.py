@@ -43,6 +43,7 @@ from distributed_training.utils.uids import (
 )
 from distributed_training.validator.reward import (
     benchmark_uids,
+    is_dataset_server_responsive,
     score_uid,
     update_total_scores,
 )
@@ -236,6 +237,13 @@ async def forward(self):
 
     else:
         # If running HF validation round, only call one UID each step
+        if not await is_dataset_server_responsive(self):
+            bt.logging.error(
+                "Hugging Face dataset server is unresponsive. "
+                "Skipping scoring and weight setting for this round to avoid penalizing miners."
+            )
+            return []
+
         self.event.update({"synapse_type": "train"})
         self.miner_uids = get_next_uid_api(
             self,

@@ -432,6 +432,36 @@ def update_all_reduce_scores(self):
         bt.logging.info(f"Error {e} updating all_reduce scores")
 
 
+
+
+async def is_dataset_server_responsive(self) -> bool:
+    """
+    Performs a single health check to see if the Hugging Face dataset server is responsive.
+
+    Returns:
+        bool: True if the server is accessible, False otherwise.
+    """
+    health_check_retry_limit = 5
+    health_check_retry_delay = 15 
+
+    bt.logging.info("Performing health check on Hugging Face dataset server...")
+    for attempt in range(health_check_retry_limit):
+        try:
+            await DatasetLoader.next_pages(offset=1, n_pages=1, seed=1)
+            bt.logging.success("Hugging Face dataset server is responsive.")
+            return True
+        except Exception as e:
+            bt.logging.warning(
+                f"Health check failed (Attempt {attempt + 1}/{health_check_retry_limit}). Error: {e}"
+            )
+            if attempt < health_check_retry_limit - 1:
+                await asyncio.sleep(health_check_retry_delay)
+
+    bt.logging.error(
+        f"Health check failed after {health_check_retry_limit} attempts. The dataset server appears to be down."
+    )
+    return False
+
 def update_total_scores(self):
     # Update AllReduce stats from the latest round
     update_all_reduce_scores(self)
