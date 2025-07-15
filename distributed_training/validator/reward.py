@@ -406,7 +406,6 @@ def benchmark_uids(self):
             # bt.logging.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
             self.uid_tracker[uid]["repo_valid_score"] = False
         except Exception as e:
-            breakpoint()
             bt.logging.info(
                 f"UID {uid} benchmarking failed with error {e}. Keeping score as is."
             )
