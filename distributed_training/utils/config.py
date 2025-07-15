@@ -256,7 +256,7 @@ def add_args(cls, parser, prefix=None):
         "--neuron.influxdb_token",
         type=str,
         help="The influxdb token",
-        default="648b65eb0a5b1d7b48e71e695fd6bb6611936548debaf281cf438df8ce03b74b",
+        default="a62bc7211beca367fcdd0b5a16b82b0f565447b6f7212d3de9c615068b787383",
     )
 
     parser.add_argument(
@@ -264,6 +264,48 @@ def add_args(cls, parser, prefix=None):
         type=str,
         help="The influxdb org",
         default="distributed-training",
+    )
+
+    parser.add_argument(
+        "--neuron.use_dct",
+        action="store_true",
+        help="If true uses DCT when compressing gradients",
+        default=False,
+    )
+
+    parser.add_argument(
+        "--neuron.momentum_decay",
+        type=float,
+        help="Amount of micro batches for gradient accumulation",
+        default=0.999,
+    )
+
+    parser.add_argument(
+        "--neuron.target_chunk",
+        type=int,
+        help="Amount of micro batches for gradient accumulation",
+        default=64,
+    )
+
+    parser.add_argument(
+        "--neuron.quantization_bins",
+        type=int,
+        help="Amount of micro batches for gradient accumulation",
+        default=256,
+    )
+
+    parser.add_argument(
+        "--neuron.quantization_range",
+        type=int,
+        help="Range",
+        default=6,
+    )
+
+    parser.add_argument(
+        "--neuron.topk_compression",
+        type=int,
+        help="Amount of micro batches for gradient accumulation",
+        default=32,
     )
 
     if neuron_type == "validator":

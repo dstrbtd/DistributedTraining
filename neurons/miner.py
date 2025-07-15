@@ -1,6 +1,5 @@
 # The MIT License (MIT)
-# Copyright © 2023 Yuma Rao
-# Copyright © 2023 KMFODA
+# Copyright © 2025 dstrbtd.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the “Software”), to deal in the Software without restriction, including without limitation
@@ -67,6 +66,7 @@ from distributed_training.utils.state_loader import (
     load_model_optimizer_gradient_averager,
     load_state_from_peer,
 )
+from distributed_training.utils.compression import TransformDCT, CompressDCT
 
 # GPU optimizations.
 torch.backends.cudnn.benchmark = True
@@ -323,6 +323,7 @@ class Miner(BaseMinerNeuron):
         self._setup_model_params()
         self._load_model()
         self._setup_training_params()
+        self._load_gradient_compressors()
 
     def _init_tokenizer(self):
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -377,6 +378,32 @@ class Miner(BaseMinerNeuron):
         self.batch_count = 0
         self.last_allreduce_block = None
 
+    def _load_gradient_compressors(self):
+        # Init compression
+        self.transformer = TransformDCT(
+            self.model, target_chunk=self.config.neuron.target_chunk
+        )
+        self.compressor = CompressDCT(
+            use_quantization=True,
+            quantization_bins=self.config.neuron.quantization_bins,
+            quantization_range=self.config.neuron.quantization_range,
+        )
+        self.xshapes = {}
+        self.totalks = {}
+        self.error_feedback = {}
+        self.owned_params = set()
+        for n, p in self.model.named_parameters():
+            self.owned_params.add(n)
+            self.error_feedback[n] = torch.zeros_like(p, device=self.device)
+            _, _, xshape, totalk, _ = self.compressor.compress(
+                self.transformer.encode(
+                    torch.zeros_like(p), use_dct=self.config.neuron.use_dct
+                ),
+                self.config.neuron.topk_compression,
+            )
+            self.xshapes[n] = xshape
+            self.totalks[n] = totalk
+
     def _init_network_components(self):
         """Initialize network and P2P components"""
         bt.logging.info("Logging PeerID to chain")
@@ -404,6 +431,7 @@ class Miner(BaseMinerNeuron):
             )
         )
         self.model.to(self.device)
+
         if should_sync_model:
             del global_model
             gc.collect()
@@ -416,6 +444,108 @@ class Miner(BaseMinerNeuron):
             del global_model
             gc.collect()
             torch.cuda.empty_cache()
+
+    def create_pseudo_gradients(self):
+        """compute pseudo gradient by subtracting the offloaded optimizer parameters with the main parameters and load them in the averager"""
+        opt_parameters = [
+            param
+            for group in self.grad_averager.offloaded_optimizer.param_groups
+            for param in group["params"]
+        ]
+        gradients = {}
+        for opt_param, main_param, named_param in zip(
+            opt_parameters,
+            self.grad_averager.main_parameters,
+            self.model.named_parameters(),
+        ):
+            # opt_param is the param that will be all_reduce, it is suppose to be on cpu
+            # main_param is the param that has been updated by the inner optimizer, it is suppose to be on gpu
+            gradients[named_param[0]] = opt_param.data - main_param.detach().to(
+                opt_param.device
+            )
+        return gradients
+
+    def prepare_gradient_dict(self):
+        """
+        Prepares the gradient dictionary for sharing by compressing the
+        momentum for each parameter and attaching metadata.
+
+        Args:
+            self (Miner): Instance of Miner containing model, scheduler, state_averager, gradient_averager, compressor, transformer and configs.
+
+        Returns:
+            tuple: (gradient, xshapes, totalks, transmitted) where:
+                gradient (dict): Contains keys for each parameter's compressed gradients and metadata.
+                xshapes (dict): The computed shapes for each parameter.
+                totalks (dict): Total length information for each parameter.
+        """
+        gradient = {}
+        xshapes = {}
+        totalks = {}
+
+        # Outer Optimizer LR
+        lr = float(self.state_averager.optimizer.param_groups[0]["lr"])
+
+        gradient_iterator = self.create_pseudo_gradients()
+        for n, p in gradient_iterator.items():
+            # Apply momentum decay.
+            self.error_feedback[n].mul_(self.config.neuron.momentum_decay)
+
+            # Ensure the gradient is on the same device as the parameter.
+            assert p is not None
+            grad = p.to(p.device)
+            if self.error_feedback[n].device != p.device:
+                self.error_feedback[n] = self.error_feedback[n].to(p.device)
+
+            # Normal behavior for later iterations
+            self.error_feedback[n].add_(grad, alpha=lr)
+
+            # Compress momentum
+            encoded = self.transformer.encode(
+                self.error_feedback[n], use_dct=self.config.neuron.use_dct
+            )
+            idxs, vals, xshape, totalk, quant_params = self.compressor.compress(
+                encoded, self.config.neuron.topk_compression
+            )
+            if totalk is None:
+                bt.logging.info("totalk is None")
+            del encoded  # Free the encoded tensor immediately
+
+            # Estimate transmitted gradient
+            decompressed = self.compressor.decompress(
+                p, idxs, vals, xshape, totalk, quant_params
+            )
+            transmit_grad = self.transformer.decode(
+                decompressed, use_dct=self.config.neuron.use_dct
+            )
+            del decompressed  # Free intermediate tensor
+
+            self.error_feedback[n].sub_(transmit_grad)
+
+            # Move compressed values to CPU to save GPU memory
+            gradient[n + "idxs"] = (
+                idxs.cpu() if isinstance(idxs, torch.Tensor) else idxs
+            )
+            gradient[n + "vals"] = (
+                vals.cpu() if isinstance(vals, torch.Tensor) else vals
+            )
+            gradient[n + "quant_params"] = quant_params
+            xshapes[n] = xshape
+            totalks[n] = totalk
+
+            del transmit_grad
+
+        # Delete graident iterator to free up memory
+        del gradient_iterator
+        torch.cuda.empty_cache()
+
+        gradient["metadata"] = {
+            "block": self.current_block,
+            "inner_step": self.local_progress.inner_step,
+            "outer_step": self.local_progress.epoch,
+        }
+
+        return gradient, xshapes, totalks
 
     def upload_model(self, epoch):
         """Unified function to save and upload both model and optimizer state"""
@@ -464,6 +594,16 @@ class Miner(BaseMinerNeuron):
                     os.path.join(
                         self.output_dir,
                         "inner_optimizer.pt",
+                    ),
+                )
+
+                # Create and save pseudo gradient state
+                gradient_state, _, _ = self.prepare_gradient_dict()
+                torch.save(
+                    gradient_state,
+                    os.path.join(
+                        self.output_dir,
+                        "gradients.pt",
                     ),
                 )
 
