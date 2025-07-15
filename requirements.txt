@@ -1,6 +1,7 @@
 bitsandbytes==0.44.1
 bitarray==3.0.0
 datasets==3.0.2
+einops==0.8.1
 memory-profiler==0.61.0
 transformers==4.39.3
 wandb==0.19.11
