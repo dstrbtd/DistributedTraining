@@ -543,6 +543,7 @@ class Miner(BaseMinerNeuron):
             "block": self.current_block,
             "inner_step": self.local_progress.inner_step,
             "outer_step": self.local_progress.epoch,
+            "loss": self.local_progress.loss
         }
 
         return gradient, xshapes, totalks
