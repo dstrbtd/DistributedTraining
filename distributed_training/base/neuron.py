@@ -27,6 +27,13 @@ from distributed_training import __spec_version__ as spec_version
 from distributed_training.utils.config import add_args, check_config, config
 from distributed_training.utils.misc import ttl_get_block
 
+from pydantic import BaseModel
+
+class UidTracker(BaseModel):
+    all_reduce_peer_id = None
+    all_reduce_score = 0
+    metadata_last_updated_block = 0
+    train_model_huggingface_id = None
 
 class BaseNeuron(ABC):
     """
@@ -119,6 +126,21 @@ class BaseNeuron(ABC):
             "all_reduce_score": 0,
             "total_score": 0,
             "loss": 0,
+        }
+        self.uid_tracker_initial_state = {
+            "all_reduce/peer_id": None,
+            "all_reduce/score": 0,
+            "metadata/last_updated_block": 0,
+            "train/model_huggingface_id": None,
+            "train/loss_before": 0,
+            "train/loss_after": 0,
+            "train/repo_valid_score": True,
+            "train/loss_abs": 0,
+            "train/loss_rel": 0,
+            "train/score": 0,
+            "train/last_updated_time": 0,  
+            "train/last_updated_revision": 0,
+            "total/score": 0,
         }
         self.uid_tracker = {
             uid: self.uid_tracker_initial_state.copy()

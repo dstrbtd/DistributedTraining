@@ -68,14 +68,24 @@ from distributed_training.utils.state_loader import (
 )
 from distributed_training.utils.compression import TransformDCT, CompressDCT
 
-# GPU optimizations.
-torch.backends.cudnn.benchmark = True
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
 
-# Seeds
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
+# Set seed and enable deterministic settings to ensure reproducibility
+# import numpy as np
+# import random
+# import torch
+
+
+# torch.manual_seed(42)
+# torch.cuda.manual_seed_all(42)
+# random.seed(42)
+# np.random.seed(42)
+
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
+# torch.use_deterministic_algorithms(True)
+
+# torch.backends.cuda.matmul.allow_tf32 = False
+# torch.backends.cudnn.allow_tf32 = False
 
 
 class Miner(BaseMinerNeuron):
@@ -543,7 +553,7 @@ class Miner(BaseMinerNeuron):
             "block": self.current_block,
             "inner_step": self.local_progress.inner_step,
             "outer_step": self.local_progress.epoch,
-            "loss": self.local_progress.loss
+            "loss": self.local_progress.loss,
         }
 
         return gradient, xshapes, totalks

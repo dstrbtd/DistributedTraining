@@ -1,6 +1,5 @@
 # The MIT License (MIT)
-# Copyright © 2023 Yuma Rao
-# Copyright © 2023 KMFODA
+# Copyright © 2025 dstrbtd.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the “Software”), to deal in the Software without restriction, including without limitation
@@ -38,12 +37,13 @@ from distributed_training.utils.state_loader import (
 from distributed_training.utils.uids import (
     get_next_uid_api,
     post_next_uid_api,
+    get_next_uids_manual,
     get_random_uids,
     map_uid_to_peerid,
 )
 from distributed_training.validator.reward import (
     benchmark_uids,
-    score_uid,
+    score_uids,
     update_total_scores,
 )
 
@@ -209,7 +209,7 @@ async def forward(self):
                                 valid_bandwidths
                             )
 
-                    self.report_allreduce_operation(
+                    self.report_allreduce_scores(
                         op_id=self.current_block,
                         epoch=self.local_progress.epoch,
                         validator_uid=self.uid,
@@ -237,9 +237,13 @@ async def forward(self):
     else:
         # If running HF validation round, only call one UID each step
         self.event.update({"synapse_type": "train"})
-        self.miner_uids = get_next_uid_api(
-            self,
-        )
+        # self.miner_uids = get_next_uid_api(
+        #     self,
+        # )
+        # Benchmark any untested uids
+        benchmark_uids(self)
+        
+        self.miner_uids = get_next_uids_manual(self, k=25)
 
         # Early return if no active miners found
         if len(self.miner_uids) == 0:
@@ -250,17 +254,20 @@ async def forward(self):
         bt.logging.info(f"UIDs:  {self.miner_uids}")
 
         uid = self.miner_uids[0]
-
-        await score_uid(self, uid)
+        # uids = [i for i in range(self.metagraph.n)]
+        # uids = [137]
+        
+        self.gradient_scores = {}
+        
+        await score_uids(self, self.miner_uids)
+        
+        self.update_openskill_ratings(self.miner_uids)
 
         if self.uid == self.master_uid:
             post_next_uid_api(self)
 
-        # Benchmark any untested uids
-        benchmark_uids(self)
-
         # Update total_scores
-        update_total_scores(self)
+        # update_total_scores(self)
 
     self.event.update(
         {

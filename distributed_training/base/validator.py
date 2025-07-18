@@ -1,6 +1,5 @@
 # The MIT License (MIT)
-# Copyright © 2023 Yuma Rao
-# Copyright © 2023 KMFODA
+# Copyright © 2025 dstrbtd.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the “Software”), to deal in the Software without restriction, including without limitation
@@ -33,11 +32,7 @@ from distributed_training.utils.weight_utils import (
     convert_weights_and_uids_for_emit,
     process_weights_for_netuid,
 )
-from distributed_training.validator.reward import (
-    update_total_scores,
-)
-from distributed_training.utils.progress_tracker import get_global_epoch
-from distributed_training.utils.state_loader import load_state_from_peer
+from openskill.models import PlackettLuce
 
 
 class BaseValidatorNeuron(BaseNeuron):
@@ -60,6 +55,18 @@ class BaseValidatorNeuron(BaseNeuron):
         # Set up initial scoring weights for validation
         bt.logging.info("Building validation weights.")
         self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
+
+        # Initialize openskill_model before loading state
+        self.config.openskill_beta = 7
+        self.config.openskill_tau = 0.1
+        self.openskill_model = PlackettLuce(
+            beta=self.config.openskill_beta, tau=self.config.openskill_tau
+        )
+        self.openskill_ratings = {}
+        self.openskill_ratings = {
+            int(uid): self.openskill_model.rating(name=str(uid))
+            for uid in range(self.metagraph.n)
+        }
 
         # Load current state
         bt.logging.debug("load_state()")
@@ -159,31 +166,31 @@ class BaseValidatorNeuron(BaseNeuron):
                 if self.event != {}:
                     self.event = {}
 
-                current_global_epoch = self.global_progress.epoch
-                self.global_progress.epoch = get_global_epoch(self)
-                if (self.local_progress.epoch != self.global_progress.epoch) or (
-                    not self.all_reduce_success_status
-                ):
-                    if self.local_progress.epoch != self.global_progress.epoch:
-                        bt.logging.info(
-                            f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
-                        )
-                    if not self.all_reduce_success_status:
-                        bt.logging.info(
-                            "All Reduce Failed. Loading Latest Model State."
-                        )
-                    load_state_from_peer(self, epoch=self.global_progress.epoch)
-                    # Reset all_reduce success status
-                    if not self.all_reduce_success_status:
-                        self.all_reduce_success_status = True
-                        self.last_allreduce_block = self.block
-                    # Load all_reduce scores if non_master_uid
-                    if (
-                        (self.uid != self.master_uid)
-                        and (self.global_progress.epoch != current_global_epoch)
-                        and (self.should_all_reduce)
-                    ):
-                        update_total_scores(self)
+                # current_global_epoch = self.global_progress.epoch
+                # self.global_progress.epoch = get_global_epoch(self)
+                # if (self.local_progress.epoch != self.global_progress.epoch) or (
+                #     not self.all_reduce_success_status
+                # ):
+                #     if self.local_progress.epoch != self.global_progress.epoch:
+                #         bt.logging.info(
+                #             f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
+                #         )
+                #     if not self.all_reduce_success_status:
+                #         bt.logging.info(
+                #             "All Reduce Failed. Loading Latest Model State."
+                #         )
+                #     load_state_from_peer(self, epoch=self.global_progress.epoch)
+                #     # Reset all_reduce success status
+                #     if not self.all_reduce_success_status:
+                #         self.all_reduce_success_status = True
+                #         self.last_allreduce_block = self.block
+                #     # Load all_reduce scores if non_master_uid
+                #     if (
+                #         (self.uid != self.master_uid)
+                #         and (self.global_progress.epoch != current_global_epoch)
+                #         and (self.should_all_reduce)
+                #     ):
+                #         update_total_scores(self)
 
                 # Run multiple forwards concurrently.
                 self.loop.run_until_complete(self.concurrent_forward())
@@ -398,7 +405,7 @@ class BaseValidatorNeuron(BaseNeuron):
         self.uid_tracker = dict(sorted(self.uid_tracker.items()))
         uids = list(self.uid_tracker.keys())
         rewards = np.array(
-            [self.uid_tracker[i]["total_score"] for i in self.uid_tracker.keys()]
+            [self.uid_tracker[i]["total/score"] for i in self.uid_tracker.keys()]
         )
 
         # Check if rewards contains NaN values.
@@ -464,6 +471,14 @@ class BaseValidatorNeuron(BaseNeuron):
             hotkeys=self.hotkeys,
             failed_is_alive_counter=self.failed_is_alive_counter,
             uid_tracker=self.uid_tracker,
+            openskill_ratings={
+                int(uid): {
+                    "mu": float(r.mu),
+                    "sigma": float(r.sigma),
+                    "ordinal": float(r.ordinal()),
+                }
+                for uid, r in self.openskill_ratings.items()
+            } if hasattr(self, "openskill_ratings") else None, # Catch case where openskill_ratings is not initialized
         )
 
     def load_state(self):
@@ -505,6 +520,13 @@ class BaseValidatorNeuron(BaseNeuron):
                             f"Failed to load saved uid_tracker for UID: {uid} with error: {e}"
                         )
                         self.uid_tracker[uid] = self.uid_tracker_initial_state.copy()
+            if ("openskill_ratings" in state) and (state["openskill_ratings"] is not None):
+                self.openskill_ratings = {
+                    int(uid): self.openskill_model.rating(
+                        mu=float(osd["mu"]), sigma=float(osd["sigma"]), name=str(uid)
+                    )
+                    for uid, osd in state["openskill_ratings"].flatten()[0].items()
+                }
         elif os.path.isfile(self.config.neuron.full_path + "/state.pt"):
             bt.logging.info(
                 "Pre-saved validator state found in .pt format. Loading validator state."
