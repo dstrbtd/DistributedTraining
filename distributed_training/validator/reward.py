@@ -1,6 +1,5 @@
 # The MIT License (MIT)
-# Copyright © 2023 Yuma Rao
-# Copyright © 2023 KMFODA
+# Copyright © 2025 dstrbtd.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the “Software”), to deal in the Software without restriction, including without limitation
@@ -17,7 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 import asyncio
-import json
+import copy
 import math
 import random
 import time
@@ -46,14 +45,15 @@ from distributed_training.utils.state_loader import (
     load_state_from_peer,
 )
 
-# GPU optimizations.
-torch.backends.cudnn.benchmark = True
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+from huggingface_hub import hf_hub_download
+# # GPU optimizations.
+# torch.backends.cudnn.benchmark = True
+# torch.backends.cuda.matmul.allow_tf32 = True
+# torch.backends.cudnn.allow_tf32 = True
 
-# Seeds
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
+# # Seeds
+# torch.manual_seed(42)
+# torch.cuda.manual_seed(42)
 
 # Set scoring weights
 TRAIN_SCORE_WEIGHT = 0.75
@@ -138,9 +138,10 @@ async def fetch_training_data(self, block, uid):
         try:
             pages = await DatasetLoader.next_pages(
                 offset=block,
-                n_pages=35,
+                n_pages=1,
                 seed=uid,
             )
+            # bt.logging.info(f"Fetched pages {pages} for UID {uid} at block {block}")
             random.seed(uid)
             random.shuffle(pages)
 
@@ -150,6 +151,7 @@ async def fetch_training_data(self, block, uid):
                 pages_info=pages,
                 tokenizer=self.tokenizer,
             )
+            # bt.logging.info(f"Created dataset for UID {uid} at block {block}")
 
             return dataset
         except Exception as e:
@@ -165,181 +167,140 @@ async def fetch_training_data(self, block, uid):
                 raise
 
 
-async def score_uid(self, uid: int):
-    """Score a single UID"""
-    target_blocks = self.config.neuron.target_n_blocks
-    latest_commit = None
-    model_huggingface_id = self.uid_tracker[uid]["model_huggingface_id"]
-    local_epoch = get_local_epoch(self, model_huggingface_id)
-    self.local_progress.inner_step = get_local_inner_step(self, model_huggingface_id)
-    revision = f"{__run__}.{local_epoch}.{self.local_progress.inner_step}"
+async def evaluate_model(
+    self,
+    model: torch.nn.Module,
+    blocks: list[int],
+    samples: list[int],
+    uid: int,
+    test_flag: bool = False,
+) -> tuple[float, int]:
+    model = model
+    device = model.device
+    total_loss = 0.0
+    n_batches_total = 0
+    n_batches_sampled = 0
 
-    blocks = []
-    time_delta = 0
-    try:
-        if model_huggingface_id is None:
-            scores = 0
-            raise Exception(f"Score 0 for UID {uid}: HuggingFace Repo Id is None")
-        elif not check_model_exists(model_huggingface_id, revision):
-            scores = 0
-            raise Exception(
-                f"Score 0 for UID {uid}: HuggingFace Repo Id {self.uid_tracker[uid]['model_huggingface_id']} Doesn't Exist"
-            )
-        elif (local_epoch is None) or (local_epoch != self.global_progress.epoch):
-            scores = 0
-            raise Exception(
-                f"Score 0 for UID {uid}: Local Epoch {local_epoch} != Global Epoch {self.global_progress.epoch}"
-            )
+    # TODO remove this after testing
+    for block in blocks:
+        
+        dataset = await fetch_training_data(self, block, uid)
+        # bt.logging.info(":pages: Fetched fineweb-edu pages")
 
-        cleanup_old_cache(
-            self,
-            repo_id=model_huggingface_id,
-            current_revision=None,
-        )
+        with torch.no_grad():
+            model.eval()
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                for i, batch in enumerate(dataset):
+                    inputs, labels = batch
+                    if inputs is None or len(inputs) == 0:
+                        bt.logging.info(f"Empty batch at index {i}, skipping")
+                        continue
+                    n_batches_total += 1
+                    # if i not in samples:
+                    #     continue
+                    # if test_flag:
+                    #     breakpoint()
+                    # bt.logging.info(f"Testing batch {i} for UID {uid}")
+                    
+                    inputs, labels = inputs.to(device), labels.to(device)
+                    
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        outputs = model(input_ids=inputs, labels=labels)
+                        
+                    total_loss += outputs.loss.item()
+                    n_batches_sampled += 1
+                    del inputs, labels, outputs
+                    torch.cuda.empty_cache()
 
-        commits = list_repo_commits(model_huggingface_id, repo_type="model")[:2]
-        latest_commit = commits[0].commit_id
-        previous_commit = commits[1].commit_id
-        time_delta = (commits[0].created_at - commits[1].created_at).seconds
+    return total_loss, n_batches_total, n_batches_sampled
 
+async def score_uids(self, uids: list):
+    """
+    Score gradients for a group UIDs
+    """
+    blocks = [(5613899*2)]
+    epoch = self.global_progress.epoch - 1
+    test_time = time.time()
+    
+    model_huggingface_id = "distributed/llama-1b"
+    if self.local_progress.epoch != epoch:
         load_state_from_peer(
             self,
             repo_id=model_huggingface_id,
-            epoch=local_epoch,
+            epoch=epoch,
             reload_inner_optimizer=True,
             reload_outer_optimizer=False,
-            revision=previous_commit,
             use_fallback_model=False,
         )
-        # Only set self.local_progress.epoch if model is correct format
-        self.local_progress.epoch = get_local_epoch(self, model_huggingface_id)
-        self.local_progress.samples_accumulated = 0
-        inner_step_t0 = (
-            self.model.config.inner_step
-            if "inner_step" in self.model.config.__dict__
-            else 0
-        )
-        self.local_progress.inner_step = inner_step_t0
-
-        model_final = AutoModelForCausalLM.from_pretrained(
-            model_huggingface_id, revision=latest_commit, trust_remote_code=True
-        )
-        inner_step_t1 = (
-            model_final.config.inner_step
-            if "inner_step" in model_final.config.__dict__
-            else 0
-        )
-
-        if time_delta < (30 * target_blocks):
-            scores = 0
-            bt.logging.info(
-                f"Score 0 for UID {uid}: Time Delta {time_delta} > 30 * Target Blocks {target_blocks}"
+    
+    for uid in uids:
+        try:
+            # self.uid_tracker[uid]["train/loss_abs"] = 0.5
+            # self.uid_tracker[uid]["train/loss_rel"] = 0.5
+            # continue
+            # Sample dataset indicces to use for testing this uid
+            bt.logging.info(f"UID: {uid}. Sampling dataset indices for testing")
+            samples = random.sample([i for i in range(500)], 4)
+            
+            # Calculate loss before applying gradient
+            bt.logging.info(f"UID: {uid}. Calculating loss before applying gradient")
+            total_loss_before, n_batches_total_before, n_batches_sampled_before = await evaluate_model(self, model = self.model, blocks = blocks, samples = samples, uid=uid)
+            average_loss_before = total_loss_before / n_batches_sampled_before
+            self.uid_tracker[uid]["train/loss_before"] = average_loss_before
+            bt.logging.info(f"UID {uid :03d}: Loss before: {average_loss_before}. Samples tested: {n_batches_sampled_before}/{n_batches_total_before}.")
+            
+            # Apply pseudo gradient for uid
+            bt.logging.info(f"UID: {uid}. Applying pseudo gradient")
+            model_t1 = copy.deepcopy(self.model)
+            revision = f"5.{epoch}.{get_local_inner_step(self, repo_id=self.uid_tracker[uid]['train/model_huggingface_id'], epoch = epoch)}"
+            self.uid_tracker[uid]["train/last_updated_revision"] = revision
+            
+            gradient = torch.load(
+                hf_hub_download(
+                    repo_id=self.uid_tracker[uid]['train/model_huggingface_id'],
+                    filename="gradients.pt",
+                    revision=revision,
+                ),
+                weights_only=True,
+                map_location="cpu",
             )
-        elif (sum(p.numel() for p in model_final.parameters()) > 1100048384) or (
-            sum(p.numel() for p in self.model.parameters()) > 1100048384
-        ):
-            scores = 0
-            bt.logging.info(
-                f"Score 0 for UID {uid}: Repo {model_huggingface_id} Failed Model Size Validation"
-            )
-        elif ("block_list" in self.model.config.__dict__) and (
-            len(self.model.config.block_list) > target_blocks
-        ):
-            scores = 0
-            bt.logging.info(
-                f"Score 0 for UID {uid}: Block List Length {len(self.model.config.block_list)} > Target Blocks {target_blocks}"
-            )
-        elif inner_step_t0 >= inner_step_t1:
-            scores = 0
-            bt.logging.info(
-                f"Score 0 for UID {uid}: Inner Step T0 {inner_step_t0} == Inner Step T1 {inner_step_t1}"
-            )
-        else:
-            blocks = model_final.config.block_list
-            self.running_loss = 0.0
-            self.batch_count = 0
-            self.local_progress.samples_accumulated = 0
-            for block in blocks:
-                bt.logging.debug(":pages: Fetching fineweb-edu pages")
-                dataset = await fetch_training_data(self, block, uid)
-                for inputs, labels in dataset:
-                    # Move to device
-                    inputs, labels = inputs.to(self.device), labels.to(self.device)
+            gradient.pop("metadata")
+            bt.logging.info(f"UID {uid :03d}: Gradient loaded from {self.uid_tracker[uid]['train/model_huggingface_id']} with revision {revision}")
+            self.update_model_with_gradient(model=model_t1, eval_uid=uid, eval_state_dict=gradient)
+            bt.logging.info(f"UID {uid :03d}: Model updated with current gradient")
+            # self.state_averager.optimizer.step()
+            
+            # Calculate loss after applying gradient
+            total_loss_after, n_batches_total_after, n_batches_sampled_after = await evaluate_model(self, model = model_t1, blocks = blocks, samples=samples, uid = uid, test_flag=True)
+            average_loss_after = total_loss_after / n_batches_sampled_after
+            self.uid_tracker[uid]["train/loss_after"] = average_loss_after
+            bt.logging.info(f"UID {uid :03d}: Loss after: {average_loss_after}. Samples tested: {n_batches_sampled_after}/{n_batches_total_after}.")
+            
+            # Calculate absolute and relative loss improvement
+            if average_loss_before == 0:
+                # Avoid division by zero
+                self.uid_tracker[uid]["train/loss_abs"] = 0
+                self.uid_tracker[uid]["train/loss_rel"] = 0
+            else:
+                self.uid_tracker[uid]["train/loss_abs"] = self.uid_tracker[uid]["train/loss_before"] - self.uid_tracker[uid]["train/loss_after"]
+                self.uid_tracker[uid]["train/loss_rel"] = (self.uid_tracker[uid]["train/loss_before"] - self.uid_tracker[uid]["train/loss_after"])/self.uid_tracker[uid]["train/loss_before"]
+            
+            bt.logging.info(f"UID {uid :03d}: Absolute loss improvement: {self.uid_tracker[uid]['train/loss_abs']}")
+            bt.logging.info(f"UID {uid :03d}: Relative loss improvement: {self.uid_tracker[uid]['train/loss_rel']}")
+            
+        except Exception as e:
+            bt.logging.info(f"UID {uid :03d}: Error caclualting loss score: {e}")
 
-                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                        outputs = self.model(input_ids=inputs, labels=labels)
-                        loss = outputs.loss / self.number_of_local_steps
+        finally:
+            # TODO: check gradient file cache
+            self.uid_tracker[uid]["train/last_updated_time"] = test_time
 
-                    if math.isnan(loss.item()):
-                        raise Exception(f"Score 0 for UID {uid}: NaN detected in Loss")
-
-                    loss.backward()
-
-                    self.running_loss += loss.item() * self.number_of_local_steps
-                    self.batch_count += 1
-                    self.local_progress.loss = self.running_loss / self.batch_count
-
-                    self.local_progress.samples_accumulated += (
-                        self.local_batch_size_train
-                    )
-
-                    # Check if we've accumulated enough samples for a step
-                    if (
-                        self.local_progress.samples_accumulated
-                        >= self.local_batch_size_train_effective
-                    ):
-                        bt.logging.info(
-                            f":training:  Outer Step: {self.local_progress.epoch} | "
-                            f"Inner Step: {self.local_progress.inner_step} | "
-                            f"Learning Rate: {self.inner_optimizer.param_groups[0]['lr']:.8f} | "
-                            f"Average Loss: {self.local_progress.loss:.2f}"
-                        )
-
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                        self.inner_optimizer.step()
-
-                        self.scheduler.step()
-
-                        self.inner_optimizer.zero_grad()
-
-                        self.local_progress.inner_step += 1
-
-                        self.running_loss = 0.0
-                        self.batch_count = 0
-
-                        self.local_progress.samples_accumulated = 0
-
-            scores = score_models(self.model, model_final)
-            if self.local_progress.inner_step == inner_step_t0:
-                scores = 0
-    except Exception as e:
-        # TODO if OSError and e.rrno == errno.ENOSPC score as 1
-        scores = 0.0
-        bt.logging.info(
-            f"Score {int(scores)} for UID {uid}: Forward Loop Failed With Error: {e}"
-        )
-
-    finally:
-        if model_huggingface_id is not None:
-            cleanup_old_cache(
-                self,
-                repo_id=model_huggingface_id,
-                current_revision=None,
-            )
-
-    self.uid_tracker[uid]["last_commit"] = latest_commit
-    self.uid_tracker[uid]["train_number_of_blocks"] = len(blocks)
-    self.uid_tracker[uid]["train_duration"] = time_delta
-    self.uid_tracker[uid]["train_similarity_score_last_updated"] = time.time()
-    self.uid_tracker[uid]["train_similarity_score"] = (
-        0 if math.isnan(scores) else scores
-    )
-    self.uid_tracker[uid]["train_validation_count"] += 1
-    self.uid_tracker[uid]["loss"] = self.local_progress.loss
-
-    bt.logging.info(f"UID {uid} Current Train Score: {scores}")
-    update_individual_scores(self, uid, target_blocks)
-
+    # # Delete temporary variables to free memory
+    # del gradient
+    # del model_t1
+    # del total_loss_before, n_batches_total_before, n_batches_sampled_before
+    # del total_loss_after, n_batches_total_after, n_batches_sampled_after
+    # torch.cuda.empty_cache()
 
 def update_individual_scores(self, uid, target_blocks):
     uid_data = self.uid_tracker[uid]
@@ -399,18 +360,18 @@ def score_repo(self, repo_id: str) -> bool:
 def benchmark_uids(self):
     for uid in self.uid_tracker:
         try:
-            self.uid_tracker[uid]["repo_valid_score"] = score_repo(
-                self, self.uid_tracker[uid]["model_huggingface_id"]
+            self.uid_tracker[uid]["train/repo_valid_score"] = score_repo(
+                self, self.uid_tracker[uid]["train/model_huggingface_id"]
             )
         except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
             # bt.logging.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
-            self.uid_tracker[uid]["repo_valid_score"] = False
+            self.uid_tracker[uid]["train/repo_valid_score"] = False
         except Exception as e:
             bt.logging.info(
                 f"UID {uid} benchmarking failed with error {e}. Keeping score as is."
             )
     bt.logging.info(
-        {uid: self.uid_tracker[uid]["repo_valid_score"] for uid in self.uid_tracker}
+        {uid: self.uid_tracker[uid]["train/repo_valid_score"] for uid in self.uid_tracker}
     )
 
 
@@ -446,7 +407,7 @@ def update_total_scores(self):
         self.uid_tracker[uid].get("all_reduce_score", 0.0) for uid in self.uid_tracker
     ]
     repo_valid_scores = [
-        self.uid_tracker[uid].get("repo_valid_score", 0.0) for uid in self.uid_tracker
+        self.uid_tracker[uid].get("train/repo_valid_score", 0.0) for uid in self.uid_tracker
     ]
 
     train_scores_normalised = (
@@ -500,4 +461,4 @@ def update_total_scores(self):
             ) * repo_valid_score
 
     # Add metrics reporting
-    self.report_scoring_metrics()
+    self.report_train_scores()
