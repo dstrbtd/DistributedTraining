@@ -2,12 +2,9 @@ import copy
 import gc
 import os
 import requests
-import subprocess
 import pytz
-import sys
 import shutil
 import tempfile
-import threading
 import time
 from functools import partial
 from pathlib import Path
@@ -35,8 +32,6 @@ from huggingface_hub import (
 )
 from huggingface_hub.utils import (
     HfHubHTTPError,
-    RepositoryNotFoundError,
-    EntryNotFoundError,
 )
 from huggingface_hub.constants import HF_HUB_CACHE
 from transformers import (
@@ -56,186 +51,6 @@ from distributed_training.averaging.avg_handler import AveragingHandler
 from huggingface_hub import list_repo_commits
 
 hivemind_logger = get_logger(__name__)
-
-
-class ModelLoadingManager:
-    def __init__(self):
-        self.loading_lock = threading.Lock()
-        self._is_loading = False
-        self._last_loaded_epoch = None
-
-    @property
-    def is_loading(self):
-        with self.loading_lock:
-            return self._is_loading
-
-    @property
-    def last_loaded_epoch(self):
-        with self.loading_lock:
-            return self._last_loaded_epoch
-
-    def set_loading_state(self, is_loading, epoch=None):
-        with self.loading_lock:
-            self._is_loading = is_loading
-            if not is_loading and epoch is not None:
-                self._last_loaded_epoch = epoch
-
-
-class FastModelLoader:
-    def __init__(self, model_name: str, cache_dir: str = None):
-        """
-        Initialize the fast model loader with HF downloader integration.
-
-        Args:
-            model_name (str): The HuggingFace model name (e.g., 'organization/model-name')
-            cache_dir (str, optional): Directory to store downloaded files. Defaults to HF cache.
-        """
-        self.model_name = model_name
-        self.cache_dir = cache_dir or os.path.expanduser("~/.cache/huggingface/hub")
-        self._downloaded_files = {}  # Cache of downloaded files
-
-    def download_files(self, revision: str = None, files: list = None):
-        """
-        Download files using hfdownloader.
-
-        Args:
-            revision (str, optional): Git revision/epoch number
-            files (list, optional): List of specific files to download with patterns
-
-        Returns:
-            str: Path to downloaded files
-        """
-        # Generate cache key
-        cache_key = f"{revision}_{','.join(files) if files else 'default'}"
-
-        # Check if we already downloaded these files
-        if cache_key in self._downloaded_files:
-            return self._downloaded_files[cache_key]
-
-        model_path = os.path.join(self.cache_dir, self.model_name.replace("/", "_"))
-        os.makedirs(model_path, exist_ok=True)
-
-        cmd = [
-            "hfdownloader",
-            "-r",
-            self.model_name,
-            "download",
-            "-c",
-            "10",
-            "-y",
-        ]
-
-        if revision:
-            cmd.extend(["-b", revision])
-
-        # Add file patterns if specified, otherwise default to both model and optimizer
-        if files:
-            for file_pattern in files:
-                cmd.extend(["-f", f"{file_pattern}"])
-        else:
-            cmd.extend(
-                [
-                    "-f",
-                    "*.safetensors",
-                    "-f",
-                    "optimizer.pt",
-                    "--skip-verify",
-                ]
-            )
-
-        bt.logging.debug(f"Executing hfdownloader command: {' '.join(cmd)}")
-
-        try:
-            process = subprocess.Popen(
-                cmd,
-                cwd=model_path,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
-                env={
-                    **os.environ,
-                    "PYTHONUNBUFFERED": "1",
-                },  # Force Python unbuffered output
-            )
-
-            # Use select to handle both stdout and stderr
-            import select
-
-            outputs = [process.stdout, process.stderr]
-            while True:
-                # Wait for output on either stdout or stderr
-                readable, _, _ = select.select(outputs, [], [])
-
-                for output in readable:
-                    line = output.readline()
-                    if line:
-                        # Don't buffer the print
-                        print(line.rstrip(), flush=True)
-
-                # Check if process has finished
-                if process.poll() is not None:
-                    break
-
-            # Get any remaining output
-            remaining_stdout, remaining_stderr = process.communicate()
-            if remaining_stdout:
-                print(remaining_stdout.rstrip(), flush=True)
-            if remaining_stderr:
-                print(
-                    f"Error: {remaining_stderr.rstrip()}", file=sys.stderr, flush=True
-                )
-
-            if process.returncode != 0:
-                raise RuntimeError(
-                    f"hfdownloader failed with return code {process.returncode}"
-                )
-
-        except Exception as e:
-            bt.logging.error(f"Download failed! Error: {str(e)}")
-            raise RuntimeError(f"hfdownloader failed: {str(e)}")
-
-        return model_path
-
-    def load_model_and_optimizer(self, epoch: int = None):
-        """
-        Load both model and optimizer states in a single download operation.
-
-        Args:
-            epoch (int, optional): Epoch number for specific revision
-
-        Returns:
-            tuple: (model_state_dict, optimizer_state_dict)
-        """
-        revision = str(epoch) if epoch is not None else None
-
-        # Download both model and optimizer files in one go
-        model_path = self.download_files(revision=revision)
-
-        # Load model state
-        model_files = list(Path(model_path).rglob("*.safetensors"))
-        if not model_files:
-            raise FileNotFoundError(f"No model files found in {model_path}")
-
-        bt.logging.info(f"Loading model state from: {[f.name for f in model_files]}")
-
-        state_dict = {}
-        for model_file in model_files:
-            from safetensors.torch import load_file
-
-            state = load_file(model_file)
-            state_dict.update(state)
-
-        # Load optimizer state
-        optimizer_file = Path(model_path) / "optimizer.pt"
-        if not optimizer_file.exists():
-            raise FileNotFoundError(f"Optimizer state not found at {optimizer_file}")
-
-        bt.logging.info(f"Loading optimizer state from: {optimizer_file}")
-        optimizer_state = torch.load(str(optimizer_file), map_location="cpu")
-
-        return state_dict, optimizer_state
 
 
 def check_model_exists(repo_id: str, revision: Optional[str] = None) -> bool:
@@ -630,48 +445,6 @@ def load_state_from_peer(
     except Exception as e:
         bt.logging.error(f"Error loading state: {str(e)}")
         return False
-
-
-# TODO Remove this if score_bandwidth is deprecated
-async def load_state_from_miner(self, peer, timeout: Optional[float] = None):
-    metadata = None
-    hivemind_logger.info(f"Downloading parameters from peer {peer}")
-    try:
-        stub = self.grad_averager.get_stub(
-            self._p2p,
-            peer,
-            namespace=self.grad_averager.matchmaking_kwargs["prefix"],
-        )
-        stream = await stub.rpc_download_state_partial(averaging_pb2.DownloadRequest())
-        current_tensor_parts, tensors = [], []
-
-        # TODO merge this with hivemind.compression.deserialize_tensor_stream
-        async for message in aiter_with_timeout(stream, timeout=timeout):
-            if message.metadata:
-                metadata = self.grad_averager.serializer.loads(message.metadata)
-            if message.tensor_part.dtype and current_tensor_parts:
-                # tensor_part.dtype indicates the start of the new tensor, so we should wrap up this one
-                tensors.append(
-                    deserialize_torch_tensor(
-                        combine_from_streaming(current_tensor_parts)
-                    )
-                )
-                current_tensor_parts = []
-            current_tensor_parts.append(message.tensor_part)
-        if current_tensor_parts:
-            tensors.append(
-                deserialize_torch_tensor(combine_from_streaming(current_tensor_parts))
-            )
-
-        if not metadata:
-            hivemind_logger.exception(f"Peer {peer} did not send its state")
-            return
-
-        hivemind_logger.info(f"Finished downloading state from {peer}")
-        return metadata, tensors
-    except Exception as e:
-        hivemind_logger.exception(f"Failed to download state from {peer} - {repr(e)}")
-        return None, None
 
 
 def cleanup_old_cache(self, repo_id=None, current_revision=None):

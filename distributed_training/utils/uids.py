@@ -137,56 +137,34 @@ async def get_random_uids(
     return uids
 
 
-
 def get_next_uids_manual(self, k: int = 25) -> List[int]:
-    uids = []
     try:
         # Rank miners based off train_similarity_score_last_updated
         self.uid_tracker = dict(
             sorted(
                 self.uid_tracker.items(),
-                key=lambda item: (not item[1]["train/repo_valid_score"], item[1]["train/last_updated_time"]),
+                key=lambda item: (
+                    not item[1].train.is_valid,
+                    item[1].train.updated_time,
+                ),
             )
         )
-        bt.logging.info(
-            {
-                k: v["train/last_updated_time"]
-                for k, v in self.uid_tracker.items()
-            }
-        )
-        # breakpoint()
-        for uid in self.uid_tracker.keys():
-            if (
-                (self.uid_tracker[uid]["train/model_huggingface_id"] is not None)
-                and (check_model_exists(self.uid_tracker[uid]["train/model_huggingface_id"]))
-                # and (
-                #     (self.uid_tracker[uid]["last_commit"] is None)
-                #     or (
-                #         list_repo_commits(
-                #             self.uid_tracker[uid]["train/model_huggingface_id"],
-                #             repo_type="model",
-                #         )[0]
-                #         != self.uid_tracker[uid]["last_commit"]
-                #     )
-                # )
-            ):
-                uids.append(uid)
-            else:
-                continue
-            if len(uids) >= k:
-                return uids
+        bt.logging.info({k: v.train.updated_time for k, v in self.uid_tracker.items()})
+        uids = self.uid_tracker.keys()
+        uids = uids[:k]
+        return uids
+
     except Exception as e:
         bt.logging.info(f"Error getting UID manually: {e}")
 
 
 def get_next_uid_api(self):
-    uids = []
     try:
         response = requests.get(
             url=self.uid_api_url, headers={"Authorization": self.uid_api_get_token}
         )
-        uid = response.json()["uids"]
-        uids.append(uid)
+        uids = response.json()["uids"]
+
         assert uids != self.miner_uids
         return uids
     except Exception as e:
@@ -199,7 +177,7 @@ def get_next_uid_api(self):
 
 
 def post_next_uid_api(self):
-    uids = get_next_uids_manual(self)
+    uids = get_next_uids_manual(self, int(self.metagraph.n))
     try:
         response = requests.post(
             url=self.uid_api_url,
@@ -257,7 +235,9 @@ def map_uid_to_peerid(self):
                 continue
 
             uid = hotkey_to_uid[hotkey]
-            last_updated_block = value.value.get("block", None)
+            last_updated_block = value.value.get("block", 0)
+            if last_updated_block is None:
+                last_updated_block = 0
             concatenated = eval(metadata)
 
             if "peer_id" not in concatenated:
@@ -269,73 +249,79 @@ def map_uid_to_peerid(self):
                 bt.logging.debug(
                     f"Invalid commitment for UID {uid}: model_huggingface_id not in commitment metadata"
                 )
-            if concatenated["peer_id"] != self.uid_tracker[uid]["all_reduce/peer_id"]:
+            if concatenated["peer_id"] != self.uid_tracker[uid].all_reduce.peer_id:
                 uid_peerid_metadata = [
-                    metadata["all_reduce/peer_id"]
+                    metadata.all_reduce.peer_id
                     for key, metadata in self.uid_tracker.items()
                     if key != uid
                 ]
                 if concatenated["peer_id"] not in uid_peerid_metadata:
-                    self.uid_tracker[uid]["all_reduce/peer_id"] = concatenated["peer_id"]
-                    self.uid_tracker[uid]["metadata/last_updated_block"] = last_updated_block
+                    self.uid_tracker[uid].all_reduce.peer_id = concatenated["peer_id"]
+                    self.uid_tracker[
+                        uid
+                    ].chaindata.last_updated_block = last_updated_block
                 else:
                     uid_list = [
                         uid
                         for uid, metadata in self.uid_tracker.items()
-                        if metadata["all_reduce/peer_id"] == concatenated["peer_id"]
+                        if metadata.all_reduce.peer_id == concatenated["peer_id"]
                     ]
                     for uid_i in uid_list:
                         if (
-                            self.uid_tracker[uid_i]["metadata/last_updated_block"] is not None
+                            self.uid_tracker[uid_i].chaindata.last_updated_block
+                            is not None
                         ) and (
-                            self.uid_tracker[uid_i]["metadata/last_updated_block"]
+                            self.uid_tracker[uid_i].chaindata.last_updated_block
                             > last_updated_block
                         ):
-                            self.uid_tracker[uid_i]["metadata/last_updated_block"] = None
-                            self.uid_tracker[uid_i]["train/model_huggingface_id"] = None
-                            self.uid_tracker[uid_i]["all_reduce/peer_id"] = None
+                            self.uid_tracker[uid_i].chaindata.last_updated_block = 0
+                            self.uid_tracker[uid_i].train.model_id = None
+                            self.uid_tracker[uid_i].all_reduce.peer_id = None
                         else:
-                            self.uid_tracker[uid]["metadata/last_updated_block"] = None
-                            self.uid_tracker[uid]["train/model_huggingface_id"] = None
-                            self.uid_tracker[uid]["all_reduce/peer_id"] = None
+                            self.uid_tracker[uid].chaindata.last_updated_block = 0
+                            self.uid_tracker[uid].train.model_id = None
+                            self.uid_tracker[uid].all_reduce.peer_id = None
             if (
                 concatenated["model_huggingface_id"]
-                != self.uid_tracker[uid]["train/model_huggingface_id"]
+                != self.uid_tracker[uid].train.model_id
             ):
-                self.uid_tracker[uid]["train/model_huggingface_id"] = concatenated[
+                self.uid_tracker[uid].train.model_id = concatenated[
                     "model_huggingface_id"
                 ]
                 uid_peerid_metadata = [
-                    metadata["train/model_huggingface_id"]
+                    metadata.train.model_id
                     for key, metadata in self.uid_tracker.items()
                     if key != uid
                 ]
                 if concatenated["model_huggingface_id"] not in uid_peerid_metadata:
-                    self.uid_tracker[uid]["train/model_huggingface_id"] = concatenated[
+                    self.uid_tracker[uid].train.model_id = concatenated[
                         "model_huggingface_id"
                     ]
-                    self.uid_tracker[uid]["metadata/last_updated_block"] = last_updated_block
+                    self.uid_tracker[
+                        uid
+                    ].chaindata.last_updated_block = last_updated_block
                 else:
                     uid_list = [
                         uid
                         for uid, metadata in self.uid_tracker.items()
-                        if metadata["train/model_huggingface_id"]
+                        if metadata.train.model_id
                         == concatenated["model_huggingface_id"]
                     ]
                     for uid_i in uid_list:
                         if (
-                            self.uid_tracker[uid_i]["metadata/last_updated_block"] is not None
+                            self.uid_tracker[uid_i].chaindata.last_updated_block
+                            is not None
                         ) and (
-                            self.uid_tracker[uid_i]["metadata/last_updated_block"]
+                            self.uid_tracker[uid_i].chaindata.last_updated_block
                             > last_updated_block
                         ):
-                            self.uid_tracker[uid_i]["metadata/last_updated_block"] = None
-                            self.uid_tracker[uid_i]["train/model_huggingface_id"] = None
-                            self.uid_tracker[uid_i]["all_reduce/peer_id"] = None
+                            self.uid_tracker[uid_i].chaindata.last_updated_block = 0
+                            self.uid_tracker[uid_i].train.model_id = None
+                            self.uid_tracker[uid_i].all_reduce.peer_id = None
                         else:
-                            self.uid_tracker[uid]["metadata/last_updated_block"] = None
-                            self.uid_tracker[uid]["train/model_huggingface_id"] = None
-                            self.uid_tracker[uid]["all_reduce/peer_id"] = None
+                            self.uid_tracker[uid].chaindata.last_updated_block = 0
+                            self.uid_tracker[uid].train.model_id = None
+                            self.uid_tracker[uid].all_reduce.peer_id = None
 
             bt.logging.debug(f"Retrieved commitment for UID {uid}: {metadata}")
 

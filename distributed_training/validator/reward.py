@@ -17,7 +17,8 @@
 
 import asyncio
 import copy
-import math
+import os
+from io import StringIO
 import random
 import time
 from datetime import datetime
@@ -46,89 +47,14 @@ from distributed_training.utils.state_loader import (
 )
 
 from huggingface_hub import hf_hub_download
-# # GPU optimizations.
-# torch.backends.cudnn.benchmark = True
-# torch.backends.cuda.matmul.allow_tf32 = True
-# torch.backends.cudnn.allow_tf32 = True
-
-# # Seeds
-# torch.manual_seed(42)
-# torch.cuda.manual_seed(42)
+from rich.console import Console
+from rich.table import Table
 
 # Set scoring weights
 TRAIN_SCORE_WEIGHT = 0.75
 ALL_REDUCE_SCORE_WEIGHT = 0.25
 
 api = HfApi()
-
-
-async def score_blacklist(self, uids):
-    scores = torch.FloatTensor([1 for _ in uids]).to(self.device)
-    for i, uid in enumerate(uids):
-        if self.uids_to_peerids[uid][0] == None:
-            scores[i] = 0.0
-        elif self.uids_to_peerids[uid][0] in self.run_peer_id_list:
-            scores[i] = 1.0
-        else:
-            scores[i] = 0.0
-
-    return scores
-
-
-async def score_bandwidth(self, uids, timeout=30):
-    scores = torch.FloatTensor([1 for _ in uids]).to(self.device)
-    for i, uid in enumerate(uids):
-        peer_id = self.uids_to_peerids[uid][0]
-
-        if peer_id is None:
-            peer = None
-        else:
-            peer = PeerID(base58.b58decode(peer_id))
-
-        if peer is None:
-            scores[i] = 0
-
-        else:
-            try:
-                start_time = time.perf_counter()
-
-                metadata, tensors = await asyncio.wait_for(
-                    self.load_state_from_miner(peer), timeout=timeout
-                )
-                end_time = time.perf_counter()
-
-                if (metadata is None) or (tensors is None):
-                    scores[i] = 0
-                else:
-                    scores[i] = 1 - ((end_time - start_time) / timeout)
-
-                bt.logging.info(f"Reward for peer {peer} is {scores[i]}")
-
-            except Exception as e:
-                bt.logging.info(f"Failed to download state from {peer} - {repr(e)}")
-                scores[i] = 0
-                bt.logging.info(f"Reward for peer {peer} is {scores[i]}")
-
-    return scores
-
-
-def score_failed_senders(self, uids, failed_peers, participating_peers):
-    scores = torch.FloatTensor([0.0 for _ in uids]).to(self.device)
-    for i, uid in enumerate(uids):
-        peer_id = self.uids_to_peerids.get(uid)[0]
-
-        if peer_id in participating_peers:
-            if peer_id in failed_peers:
-                bt.logging.info(f"UID:{uid} - Failed participating peer")
-                scores[i] = 0.0
-            else:
-                bt.logging.info(f"UID:{uid} - Successful participating peer")
-                scores[i] = 1.0
-        else:
-            bt.logging.info(f"UID:{uid} - Non participating peer")
-            scores[i] = 0.0
-
-    return scores
 
 
 async def fetch_training_data(self, block, uid):
@@ -183,7 +109,6 @@ async def evaluate_model(
 
     # TODO remove this after testing
     for block in blocks:
-        
         dataset = await fetch_training_data(self, block, uid)
         # bt.logging.info(":pages: Fetched fineweb-edu pages")
 
@@ -201,12 +126,12 @@ async def evaluate_model(
                     # if test_flag:
                     #     breakpoint()
                     # bt.logging.info(f"Testing batch {i} for UID {uid}")
-                    
+
                     inputs, labels = inputs.to(device), labels.to(device)
-                    
+
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                         outputs = model(input_ids=inputs, labels=labels)
-                        
+
                     total_loss += outputs.loss.item()
                     n_batches_sampled += 1
                     del inputs, labels, outputs
@@ -214,15 +139,16 @@ async def evaluate_model(
 
     return total_loss, n_batches_total, n_batches_sampled
 
+
 async def score_uids(self, uids: list):
     """
     Score gradients for a group UIDs
     """
-    blocks = [(5613899*2)]
+    blocks = random.sample(range(self.current_block + 20, self.current_block * 10), 1)
     epoch = self.global_progress.epoch - 1
+    model_huggingface_id = self.config.neuron.global_model_name
     test_time = time.time()
-    
-    model_huggingface_id = "distributed/llama-1b"
+
     if self.local_progress.epoch != epoch:
         load_state_from_peer(
             self,
@@ -232,32 +158,39 @@ async def score_uids(self, uids: list):
             reload_outer_optimizer=False,
             use_fallback_model=False,
         )
-    
+
     for uid in uids:
         try:
-            # self.uid_tracker[uid]["train/loss_abs"] = 0.5
-            # self.uid_tracker[uid]["train/loss_rel"] = 0.5
-            # continue
             # Sample dataset indicces to use for testing this uid
-            bt.logging.info(f"UID: {uid}. Sampling dataset indices for testing")
+            bt.logging.info(f"UID {uid :03d}: Sampling dataset indices for testing")
             samples = random.sample([i for i in range(500)], 4)
-            
+
             # Calculate loss before applying gradient
-            bt.logging.info(f"UID: {uid}. Calculating loss before applying gradient")
-            total_loss_before, n_batches_total_before, n_batches_sampled_before = await evaluate_model(self, model = self.model, blocks = blocks, samples = samples, uid=uid)
+            bt.logging.info(
+                f"UID {uid :03d}: Calculating loss before applying gradient"
+            )
+            (
+                total_loss_before,
+                n_batches_total_before,
+                n_batches_sampled_before,
+            ) = await evaluate_model(
+                self, model=self.model, blocks=blocks, samples=samples, uid=uid
+            )
             average_loss_before = total_loss_before / n_batches_sampled_before
-            self.uid_tracker[uid]["train/loss_before"] = average_loss_before
-            bt.logging.info(f"UID {uid :03d}: Loss before: {average_loss_before}. Samples tested: {n_batches_sampled_before}/{n_batches_total_before}.")
-            
+            self.uid_tracker[uid].train.loss.before = average_loss_before
+            bt.logging.info(
+                f"UID {uid :03d}: Loss before: {average_loss_before}. Samples tested: {n_batches_sampled_before}/{n_batches_total_before}."
+            )
+
             # Apply pseudo gradient for uid
-            bt.logging.info(f"UID: {uid}. Applying pseudo gradient")
+            bt.logging.info(f"UID {uid :03d}: Applying pseudo gradient")
             model_t1 = copy.deepcopy(self.model)
-            revision = f"5.{epoch}.{get_local_inner_step(self, repo_id=self.uid_tracker[uid]['train/model_huggingface_id'], epoch = epoch)}"
-            self.uid_tracker[uid]["train/last_updated_revision"] = revision
-            
+            revision = f"5.{epoch}.{get_local_inner_step(self, repo_id=self.uid_tracker[uid].train.model_id, epoch = epoch)}"
+            self.uid_tracker[uid].train.revision = revision
+
             gradient = torch.load(
                 hf_hub_download(
-                    repo_id=self.uid_tracker[uid]['train/model_huggingface_id'],
+                    repo_id=self.uid_tracker[uid].train.model_id,
                     filename="gradients.pt",
                     revision=revision,
                 ),
@@ -265,70 +198,199 @@ async def score_uids(self, uids: list):
                 map_location="cpu",
             )
             gradient.pop("metadata")
-            bt.logging.info(f"UID {uid :03d}: Gradient loaded from {self.uid_tracker[uid]['train/model_huggingface_id']} with revision {revision}")
-            self.update_model_with_gradient(model=model_t1, eval_uid=uid, eval_state_dict=gradient)
+
+            bt.logging.info(
+                f"UID {uid :03d}: Gradient loaded from {self.uid_tracker[uid].train.model_id} with revision {revision}"
+            )
+            self.update_model_with_gradient(
+                model=model_t1, eval_uid=uid, eval_state_dict=gradient
+            )
             bt.logging.info(f"UID {uid :03d}: Model updated with current gradient")
             # self.state_averager.optimizer.step()
-            
+
             # Calculate loss after applying gradient
-            total_loss_after, n_batches_total_after, n_batches_sampled_after = await evaluate_model(self, model = model_t1, blocks = blocks, samples=samples, uid = uid, test_flag=True)
+            (
+                total_loss_after,
+                n_batches_total_after,
+                n_batches_sampled_after,
+            ) = await evaluate_model(
+                self,
+                model=model_t1,
+                blocks=blocks,
+                samples=samples,
+                uid=uid,
+                test_flag=True,
+            )
             average_loss_after = total_loss_after / n_batches_sampled_after
-            self.uid_tracker[uid]["train/loss_after"] = average_loss_after
-            bt.logging.info(f"UID {uid :03d}: Loss after: {average_loss_after}. Samples tested: {n_batches_sampled_after}/{n_batches_total_after}.")
-            
+            self.uid_tracker[uid].train.loss.after = average_loss_after
+            bt.logging.info(
+                f"UID {uid :03d}: Loss after: {average_loss_after}. Samples tested: {n_batches_sampled_after}/{n_batches_total_after}."
+            )
+
             # Calculate absolute and relative loss improvement
+            self.uid_tracker[uid].train.loss.absolute = (
+                self.uid_tracker[uid].train.loss.before
+                - self.uid_tracker[uid].train.loss.after
+            )
             if average_loss_before == 0:
                 # Avoid division by zero
-                self.uid_tracker[uid]["train/loss_abs"] = 0
-                self.uid_tracker[uid]["train/loss_rel"] = 0
+                self.uid_tracker[uid].train.loss.relative = 0
+                self.uid_tracker[uid].train.loss.relative = 0
             else:
-                self.uid_tracker[uid]["train/loss_abs"] = self.uid_tracker[uid]["train/loss_before"] - self.uid_tracker[uid]["train/loss_after"]
-                self.uid_tracker[uid]["train/loss_rel"] = (self.uid_tracker[uid]["train/loss_before"] - self.uid_tracker[uid]["train/loss_after"])/self.uid_tracker[uid]["train/loss_before"]
-            
-            bt.logging.info(f"UID {uid :03d}: Absolute loss improvement: {self.uid_tracker[uid]['train/loss_abs']}")
-            bt.logging.info(f"UID {uid :03d}: Relative loss improvement: {self.uid_tracker[uid]['train/loss_rel']}")
-            
+                self.uid_tracker[uid].train.loss.relative = (
+                    self.uid_tracker[uid].train.loss.before
+                    - self.uid_tracker[uid].train.loss.after
+                )
+                self.uid_tracker[uid].train.loss.relative = (
+                    self.uid_tracker[uid].train.loss.before
+                    - self.uid_tracker[uid].train.loss.after
+                ) / self.uid_tracker[uid].train.loss.before
+
+            bt.logging.info(
+                f"UID {uid :03d}: Absolute loss improvement: {self.uid_tracker[uid].train.loss.absolute}"
+            )
+            bt.logging.info(
+                f"UID {uid :03d}: Relative loss improvement: {self.uid_tracker[uid].train.loss.relative}"
+            )
+
         except Exception as e:
             bt.logging.info(f"UID {uid :03d}: Error caclualting loss score: {e}")
 
         finally:
             # TODO: check gradient file cache
-            self.uid_tracker[uid]["train/last_updated_time"] = test_time
+            self.uid_tracker[uid].train.updated_time = test_time
 
-    # # Delete temporary variables to free memory
-    # del gradient
-    # del model_t1
-    # del total_loss_before, n_batches_total_before, n_batches_sampled_before
-    # del total_loss_after, n_batches_total_after, n_batches_sampled_after
-    # torch.cuda.empty_cache()
+    # Delete temporary variables to free memory
+    del gradient
+    del model_t1
+    del total_loss_before, n_batches_total_before, n_batches_sampled_before
+    del total_loss_after, n_batches_total_after, n_batches_sampled_after
+    torch.cuda.empty_cache()
 
-def update_individual_scores(self, uid, target_blocks):
-    uid_data = self.uid_tracker[uid]
-
-    if uid_data.get("train_duration", 0) != 0:
-        uid_data["train_score"] = (
-            uid_data["train_similarity_score"]
-            * min(uid_data["train_number_of_blocks"], target_blocks)
-        ) / uid_data["train_duration"]
-    else:
-        uid_data["train_score"] = 0.0
+    # Remove gradients from cache
+    cleanup_old_cache(self)
 
 
-def score_models(model_1, model_2):
-    """Calculate the cosine similarity score between two model states"""
-    score = 0
-    index = 0
-
-    for param_1, param_2 in zip(model_1.parameters(), model_2.parameters()):
-        score += (
-            F.cosine_similarity(param_1.to("cpu"), param_2.to("cpu"), dim=0)
-            .mean()
-            .item()
+def display_rankings(self, uids: list, original_ordinals: dict):
+    # Create a ranking table to display current match rankings
+    try:
+        # Sort UIDs by current window gradient scores (descending)
+        sorted_uids = sorted(
+            uids,
+            key=lambda uid: self.uid_tracker[uid].train.loss.relative,
+            reverse=True,
         )
-        index += 1
 
-    average_score = score / index
-    return average_score
+        try:
+            width = os.get_terminal_size().columns
+        except Exception:
+            width = 0
+        os.environ["COLUMNS"] = str(max(200, width))
+
+        rich_table = Table(title=f"Current Match Rankings (Block {self.current_block})")
+        rich_table.add_column("Match Rank")
+        rich_table.add_column("UID")
+        rich_table.add_column("Match Score")
+        rich_table.add_column("OpenSkill μ (After)")
+        rich_table.add_column("OpenSkill σ (After)")
+        rich_table.add_column("Ordinal (After)")
+        rich_table.add_column("Ordinal Δ")
+
+        # Add rows to table
+        for rank, uid in enumerate(sorted_uids, 1):
+            rating = self.openskill_ratings[uid]
+            ordinal_before = original_ordinals[uid]
+            ordinal_after = rating.ordinal()
+            ordinal_diff = ordinal_after - ordinal_before
+
+            # Format the diff with color indicators
+            diff_str = f"{ordinal_diff:+.4f}"
+
+            rich_table.add_row(
+                str(rank),
+                str(uid),
+                f"{self.uid_tracker[uid].train.loss.relative:.6f}",  # instead of self.current_window_scores[uid]
+                f"{rating.mu:.4f}",
+                f"{rating.sigma:.4f}",
+                f"{ordinal_after:.4f}",
+                diff_str,
+            )
+
+        # Render table to string
+        sio = StringIO()
+        console = Console(file=sio, width=int(os.environ["COLUMNS"]))
+        console.print(rich_table)
+        table_str = sio.getvalue()
+
+        bt.logging.info(
+            f"Current Match Rankings (Block {self.current_block}):\n{table_str}"
+        )
+    except Exception as e:
+        bt.logging.info(f"Failed to create OpenSkill rankings table: {str(e)}")
+
+
+def update_openskill_ratings(self, uids: list):
+    """
+    Update OpenSkill ratings based on gradient scores and recalculate final scores.
+
+    This method:
+    1. Processes all peers evaluated in the current window
+    2. Updates their OpenSkill ratings based on gradient performance
+    3. Recalculates final scores using OpenSkill mu value combined with binary and sync scores
+    4. Logs the updated ratings to monitoring systems
+
+    The OpenSkill rating system provides a probabilistic skill rating that accounts for
+    uncertainty and relative performance between peers. Ratings are updated using the
+    PlackettLuce model where higher gradient scores indicate better performance.
+
+    The final score calculation combines:
+    - OpenSkill mu (mean skill estimate)
+    - Binary moving average (filtered to non-negative values)
+    - Sync score (model synchronization quality)
+    """
+    # Store original ordinal values to calculate diff after update
+    original_ordinals = {}
+    for uid in uids:
+        if uid in self.openskill_ratings:
+            original_ordinals[uid] = float(self.openskill_ratings[uid].ordinal())
+        else:
+            # For new peers without previous ratings
+            original_ordinals[uid] = 0.0
+
+    # Calculate ranks based on gradient scores (lower rank = better performance)
+    # In OpenSkill, ranks start at 1 (best) and increase for worse performers
+    scores = [self.uid_tracker[uid].train.loss.relative for uid in uids]
+
+    # Create teams list for OpenSkill
+    teams = [[self.openskill_ratings[uid]] for uid in uids]
+
+    # Rate the teams using scores (higher score is better in OpenSkill)
+    rated_teams = self.openskill_model.rate(teams, scores=scores)
+
+    # Store updated ratings
+    for i, uid in enumerate(uids):
+        # bt.logging.info(f"Before: {self.openskill_ratings[uid]}")
+        self.openskill_ratings[uid] = rated_teams[i][0]
+        # bt.logging.info(f"After: {self.openskill_ratings[uid]}")
+
+        # Log updated OpenSkill values
+        openskill_mu = float(self.openskill_ratings[uid].mu)
+        openskill_sigma = float(self.openskill_ratings[uid].sigma)
+        openskill_ordinal = float(self.openskill_ratings[uid].ordinal())
+
+        self.uid_tracker[uid].train.score = openskill_ordinal
+        self.uid_tracker[uid].train.openskill_rating.mu = openskill_mu
+        self.uid_tracker[uid].train.openskill_rating.sigma = openskill_sigma
+
+        bt.logging.info(
+            f"Train Score for UID {uid}: {self.uid_tracker[uid].train.score}",
+        )
+
+    display_rankings(self, uids, original_ordinals)
+
+    bt.logging.info(
+        f"Updated OpenSkill ratings for {len(uids)} UIDs based on gradient scores",
+    )
 
 
 def score_repo(self, repo_id: str) -> bool:
@@ -360,18 +422,18 @@ def score_repo(self, repo_id: str) -> bool:
 def benchmark_uids(self):
     for uid in self.uid_tracker:
         try:
-            self.uid_tracker[uid]["train/repo_valid_score"] = score_repo(
-                self, self.uid_tracker[uid]["train/model_huggingface_id"]
+            self.uid_tracker[uid].train.is_valid = score_repo(
+                self, self.uid_tracker[uid].train.model_id
             )
         except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
             # bt.logging.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
-            self.uid_tracker[uid]["train/repo_valid_score"] = False
+            self.uid_tracker[uid].train.is_valid = False
         except Exception as e:
             bt.logging.info(
                 f"UID {uid} benchmarking failed with error {e}. Keeping score as is."
             )
     bt.logging.info(
-        {uid: self.uid_tracker[uid]["train/repo_valid_score"] for uid in self.uid_tracker}
+        {uid: self.uid_tracker[uid].train.is_valid for uid in self.uid_tracker}
     )
 
 
@@ -385,9 +447,9 @@ def update_all_reduce_scores(self):
                     score = 1
                 else:
                     score = 0
-                if self.uid_tracker[int(uid)]["all_reduce_score"] != score:
-                    self.uid_tracker[int(uid)]["all_reduce_count"] += 1
-                self.uid_tracker[int(uid)]["all_reduce_score"] = score
+                if self.uid_tracker[int(uid)].all_reduce.score != score:
+                    self.uid_tracker[int(uid)].all_reduce.count += 1
+                self.uid_tracker[int(uid)].all_reduce.score = score
     except Exception as e:
         bt.logging.info(f"Error {e} updating all_reduce scores")
 
@@ -400,14 +462,12 @@ def update_total_scores(self):
     self.uid_tracker = dict(sorted(self.uid_tracker.items()))
 
     # Normalise each type of reward
-    train_scores = [
-        self.uid_tracker[uid].get("train_score", 0.0) for uid in self.uid_tracker
-    ]
+    train_scores = [self.uid_tracker[uid].train.score for uid in self.uid_tracker]
     all_reduce_scores = [
-        self.uid_tracker[uid].get("all_reduce_score", 0.0) for uid in self.uid_tracker
+        self.uid_tracker[uid].all_reduce.score for uid in self.uid_tracker
     ]
     repo_valid_scores = [
-        self.uid_tracker[uid].get("train/repo_valid_score", 0.0) for uid in self.uid_tracker
+        self.uid_tracker[uid].train.is_valid for uid in self.uid_tracker
     ]
 
     train_scores_normalised = (
@@ -438,27 +498,19 @@ def update_total_scores(self):
     # Otherwise score using weighted train_score and all_reduce_score
     for uid_key in self.uid_tracker:
         uid_data = self.uid_tracker[uid_key]
-        train_score = uid_data.get("train_score", 0.0)
-        all_reduce_score = uid_data.get("all_reduce_score", 0.0)
-        repo_valid_score = uid_data.get("repo_valid_score", 0.0)
+        train_score = uid_data.train.score
+        all_reduce_score = uid_data.all_reduce.score
+        repo_valid_score = uid_data.train.is_valid
 
-        if (uid_data["train_validation_count"] == 0) and (
-            uid_data["all_reduce_count"] == 0
-        ):
-            normalized_repo_valid_score = (
-                repo_valid_score / repo_valid_scores_normalised
-            )
-            uid_data["total_score"] = normalized_repo_valid_score
-        else:
-            normalized_train_score = (
-                TRAIN_SCORE_WEIGHT * train_score
-            ) / train_scores_normalised
-            normalized_all_reduce_score = (
-                ALL_REDUCE_SCORE_WEIGHT * all_reduce_score
-            ) / all_reduce_scores_normalised
-            uid_data["total_score"] = (
-                normalized_train_score + normalized_all_reduce_score
-            ) * repo_valid_score
+        normalized_train_score = (
+            TRAIN_SCORE_WEIGHT * train_score
+        ) / train_scores_normalised
+        normalized_all_reduce_score = (
+            ALL_REDUCE_SCORE_WEIGHT * all_reduce_score
+        ) / all_reduce_scores_normalised
+        uid_data.total.score = (
+            normalized_train_score + normalized_all_reduce_score
+        ) * repo_valid_score
 
     # Add metrics reporting
     self.report_train_scores()

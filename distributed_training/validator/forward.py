@@ -45,6 +45,7 @@ from distributed_training.validator.reward import (
     benchmark_uids,
     score_uids,
     update_total_scores,
+    update_openskill_ratings,
 )
 
 
@@ -72,11 +73,13 @@ async def forward(self):
     responses = [[]]
     rewards = torch.tensor([])
 
+    self.should_all_reduce = False
     if self.should_all_reduce:
         self.event.update({"synapse_type": "all_reduce"})
 
         self.peerids_to_uids = {
-            str(value["peer_id"]): key for key, value in self.uid_tracker.items()
+            str(value.all_reduce.peer_id): key
+            for key, value in self.uid_tracker.items()
         }
         if self.uid == self.master_uid:
             # Master validator coordinates AllReduce and queries miners
@@ -104,19 +107,20 @@ async def forward(self):
             self.last_allreduce_block = self.block
             return responses
 
-        self.miner_uids.sort()
-        miner_uid_dict = {
-            uid: self.uid_tracker[uid]["train_duration"]
-            if self.uid_tracker[uid]["train_duration"] != 0
-            else 1000
-            for uid in self.miner_uids
-        }
-        alive_uids = {
-            k: v for k, v in sorted(miner_uid_dict.items(), key=lambda item: item[1])
-        }.keys()
-        self.miner_uids = np.array(
-            [n.item() for n in alive_uids][: self.config.neuron.min_group_size + 10]
-        )
+        # self.miner_uids.sort()
+        # miner_uid_dict = {
+        #     uid: self.uid_tracker[uid]["train_duration"]
+        #     if self.uid_tracker[uid]["train_duration"] != 0
+        #     else 1000
+        #     for uid in self.miner_uids
+        # }
+        # alive_uids = {
+        #     k: v for k, v in sorted(miner_uid_dict.items(), key=lambda item: self.metagraph.incentive[item])
+        # }.keys()
+        # self.miner_uids = np.array(
+        #     [n.item() for n in alive_uids][: self.config.neuron.min_group_size + 10]
+        # )
+        alive_uids = self.miner_uids
         self.event.update({"UIDs": self.miner_uids})
         bt.logging.info(f"UIDs:  {self.miner_uids}")
 
@@ -124,24 +128,24 @@ async def forward(self):
             top_uid = get_top_uid(self)
             self.local_progress.epoch = self.global_progress.epoch
             self.local_progress.inner_step = get_local_inner_step(
-                self, repo_id=self.uid_tracker[int(top_uid)]["model_huggingface_id"]
+                self, repo_id=self.uid_tracker[int(top_uid)].train.model_id
             )
             top_uid_revision = f"{__run__}.{self.local_progress.epoch}.{self.local_progress.inner_step}"
             load_state_from_peer(
                 self,
-                repo_id=self.uid_tracker[int(top_uid)]["model_huggingface_id"],
+                repo_id=self.uid_tracker[int(top_uid)].train.model_id,
                 revision=top_uid_revision,
             )
             if self.scheduler.__dict__["_step_count"] == 0:
                 top_uid = 22
                 self.local_progress.epoch = self.global_progress.epoch
                 self.local_progress.inner_step = get_local_inner_step(
-                    self, repo_id=self.uid_tracker[int(top_uid)]["model_huggingface_id"]
+                    self, repo_id=self.uid_tracker[int(top_uid)].train.model_id
                 )
                 top_uid_revision = f"{__run__}.{self.local_progress.epoch}.{self.local_progress.inner_step}"
                 load_state_from_peer(
                     self,
-                    repo_id=self.uid_tracker[int(top_uid)]["model_huggingface_id"],
+                    repo_id=self.uid_tracker[int(top_uid)].train.model_id,
                     revision=top_uid_revision,
                 )
             (
@@ -240,9 +244,10 @@ async def forward(self):
         # self.miner_uids = get_next_uid_api(
         #     self,
         # )
+
         # Benchmark any untested uids
         benchmark_uids(self)
-        
+
         self.miner_uids = get_next_uids_manual(self, k=25)
 
         # Early return if no active miners found
@@ -254,20 +259,18 @@ async def forward(self):
         bt.logging.info(f"UIDs:  {self.miner_uids}")
 
         uid = self.miner_uids[0]
-        # uids = [i for i in range(self.metagraph.n)]
-        # uids = [137]
-        
-        self.gradient_scores = {}
-        
-        await score_uids(self, self.miner_uids)
-        
-        self.update_openskill_ratings(self.miner_uids)
 
+        await score_uids(self, self.miner_uids)
+
+        # Update total.scores for each UID
+        update_openskill_ratings(self, self.miner_uids)
+
+        # Update total.scores for each UID
+        update_total_scores(self)
+
+        # Post
         if self.uid == self.master_uid:
             post_next_uid_api(self)
-
-        # Update total_scores
-        # update_total_scores(self)
 
     self.event.update(
         {
@@ -281,7 +284,10 @@ async def forward(self):
         }
     )
     self.event.update(
-        {"uid_" + str(key): value for key, value in self.uid_tracker.items()}
+        {
+            "uid_" + str(key): self.uid_tracker[key].model_dump()
+            for key in self.uid_tracker.keys()
+        }
     )
 
     # Update scores

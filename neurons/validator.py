@@ -26,15 +26,14 @@ import numpy as np
 import random
 import torch
 
-
 torch.manual_seed(42)
 torch.cuda.manual_seed_all(42)
 random.seed(42)
 np.random.seed(42)
 
 torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = True
-# torch.use_deterministic_algorithms(False)
+torch.backends.cudnn.benchmark = False
+# torch.use_deterministic_algorithms(True)
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
@@ -45,7 +44,6 @@ import threading
 import bittensor as bt
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
-from io import StringIO
 from transformers import AutoTokenizer
 
 from distributed_training.base.validator import BaseValidatorNeuron
@@ -62,7 +60,6 @@ from distributed_training.utils.progress_tracker import (
 )
 from random import randrange
 from distributed_training.utils.state_loader import (
-    FastModelLoader,
     cleanup_old_cache,
     load_model_optimizer_gradient_averager,
     load_state_from_peer,
@@ -71,11 +68,10 @@ from distributed_training.utils.uids import map_uid_to_peerid, update_run_peerid
 from distributed_training.validator import forward
 
 from openskill.models import PlackettLuce
-from rich.console import Console
-from rich.table import Table
 
 from distributed_training.utils.compression import CompressDCT, TransformDCT
 from typing import Any
+
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
@@ -85,7 +81,7 @@ class Validator(BaseValidatorNeuron):
         self._init_model_components()
         self._init_network_components()
         self._init_uid_components()
-        self._randomly_reset_uid_tracker()
+        # self._randomly_reset_uid_tracker()
         self._load_gradient_compressors()
 
     def _update_wandb_project(self):
@@ -138,20 +134,11 @@ class Validator(BaseValidatorNeuron):
                     Point("miner_scores")
                     .tag("validator_uid", str(self.uid))
                     .tag("miner_uid", str(uid))
-                    .field("train_score", float(data["train_score"] or 0))
-                    .field("all_reduce_score", float(data["all_reduce_score"] or 0))
-                    .field("repo_valid_score", float(data["repo_valid_score"] or 0))
-                    .field("total_score", float(data["total_score"] or 0))
+                    .field("train_score", data.train.score)
+                    .field("all_reduce_score", data.all_reduce.score)
+                    .field("repo_valid_score", data.train.is_valid)
+                    .field("total_score", data.total.score)
                 )
-                # point = (
-                #     Point("miner_scores")
-                #     .tag("validator_uid", str(self.uid))
-                #     .tag("miner_uid", str(uid))
-                #     .field("train.score", float(data["train/score"] or 0))
-                #     .field("all_reduce.score", float(data["all_reduce/score"] or 0))
-                #     .field("train.repo_valid", float(data["train/repo_valid"] or 0))
-                #     .field("total.score", float(data["total/score"] or 0))
-                # )
                 points.append(point)
 
                 if "loss" in data:
@@ -162,13 +149,13 @@ class Validator(BaseValidatorNeuron):
                         .field("loss", float(data["loss"] or 0))
                     )
                     points.append(point)
-                    
+
                 if uid in self.openskill_ratings:
                     point = (
                         Point("openskill_scores")
                         .tag("validator_uid", str(self.uid))
                         .tag("miner_uid", str(uid))
-                        .field("mu",float(self.openskill_ratings[uid].mu))
+                        .field("mu", float(self.openskill_ratings[uid].mu))
                         .field("sigma", float(self.openskill_ratings[uid].sigma))
                         .field("ordinal", float(self.openskill_ratings[uid].ordinal()))
                     )
@@ -290,7 +277,6 @@ class Validator(BaseValidatorNeuron):
     def _setup_model_state(self):
         self.learning_rate = self.get_learning_rate()
         self.average_loss = None
-        self.loader = FastModelLoader(self.config.neuron.hf_repo_id)
 
         load_model_optimizer_gradient_averager(
             self, self.config.neuron.global_model_name, self.global_progress.epoch
@@ -331,10 +317,10 @@ class Validator(BaseValidatorNeuron):
         self.failed_is_alive_counter = {uid: 0 for uid in self.metagraph.uids.tolist()}
         self.miner_uids = []
 
-    def _randomly_reset_uid_tracker(self):
-        if self.uid == self.master_uid:
-            self.uid_tracker[randrange(256)]["train_similarity_score_last_updated"] = 0
-        self.uid_tracker[229]["train_similarity_score_last_updated"] = -10
+    # def _randomly_reset_uid_tracker(self):
+    #     if self.uid == self.master_uid:
+    #         self.uid_tracker[randrange(256)]["train_similarity_score_last_updated"] = 0
+    #     self.uid_tracker[229]["train_similarity_score_last_updated"] = -10
 
     def _init_open_skill_model(self):
         self.config.openskill_beta = 7
@@ -434,7 +420,7 @@ class Validator(BaseValidatorNeuron):
 
     async def forward(self):
         return await forward(self)
-    
+
     def check_compressed_indices(
         self,
         param_name: str,
@@ -442,7 +428,6 @@ class Validator(BaseValidatorNeuron):
         totalk: int,
         allowed_topk: int | None = None,
     ) -> None:
-
         allowed_topk = (
             min(self.config.neuron.topk_compression, totalk)
             if allowed_topk is None
@@ -605,152 +590,6 @@ class Validator(BaseValidatorNeuron):
                     alpha=self.state_averager.optimizer.param_groups[0]["lr"]
                     * self.eval_lr_factor,
                 )
-
-    def update_openskill_ratings(self, uids: list):
-        """
-        Update OpenSkill ratings based on gradient scores and recalculate final scores.
-
-        This method:
-        1. Processes all peers evaluated in the current window
-        2. Updates their OpenSkill ratings based on gradient performance
-        3. Recalculates final scores using OpenSkill mu value combined with binary and sync scores
-        4. Logs the updated ratings to monitoring systems
-
-        The OpenSkill rating system provides a probabilistic skill rating that accounts for
-        uncertainty and relative performance between peers. Ratings are updated using the
-        PlackettLuce model where higher gradient scores indicate better performance.
-
-        The final score calculation combines:
-        - OpenSkill mu (mean skill estimate)
-        - Binary moving average (filtered to non-negative values)
-        - Sync score (model synchronization quality)
-        """
-        # if (
-        #     hasattr(self, "current_window_scores")
-        #     and len(self.current_window_scores) > 1
-        # ):
-        if True:
-            # Get UIDs and scores
-            window_uids = uids
-
-            # Store original ordinal values to calculate diff after update
-            original_ordinals = {}
-            for uid in window_uids:
-                if uid in self.openskill_ratings:
-                    original_ordinals[uid] = float(
-                        self.openskill_ratings[uid].ordinal()
-                    )
-                else:
-                    # For new peers without previous ratings
-                    original_ordinals[uid] = 0.0
-
-            # Calculate ranks based on gradient scores (lower rank = better performance)
-            # In OpenSkill, ranks start at 1 (best) and increase for worse performers
-            scores = [self.uid_tracker[uid]["train/loss_rel"] for uid in window_uids]
-
-            # Create teams list for OpenSkill
-            teams = [[self.openskill_ratings[uid]] for uid in window_uids]
-
-            # Rate the teams using scores (higher score is better in OpenSkill)
-            rated_teams = self.openskill_model.rate(teams, scores=scores)
-
-            # Store updated ratings
-            for i, uid in enumerate(window_uids):
-                self.openskill_ratings[uid] = rated_teams[i][0]
-
-                # Log updated OpenSkill values
-                openskill_mu = float(self.openskill_ratings[uid].mu)
-                openskill_sigma = float(self.openskill_ratings[uid].sigma)
-                openskill_ordinal = float(self.openskill_ratings[uid].ordinal())
-
-                # sync_score = float(
-                #     self.sync_scores[uid].item() if uid in self.evaluated_uids else 0.0
-                # )
-
-                # self.final_scores[uid] = (
-                #     openskill_ordinal
-                #     # * max(0, self.binary_moving_averages[uid].item())
-                #     # * sync_score
-                # )
-                self.uid_tracker[uid]["train/score"] = openskill_ordinal
-                bt.logging.info(
-                    f"Computed Final Score for UID {uid}: {self.uid_tracker[uid]['train/score']}",
-                )
-
-                # # Log to WandB
-                # self.wandb.log(
-                #     {
-                #         f"validator/openskill/mu/{uid}": openskill_mu,
-                #         f"validator/openskill/sigma/{uid}": openskill_sigma,
-                #         f"validator/openskill/ordinal/{uid}": openskill_ordinal,
-                #     },
-                #     step=self.global_step,
-                # )
-
-            # Create a ranking table to display current match rankings
-            try:
-                # Sort UIDs by current window gradient scores (descending)
-                sorted_uids = sorted(
-                    uids,
-                    key=lambda uid: self.uid_tracker[uid]["train/loss_rel"],
-                    reverse=True,
-                )
-
-                try:
-                    width = os.get_terminal_size().columns
-                except Exception:
-                    width = 0
-                os.environ["COLUMNS"] = str(max(200, width))
-
-                rich_table = Table(
-                    title=f"Current Match Rankings (Block {self.current_block})"
-                )
-                rich_table.add_column("Match Rank")
-                rich_table.add_column("UID")
-                rich_table.add_column("Match Score")
-                rich_table.add_column("OpenSkill μ (After)")
-                rich_table.add_column("OpenSkill σ (After)")
-                rich_table.add_column("Ordinal (After)")
-                rich_table.add_column("Ordinal Δ")
-
-                # Add rows to table
-                for rank, uid in enumerate(sorted_uids, 1):
-                    rating = self.openskill_ratings[uid]
-                    ordinal_before = original_ordinals[uid]
-                    ordinal_after = rating.ordinal()
-                    ordinal_diff = ordinal_after - ordinal_before
-
-                    # Format the diff with color indicators
-                    diff_str = f"{ordinal_diff:+.4f}"
-
-                    rich_table.add_row(
-                        str(rank),
-                        str(uid),
-                        f"{self.uid_tracker[uid]['train/loss_rel']:.6f}", # instead of self.current_window_scores[uid]
-                        f"{rating.mu:.4f}",
-                        f"{rating.sigma:.4f}",
-                        f"{ordinal_after:.4f}",
-                        diff_str,
-                    )
-
-                # Render table to string
-                sio = StringIO()
-                console = Console(file=sio, width=int(os.environ["COLUMNS"]))
-                console.print(rich_table)
-                table_str = sio.getvalue()
-
-                bt.logging.info(
-                    f"Current Match Rankings (Block {self.current_block}):\n{table_str}"
-                )
-            except Exception as e:
-                bt.logging.info(f"Failed to create OpenSkill rankings table: {str(e)}")
-
-            bt.logging.info(
-                f"Updated OpenSkill ratings for {len(window_uids)} peers based on gradient scores",
-            )
-
-            # Clear the current window scores
-            # self.current_window_scores = {}
 
 
 # The main function parses the configuration and runs the validator.

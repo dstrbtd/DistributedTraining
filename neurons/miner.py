@@ -61,7 +61,6 @@ from distributed_training.utils.progress_tracker import (
     get_local_inner_step,
 )
 from distributed_training.utils.state_loader import (
-    FastModelLoader,
     cleanup_old_cache,
     load_model_optimizer_gradient_averager,
     load_state_from_peer,
@@ -353,9 +352,6 @@ class Miner(BaseMinerNeuron):
         self.model_upload_retry_delay = 6
 
     def _load_model(self):
-        # Initialize loader
-        self.loader = FastModelLoader(self.config.neuron.local_model_name)
-
         # Load model and components
         load_model_optimizer_gradient_averager(
             self, self.config.neuron.local_model_name, self.local_progress.epoch
