@@ -384,7 +384,9 @@ class DatasetLoader(SubsetLoader):
                     bt.logging.info(
                         f"Retrying page {page} due to error: {e}. Attempt {attempt} of {retry_limit}"
                     )
-                    bt.logging.info(f"Waiting {self.retry_delay * attempt} seconds before retrying...")
+                    bt.logging.info(
+                        f"Waiting {self.retry_delay * attempt} seconds before retrying..."
+                    )
                     await asyncio.sleep(
                         self.retry_delay * attempt
                     )  # Wait before retrying

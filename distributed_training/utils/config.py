@@ -256,7 +256,7 @@ def add_args(cls, parser, prefix=None):
         "--neuron.influxdb_token",
         type=str,
         help="The influxdb token",
-        default="a62bc7211beca367fcdd0b5a16b82b0f565447b6f7212d3de9c615068b787383",
+        default="JCDOYKFbiC13zdgbTQROpyvB69oaUWvO4pRw_c3AEYhTjU998E_X_oIJJOVAW24nAE0WYxMwIgdFSLZg8aeV-g==",
     )
 
     parser.add_argument(

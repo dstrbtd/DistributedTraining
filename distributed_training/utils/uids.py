@@ -150,7 +150,7 @@ def get_next_uids_manual(self, k: int = 25) -> List[int]:
             )
         )
         bt.logging.info({k: v.train.updated_time for k, v in self.uid_tracker.items()})
-        uids = self.uid_tracker.keys()
+        uids = list(self.uid_tracker.keys())
         uids = uids[:k]
         return uids
 
