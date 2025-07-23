@@ -14,6 +14,26 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
+
+# Set seed and enable deterministic settings to ensure reproducibility
+import os
+import numpy as np
+import random
+import torch
+
+os.environ["NEST_ASYNCIO"] = "0"
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+random.seed(42)
+np.random.seed(42)
+
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+# torch.use_deterministic_algorithms(True)
+
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
 import asyncio
 import gc
 import os
@@ -21,9 +41,8 @@ import random
 import subprocess
 import time
 import typing
-
-os.environ["NEST_ASYNCIO"] = "0"
 import threading
+
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 
@@ -66,25 +85,6 @@ from distributed_training.utils.state_loader import (
     load_state_from_peer,
 )
 from distributed_training.utils.compression import TransformDCT, CompressDCT
-
-
-# Set seed and enable deterministic settings to ensure reproducibility
-# import numpy as np
-# import random
-# import torch
-
-
-# torch.manual_seed(42)
-# torch.cuda.manual_seed_all(42)
-# random.seed(42)
-# np.random.seed(42)
-
-# torch.backends.cudnn.deterministic = True
-# torch.backends.cudnn.benchmark = False
-# torch.use_deterministic_algorithms(True)
-
-# torch.backends.cuda.matmul.allow_tf32 = False
-# torch.backends.cudnn.allow_tf32 = False
 
 
 class Miner(BaseMinerNeuron):
