@@ -66,6 +66,7 @@ from distributed_training.utils.state_loader import (
 )
 from distributed_training.utils.uids import map_uid_to_peerid, update_run_peerid_list
 from distributed_training.validator import forward
+from distributed_training import __run__
 
 from openskill.models import PlackettLuce
 
@@ -81,7 +82,6 @@ class Validator(BaseValidatorNeuron):
         self._init_model_components()
         self._init_network_components()
         self._init_uid_components()
-        # self._randomly_reset_uid_tracker()
         self._load_gradient_compressors()
 
     def _update_wandb_project(self):
@@ -134,6 +134,8 @@ class Validator(BaseValidatorNeuron):
                     Point("miner_scores")
                     .tag("validator_uid", str(self.uid))
                     .tag("miner_uid", str(uid))
+                    .tag("hotkey", self.wallet.hotkey.ss58_address)
+                    .tag("run_id", __run__)
                     .field("train_score", data.train.score)
                     .field("all_reduce_score", data.all_reduce.score)
                     .field("repo_valid_score", data.train.is_valid)
@@ -146,6 +148,8 @@ class Validator(BaseValidatorNeuron):
                         Point("miner_loss")
                         .tag("validator_uid", str(self.uid))
                         .tag("miner_uid", str(uid))
+                        .tag("hotkey", self.wallet.hotkey.ss58_address)
+                        .tag("run_id", __run__)
                         .field("loss", float(data["loss"] or 0))
                     )
                     points.append(point)
@@ -155,6 +159,8 @@ class Validator(BaseValidatorNeuron):
                         Point("openskill_scores")
                         .tag("validator_uid", str(self.uid))
                         .tag("miner_uid", str(uid))
+                        .tag("hotkey", self.wallet.hotkey.ss58_address)
+                        .tag("run_id", __run__)
                         .field("mu", float(self.openskill_ratings[uid].mu))
                         .field("sigma", float(self.openskill_ratings[uid].sigma))
                         .field("ordinal", float(self.openskill_ratings[uid].ordinal()))
@@ -317,16 +323,9 @@ class Validator(BaseValidatorNeuron):
         self.failed_is_alive_counter = {uid: 0 for uid in self.metagraph.uids.tolist()}
         self.miner_uids = []
 
-    # def _randomly_reset_uid_tracker(self):
-    #     if self.uid == self.master_uid:
-    #         self.uid_tracker[randrange(256)]["train_similarity_score_last_updated"] = 0
-    #     self.uid_tracker[229]["train_similarity_score_last_updated"] = -10
-
     def _init_open_skill_model(self):
-        self.config.openskill_beta = 7
-        self.config.openskill_tau = 0.1
         self.openskill_model = PlackettLuce(
-            beta=self.config.openskill_beta, tau=self.config.openskill_tau
+            beta=self.config.neuron.openskill_beta, tau=self.config.neuron.openskill_tau
         )
         self.openskill_ratings = {}
         self.openskill_ratings = {
@@ -516,13 +515,9 @@ class Validator(BaseValidatorNeuron):
 
                 # Validate indices are within bounds
                 if self.totalks.get(n) is None:
-                    # tplr.log_with_context(
-                    #     level="warning",
-                    #     message=f"Missing totalk for parameter {n}, skipping peer {eval_uid}",
-                    #     sync_window=self.sync_window,
-                    #     current_window=self.current_window,
-                    #     eval_uid=eval_uid,
-                    # )
+                    bt.logging.info(
+                        f"Missing totalk for parameter {n}, skipping peer {eval_uid}"
+                    )
                     raise ValueError(
                         f"Invalid gradient data from peer {eval_uid}: Missing totalk for parameter {n}"
                     )
@@ -537,13 +532,9 @@ class Validator(BaseValidatorNeuron):
 
                 # Check for NaN or Inf values
                 if torch.isnan(vals).any() or torch.isinf(vals).any():
-                    # tplr.log_with_context(
-                    #     level="warning",
-                    #     message=f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {eval_uid}",
-                    #     sync_window=self.sync_window,
-                    #     current_window=self.current_window,
-                    #     eval_uid=eval_uid,
-                    # )
+                    bt.logging.info(
+                        f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {eval_uid}"
+                    )
                     raise ValueError(
                         f"Invalid gradient data from peer {eval_uid}: NaN or Inf values in {vals_key}"
                     )
@@ -575,13 +566,9 @@ class Validator(BaseValidatorNeuron):
 
                 # Final safety check on the gradient itself
                 if torch.isnan(grad).any() or torch.isinf(grad).any():
-                    # tplr.log_with_context(
-                    #     level="warning",
-                    #     message=f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}",
-                    #     sync_window=self.sync_window,
-                    #     current_window=self.current_window,
-                    #     eval_uid=eval_uid,
-                    # )
+                    bt.logging.info(
+                        f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}"
+                    )
                     raise ValueError(
                         f"Invalid gradient from peer {eval_uid}: NaN or Inf in decompressed gradient for {n}"
                     )

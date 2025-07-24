@@ -200,7 +200,7 @@ async def score_uids(self, uids: list):
             gradient.pop("metadata")
 
             bt.logging.info(
-                f"UID {uid :03d}: Gradient loaded from {self.uid_tracker[uid].train.model_id} with revision {revision}"
+                f"UID {uid :03d}: Gradient loaded from {self.uid_tracker[uid].train.model_id} with revision {self.uid_tracker[uid].train.revision }"
             )
             self.update_model_with_gradient(
                 model=model_t1, eval_uid=uid, eval_state_dict=gradient
@@ -369,18 +369,16 @@ def update_openskill_ratings(self, uids: list):
 
     # Store updated ratings
     for i, uid in enumerate(uids):
-        # bt.logging.info(f"Before: {self.openskill_ratings[uid]}")
         self.openskill_ratings[uid] = rated_teams[i][0]
-        # bt.logging.info(f"After: {self.openskill_ratings[uid]}")
 
         # Log updated OpenSkill values
-        openskill_mu = float(self.openskill_ratings[uid].mu)
-        openskill_sigma = float(self.openskill_ratings[uid].sigma)
-        openskill_ordinal = float(self.openskill_ratings[uid].ordinal())
-
-        self.uid_tracker[uid].train.score = openskill_ordinal
-        self.uid_tracker[uid].train.openskill_rating.mu = openskill_mu
-        self.uid_tracker[uid].train.openskill_rating.sigma = openskill_sigma
+        self.uid_tracker[uid].train.openskill_rating.mu = float(
+            self.openskill_ratings[uid].mu
+        )
+        self.uid_tracker[uid].train.openskill_rating.sigma = float(
+            self.openskill_ratings[uid].sigma
+        )
+        self.uid_tracker[uid].train.score = float(self.openskill_ratings[uid].ordinal())
 
         bt.logging.info(
             f"Train Score for UID {uid}: {self.uid_tracker[uid].train.score}",

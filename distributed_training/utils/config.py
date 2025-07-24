@@ -389,6 +389,20 @@ def add_args(cls, parser, prefix=None):
             default=40960,
         )
 
+        parser.add_argument(
+            "--neuron.openskill_beta",
+            type=int,
+            help="The value of the beta used in the openskill model.",
+            default=7,
+        )
+
+        parser.add_argument(
+            "--neuron.openskill_tau",
+            type=int,
+            help="The value of the tau used in the openskill model.",
+            default=0.1,
+        )
+
     else:
         parser.add_argument(
             "--blacklist.force_validator_permit",
