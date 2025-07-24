@@ -14,6 +14,26 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
+
+# Set seed and enable deterministic settings to ensure reproducibility
+import os
+import numpy as np
+import random
+import torch
+
+os.environ["NEST_ASYNCIO"] = "0"
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+random.seed(42)
+np.random.seed(42)
+
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+# torch.use_deterministic_algorithms(True)
+
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
 import asyncio
 import gc
 import os
@@ -21,9 +41,8 @@ import random
 import subprocess
 import time
 import typing
-
-os.environ["NEST_ASYNCIO"] = "0"
 import threading
+
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 
@@ -61,21 +80,11 @@ from distributed_training.utils.progress_tracker import (
     get_local_inner_step,
 )
 from distributed_training.utils.state_loader import (
-    FastModelLoader,
     cleanup_old_cache,
     load_model_optimizer_gradient_averager,
     load_state_from_peer,
 )
 from distributed_training.utils.compression import TransformDCT, CompressDCT
-
-# GPU optimizations.
-torch.backends.cudnn.benchmark = True
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-
-# Seeds
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
 
 
 class Miner(BaseMinerNeuron):
@@ -171,6 +180,7 @@ class Miner(BaseMinerNeuron):
             Point("training_metrics")
             .tag("miner_uid", str(self.uid))
             .tag("hotkey", self.wallet.hotkey.ss58_address)
+            .tag("run_id", __run__)
             .tag("epoch", str(self.local_progress.epoch))
             .tag("inner_step", str(self.local_progress.inner_step))
             .field("loss", self.local_progress.loss)
@@ -184,6 +194,7 @@ class Miner(BaseMinerNeuron):
             Point("resource_metrics")
             .tag("miner_uid", str(self.uid))
             .tag("hotkey", self.wallet.hotkey.ss58_address)
+            .tag("run_id", __run__)
             .field("cpu_percent", psutil.cpu_percent())
             .field("memory_percent", psutil.virtual_memory().percent)
             .field("gpu_utilization", self._get_gpu_utilization())
@@ -195,6 +206,7 @@ class Miner(BaseMinerNeuron):
             Point("network_metrics")
             .tag("miner_uid", str(self.uid))
             .tag("hotkey", self.wallet.hotkey.ss58_address)
+            .tag("run_id", __run__)
             .field("bandwidth", self._get_network_bandwidth())
         )
         points.append(point)
@@ -204,6 +216,7 @@ class Miner(BaseMinerNeuron):
             Point("metagraph_metrics")
             .tag("miner_uid", str(self.uid))
             .tag("hotkey", self.wallet.hotkey.ss58_address)
+            .tag("run_id", __run__)
             .field("stake", float(self.metagraph.stake[self.uid]))
             .field("trust", float(self.metagraph.trust[self.uid]))
             .field("consensus", float(self.metagraph.consensus[self.uid]))
@@ -343,9 +356,6 @@ class Miner(BaseMinerNeuron):
         self.model_upload_retry_delay = 6
 
     def _load_model(self):
-        # Initialize loader
-        self.loader = FastModelLoader(self.config.neuron.local_model_name)
-
         # Load model and components
         load_model_optimizer_gradient_averager(
             self, self.config.neuron.local_model_name, self.local_progress.epoch
@@ -543,7 +553,7 @@ class Miner(BaseMinerNeuron):
             "block": self.current_block,
             "inner_step": self.local_progress.inner_step,
             "outer_step": self.local_progress.epoch,
-            "loss": self.local_progress.loss
+            "loss": self.local_progress.loss,
         }
 
         return gradient, xshapes, totalks

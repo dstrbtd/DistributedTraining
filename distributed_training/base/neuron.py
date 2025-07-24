@@ -100,30 +100,7 @@ class BaseNeuron(ABC):
         )
         self.step = 0
 
-        self.uid_tracker_initial_state = {
-            "peer_id": None,
-            "model_huggingface_id": None,
-            "last_updated_block": None,
-            "last_commit": None,
-            "train_similarity_score_last_updated": 0,
-            "train_similarity_score": 0,
-            "train_validation_count": 0,
-            "train_number_of_blocks": 0,
-            "train_duration": 0,
-            "train_score": 0,
-            "repo_valid_sum": 0,
-            "repo_valid_count": 0,
-            "repo_valid_score": 0,
-            "all_reduce_successes": 0,
-            "all_reduce_count": 0,
-            "all_reduce_score": 0,
-            "total_score": 0,
-            "loss": 0,
-        }
-        self.uid_tracker = {
-            uid: self.uid_tracker_initial_state.copy()
-            for uid in self.metagraph.uids.tolist()
-        }
+        # Initialize the all_reduce, download and upload variables.
         self.allreduce_timeout = 540
         self.upload_state_duration = 420
         self.all_reduce_success_status = True

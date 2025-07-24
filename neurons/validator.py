@@ -1,6 +1,5 @@
 # The MIT License (MIT)
-# Copyright © 2023 Yuma Rao
-# Copyright © 2023 KMFODA
+# Copyright © 2025 dstrbtd.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the “Software”), to deal in the Software without restriction, including without limitation
@@ -21,6 +20,24 @@ import os
 
 os.environ["NEST_ASYNCIO"] = "0"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
+# Set seed and enable deterministic settings to ensure reproducibility
+import numpy as np
+import random
+import torch
+
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+random.seed(42)
+np.random.seed(42)
+
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+# torch.use_deterministic_algorithms(True)
+
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
 import math
 import threading
 
@@ -43,13 +60,18 @@ from distributed_training.utils.progress_tracker import (
 )
 from random import randrange
 from distributed_training.utils.state_loader import (
-    FastModelLoader,
     cleanup_old_cache,
     load_model_optimizer_gradient_averager,
     load_state_from_peer,
 )
 from distributed_training.utils.uids import map_uid_to_peerid, update_run_peerid_list
 from distributed_training.validator import forward
+from distributed_training import __run__
+
+from openskill.models import PlackettLuce
+
+from distributed_training.utils.compression import CompressDCT, TransformDCT
+from typing import Any
 
 
 class Validator(BaseValidatorNeuron):
@@ -60,13 +82,13 @@ class Validator(BaseValidatorNeuron):
         self._init_model_components()
         self._init_network_components()
         self._init_uid_components()
-        self._randomly_reset_uid_tracker()
+        self._load_gradient_compressors()
 
     def _update_wandb_project(self):
         suffix = "_validators" if self.neuron_type == "ValidatorNeuron" else "_miners"
         self.config.neuron.wandb_project += suffix
 
-    def report_allreduce_operation(
+    def report_allreduce_scores(
         self,
         op_id,
         epoch,
@@ -102,7 +124,7 @@ class Validator(BaseValidatorNeuron):
         except Exception as e:
             bt.logging.error(f"Error reporting AllReduce metrics: {e}")
 
-    def report_scoring_metrics(self):
+    def report_train_scores(self):
         """Send validator scoring metrics to InfluxDB"""
         try:
             points = []
@@ -112,10 +134,12 @@ class Validator(BaseValidatorNeuron):
                     Point("miner_scores")
                     .tag("validator_uid", str(self.uid))
                     .tag("miner_uid", str(uid))
-                    .field("train_score", float(data["train_score"] or 0))
-                    .field("all_reduce_score", float(data["all_reduce_score"] or 0))
-                    .field("repo_valid_score", float(data["repo_valid_score"] or 0))
-                    .field("total_score", float(data["total_score"] or 0))
+                    .tag("hotkey", self.wallet.hotkey.ss58_address)
+                    .tag("run_id", __run__)
+                    .field("train_score", data.train.score)
+                    .field("all_reduce_score", data.all_reduce.score)
+                    .field("repo_valid_score", data.train.is_valid)
+                    .field("total_score", data.total.score)
                 )
                 points.append(point)
 
@@ -124,7 +148,22 @@ class Validator(BaseValidatorNeuron):
                         Point("miner_loss")
                         .tag("validator_uid", str(self.uid))
                         .tag("miner_uid", str(uid))
+                        .tag("hotkey", self.wallet.hotkey.ss58_address)
+                        .tag("run_id", __run__)
                         .field("loss", float(data["loss"] or 0))
+                    )
+                    points.append(point)
+
+                if uid in self.openskill_ratings:
+                    point = (
+                        Point("openskill_scores")
+                        .tag("validator_uid", str(self.uid))
+                        .tag("miner_uid", str(uid))
+                        .tag("hotkey", self.wallet.hotkey.ss58_address)
+                        .tag("run_id", __run__)
+                        .field("mu", float(self.openskill_ratings[uid].mu))
+                        .field("sigma", float(self.openskill_ratings[uid].sigma))
+                        .field("ordinal", float(self.openskill_ratings[uid].ordinal()))
                     )
                     points.append(point)
 
@@ -244,12 +283,11 @@ class Validator(BaseValidatorNeuron):
     def _setup_model_state(self):
         self.learning_rate = self.get_learning_rate()
         self.average_loss = None
-        self.loader = FastModelLoader(self.config.neuron.hf_repo_id)
 
         load_model_optimizer_gradient_averager(
             self, self.config.neuron.global_model_name, self.global_progress.epoch
         )
-        cleanup_old_cache(self)
+        # cleanup_old_cache(self)
 
         if self.local_progress.epoch < self.global_progress.epoch:
             load_state_from_peer(self, epoch=self.global_progress.epoch)
@@ -285,9 +323,41 @@ class Validator(BaseValidatorNeuron):
         self.failed_is_alive_counter = {uid: 0 for uid in self.metagraph.uids.tolist()}
         self.miner_uids = []
 
-    def _randomly_reset_uid_tracker(self):
-        if self.uid == self.master_uid:
-            self.uid_tracker[randrange(256)]["train_similarity_score_last_updated"] = 0
+    def _init_open_skill_model(self):
+        self.openskill_model = PlackettLuce(
+            beta=self.config.neuron.openskill_beta, tau=self.config.neuron.openskill_tau
+        )
+        self.openskill_ratings = {}
+        self.openskill_ratings = {
+            int(uid): self.openskill_model.rating(name=str(uid))
+            for uid in range(self.metagraph.n)
+        }
+
+    def _load_gradient_compressors(self):
+        # Init compression
+        self.transformer = TransformDCT(
+            self.model, target_chunk=self.config.neuron.target_chunk
+        )
+        self.compressor = CompressDCT(
+            use_quantization=True,
+            quantization_bins=self.config.neuron.quantization_bins,
+            quantization_range=self.config.neuron.quantization_range,
+        )
+        self.xshapes = {}
+        self.totalks = {}
+        self.error_feedback = {}
+        self.owned_params = set()
+        for n, p in self.model.named_parameters():
+            self.owned_params.add(n)
+            self.error_feedback[n] = torch.zeros_like(p, device=self.device)
+            _, _, xshape, totalk, _ = self.compressor.compress(
+                self.transformer.encode(
+                    torch.zeros_like(p), use_dct=self.config.neuron.use_dct
+                ),
+                self.config.neuron.topk_compression,
+            )
+            self.xshapes[n] = xshape
+            self.totalks[n] = totalk
 
     def _init_peer_mapping(self):
         self.stop_event = threading.Event()
@@ -349,6 +419,164 @@ class Validator(BaseValidatorNeuron):
 
     async def forward(self):
         return await forward(self)
+
+    def check_compressed_indices(
+        self,
+        param_name: str,
+        idxs: Any,
+        totalk: int,
+        allowed_topk: int | None = None,
+    ) -> None:
+        allowed_topk = (
+            min(self.config.neuron.topk_compression, totalk)
+            if allowed_topk is None
+            else min(allowed_topk, totalk)
+        )
+
+        def _bounds_check(t: torch.Tensor):
+            """fast min/max bounds check"""
+            if t.numel() == 0:
+                raise ValueError(f"[{param_name}] empty index list")
+            if t.min().item() < 0 or t.max().item() >= totalk:
+                bad = t[(t < 0) | (t >= totalk)][0].item()
+                raise ValueError(
+                    f"[{param_name}] Index {bad} out of bounds (totalk = {totalk})"
+                )
+
+        if isinstance(idxs, (int, float)) or (torch.is_tensor(idxs) and idxs.ndim == 0):
+            idx_int = int(idxs)
+            if not (0 <= idx_int < totalk):
+                raise ValueError(
+                    f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
+                )
+            return  # single scalar is always length-independent
+
+        if (
+            isinstance(idxs, (list, tuple))
+            and idxs
+            and isinstance(idxs[0], (list, tuple))
+        ):
+            for sub in idxs:
+                if len(sub) != allowed_topk:
+                    raise ValueError(
+                        f"[{param_name}] Invalid number of indices: "
+                        f"got {len(sub)} but expected {allowed_topk}"
+                    )
+                # vectorised bounds check on each sub-tensor
+                t = torch.as_tensor(sub, dtype=torch.long)
+                _bounds_check(t)
+            return
+
+        try:
+            t = (
+                idxs
+                if torch.is_tensor(idxs)
+                else torch.as_tensor(idxs, dtype=torch.long)
+            )
+        except Exception as e:
+            raise ValueError(f"[{param_name}] Failed to convert indices to tensor: {e}")
+
+        if t.ndim == 1:  # flat
+            if t.numel() != allowed_topk:
+                raise ValueError(
+                    f"[{param_name}] Invalid number of indices: "
+                    f"{t.numel()} but expected {allowed_topk}"
+                )
+            _bounds_check(t)
+            return
+
+        # n-D compressed: last dim must be allowed_topk
+        if t.size(-1) != allowed_topk:
+            raise ValueError(
+                f"[{param_name}] Last dimension size invalid: "
+                f"{t.size(-1)} but expected {allowed_topk}"
+            )
+        _bounds_check(t)
+
+    def update_model_with_gradient(
+        self, model: torch.nn.Module, eval_uid: int, eval_state_dict: dict
+    ) -> None:
+        self.eval_lr_factor = 0.5
+        model.zero_grad()
+
+        # First validate all gradients before applying any
+        for n, p in model.named_parameters():
+            idxs_key = n + "idxs"
+            vals_key = n + "vals"
+            quant_key = n + "quant_params"
+            idxs = eval_state_dict.get(idxs_key, None)
+            vals = eval_state_dict.get(vals_key, None)
+            quant_params = eval_state_dict.get(quant_key, None)
+
+            if idxs is not None and vals is not None and quant_params is not None:
+                # Move tensors to device
+                idxs = idxs.to(self.device)
+                vals = vals.to(self.device)
+
+                # Validate indices are within bounds
+                if self.totalks.get(n) is None:
+                    bt.logging.info(
+                        f"Missing totalk for parameter {n}, skipping peer {eval_uid}"
+                    )
+                    raise ValueError(
+                        f"Invalid gradient data from peer {eval_uid}: Missing totalk for parameter {n}"
+                    )
+
+                # Check compressed indices are valid
+                self.check_compressed_indices(
+                    idxs_key,
+                    idxs,
+                    self.totalks[n],
+                    allowed_topk=self.config.neuron.topk_compression,
+                )
+
+                # Check for NaN or Inf values
+                if torch.isnan(vals).any() or torch.isinf(vals).any():
+                    bt.logging.info(
+                        f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {eval_uid}"
+                    )
+                    raise ValueError(
+                        f"Invalid gradient data from peer {eval_uid}: NaN or Inf values in {vals_key}"
+                    )
+
+        # If all validations pass, apply the gradients
+        for n, p in model.named_parameters():
+            idxs_key = n + "idxs"
+            vals_key = n + "vals"
+            quant_key = n + "quant_params"
+            idxs = eval_state_dict.get(idxs_key, None)
+            vals = eval_state_dict.get(vals_key, None)
+            quant_params = eval_state_dict.get(quant_key, None)
+
+            if idxs is not None and vals is not None and quant_params is not None:
+                idxs = idxs.to(self.device)
+                vals = vals.to(self.device)
+
+                grad = self.transformer.decode(
+                    self.compressor.decompress(
+                        p.to(self.device),
+                        idxs,
+                        vals,
+                        self.xshapes[n],
+                        self.totalks[n],
+                        quant_params,
+                    ),
+                    use_dct=self.config.neuron.use_dct,
+                ).to(self.device)
+
+                # Final safety check on the gradient itself
+                if torch.isnan(grad).any() or torch.isinf(grad).any():
+                    bt.logging.info(
+                        f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}"
+                    )
+                    raise ValueError(
+                        f"Invalid gradient from peer {eval_uid}: NaN or Inf in decompressed gradient for {n}"
+                    )
+                p.data.sub_(
+                    grad,
+                    alpha=self.state_averager.optimizer.param_groups[0]["lr"]
+                    * self.eval_lr_factor,
+                )
 
 
 # The main function parses the configuration and runs the validator.

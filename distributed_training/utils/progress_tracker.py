@@ -27,6 +27,57 @@ class LocalTrainingProgress(BaseModel):
     loss: confloat(ge=0.0, strict=True)
 
 
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional
+
+
+class SkillRating(BaseModel):
+    mu: float
+    sigma: float
+
+
+class LossProfile(BaseModel):
+    before: float = 0.0
+    after: float = 0.0
+    absolute: float = 0.0
+    relative: float = 0.0
+
+
+class Chaindata(BaseModel):
+    last_updated_block: int = 0
+
+
+class ScoreAllReduce(BaseModel):
+    peer_id: Optional[str] = None
+    score: float = 0.0
+    count: int = 0
+
+
+class ScoreTrain(BaseModel):
+    model_id: Optional[str] = None
+    is_valid: bool = True
+    loss: LossProfile = Field(default_factory=LossProfile)
+    openskill_rating: float = 0.0
+    score: float = 0.0
+    updated_time: float = 0
+    revision: str = "0.0.0"
+    openskill_rating: SkillRating = Field(
+        default_factory=lambda: SkillRating(mu=25.0, sigma=8.333)
+    )
+
+
+class ScoreTotal(BaseModel):
+    score: float = 0.0
+
+
+class UidTracker(BaseModel):
+    uid: int
+    all_reduce: ScoreAllReduce = Field(default_factory=ScoreAllReduce)
+    train: ScoreTrain = Field(default_factory=ScoreTrain)
+    total: ScoreTotal = Field(default_factory=ScoreTotal)
+    chaindata: Chaindata = Field(default_factory=Chaindata)
+
+
 def get_global_epoch(self):
     try:
         refs = list_repo_refs(self.config.neuron.global_model_name, repo_type="model")
@@ -132,76 +183,3 @@ def get_min_local_inner_Step(self, repo_id: str = None, epoch: int = None):
     except Exception as e:
         bt.logging.warning(f"Error in get_local_inner_step: {str(e)}")
         return 0
-
-
-def update_global_tracker_state(self):
-    try:
-        runs = wandb.Api().runs(
-            f"{self.config.neuron.wandb_entity}/{self.config.neuron.wandb_project}"
-        )
-        global_epoch = get_global_epoch(self)
-        global_progress = 0
-
-        for run in tqdm(runs):
-            if (
-                ("validator" in run.name)  # Filter our any miner runs
-                and (run.state == "running")  # Filter out any idle wandb runs
-                and (
-                    f"UID{self.uid}" not in run.name.split("_")
-                )  # Filter out any wandb data from the current neuron's UID
-            ):
-                history = run.history()
-                if (
-                    ("local_samples_accumulated" in history.columns)
-                    and ("global_samples_accumulated" in history.columns)
-                    and (
-                        not history.loc[
-                            pd.isna(history.loc[:, "local_epoch"]) == False,
-                            "local_epoch",
-                        ].empty
-                    )
-                    and (sum(history.loc[:, "local_epoch"] == global_epoch) > 0)
-                ):
-                    filtered_history = history.loc[
-                        (history.loc[:, "local_epoch"] == global_epoch), :
-                    ]
-                    filtered_history = filtered_history.loc[
-                        (
-                            pd.isna(
-                                filtered_history.loc[:, "local_samples_accumulated"]
-                            )
-                            == False
-                        ),
-                        :,
-                    ]
-                    bt.logging.info(run.name.split("_"))
-                    bt.logging.info(
-                        max(filtered_history.loc[:, "local_samples_accumulated"])
-                    )
-                    global_progress += max(
-                        filtered_history.loc[:, "local_samples_accumulated"]
-                    )
-
-            else:
-                continue
-
-        # Update global epoch
-        self.global_progress.epoch = global_epoch if global_epoch is not None else 0
-
-        # Add local samples
-        if self.global_progress.epoch == self.local_progress.epoch:
-            global_progress += self.local_progress.samples_accumulated
-
-        # Update global progress
-        self.global_progress.samples_accumulated = global_progress
-
-        # Log new porgress
-        bt.logging.info(
-            f"Local samples:  {self.local_progress.samples_accumulated} | Local epoch:  {self.local_progress.epoch}"
-        )
-        bt.logging.info(
-            f"Global samples: {self.global_progress.samples_accumulated} | Global epoch: {self.global_progress.epoch}"
-        )
-
-    except Exception as e:
-        bt.logging.info(f"Failed to update global tracker state due to error {e}")
