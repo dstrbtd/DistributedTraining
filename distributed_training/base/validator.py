@@ -32,7 +32,9 @@ from distributed_training.utils.weight_utils import (
     convert_weights_and_uids_for_emit,
     process_weights_for_netuid,
 )
-from distributed_training.utils.progress_tracker import UidTracker
+from distributed_training.utils.progress_tracker import UidTracker, get_global_epoch
+from distributed_training.utils.state_loader import load_state_from_peer
+from distributed_training.validator.reward import update_total_scores
 from openskill.models import PlackettLuce
 
 
@@ -171,31 +173,31 @@ class BaseValidatorNeuron(BaseNeuron):
                 if self.event != {}:
                     self.event = {}
 
-                # current_global_epoch = self.global_progress.epoch
-                # self.global_progress.epoch = get_global_epoch(self)
-                # if (self.local_progress.epoch != self.global_progress.epoch) or (
-                #     not self.all_reduce_success_status
-                # ):
-                #     if self.local_progress.epoch != self.global_progress.epoch:
-                #         self.logger.info(
-                #             f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
-                #         )
-                #     if not self.all_reduce_success_status:
-                #         self.logger.info(
-                #             "All Reduce Failed. Loading Latest Model State."
-                #         )
-                #     load_state_from_peer(self, epoch=self.global_progress.epoch)
-                #     # Reset all_reduce success status
-                #     if not self.all_reduce_success_status:
-                #         self.all_reduce_success_status = True
-                #         self.last_allreduce_block = self.block
-                #     # Load all_reduce scores if non_master_uid
-                #     if (
-                #         (self.uid != self.master_uid)
-                #         and (self.global_progress.epoch != current_global_epoch)
-                #         and (self.should_all_reduce)
-                #     ):
-                #         update_total_scores(self)
+                current_global_epoch = self.global_progress.epoch
+                self.global_progress.epoch = get_global_epoch(self)
+                if (self.local_progress.epoch != self.global_progress.epoch) or (
+                    not self.all_reduce_success_status
+                ):
+                    if self.local_progress.epoch != self.global_progress.epoch:
+                        self.logger.info(
+                            f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
+                        )
+                    if not self.all_reduce_success_status:
+                        self.logger.info(
+                            "All Reduce Failed. Loading Latest Model State."
+                        )
+                    load_state_from_peer(self, epoch=self.global_progress.epoch)
+                    # Reset all_reduce success status
+                    if not self.all_reduce_success_status:
+                        self.all_reduce_success_status = True
+                        self.last_allreduce_block = self.block
+                    # Load all_reduce scores if non_master_uid
+                    if (
+                        (self.uid != self.master_uid)
+                        and (self.global_progress.epoch != current_global_epoch)
+                        and (self.should_all_reduce)
+                    ):
+                        update_total_scores(self)
 
                 # Run multiple forwards concurrently.
                 self.loop.run_until_complete(self.concurrent_forward())
