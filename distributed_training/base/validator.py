@@ -60,10 +60,8 @@ class BaseValidatorNeuron(BaseNeuron):
         self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
 
         # Initialize openskill_model before loading state
-        self.config.openskill_beta = 7
-        self.config.openskill_tau = 0.1
         self.openskill_model = PlackettLuce(
-            beta=self.config.openskill_beta, tau=self.config.openskill_tau
+            beta=self.config.neuron.openskill_beta, tau=self.config.neuron.openskill_tau
         )
         self.openskill_ratings = {
             int(uid): self.openskill_model.rating(name=str(uid))
