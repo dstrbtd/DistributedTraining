@@ -25,19 +25,19 @@ async def check_uid(dendrite, axon, uid, epoch=None):
         )
         if response.is_success:
             if (epoch is not None) and (response.epoch == epoch):
-                bt.logging.trace(f"UID {uid} is active and on epoch {epoch}")
+                self.logger.trace(f"UID {uid} is active and on epoch {epoch}")
                 return True
             elif (epoch is not None) and (response.epoch != epoch):
-                bt.logging.trace(f"UID {uid} is active but not on epoch {epoch}")
+                self.logger.trace(f"UID {uid} is active but not on epoch {epoch}")
                 return False
             else:
-                bt.logging.trace(f"UID {uid} is active.")
+                self.logger.trace(f"UID {uid} is active.")
                 return True
         else:
-            bt.logging.trace(f"UID {uid} is not active.")
+            self.logger.trace(f"UID {uid} is not active.")
             return False
     except Exception as e:
-        bt.logging.error(f"Error checking UID {uid}: {e}\n{traceback.format_exc()}")
+        self.logger.error(f"Error checking UID {uid}: {e}\n{traceback.format_exc()}")
         # loop.close()
         return False
 
@@ -149,13 +149,13 @@ def get_next_uids_manual(self, k: int = 25) -> List[int]:
                 ),
             )
         )
-        bt.logging.info({k: v.train.updated_time for k, v in self.uid_tracker.items()})
+        self.logger.info({k: v.train.updated_time for k, v in self.uid_tracker.items()})
         uids = list(self.uid_tracker.keys())
         uids = uids[:k]
         return uids
 
     except Exception as e:
-        bt.logging.info(f"Error getting UID manually: {e}")
+        self.logger.info(f"Error getting UID manually: {e}")
 
 
 def get_next_uid_api(self):
@@ -168,7 +168,7 @@ def get_next_uid_api(self):
         assert uids != self.miner_uids
         return uids
     except Exception as e:
-        bt.logging.info(
+        self.logger.info(
             f"Error {e} getting UID from: {self.uid_api_url}. Attempting to get UID manually."
         )
         uids = get_next_uids_manual(self)
@@ -177,7 +177,7 @@ def get_next_uid_api(self):
 
 
 def post_next_uid_api(self):
-    uids = get_next_uids_manual(self, int(self.metagraph.n))
+    uids = get_next_uids_manual(self, k=self.config.neuron.min_group_size)
     try:
         response = requests.post(
             url=self.uid_api_url,
@@ -187,7 +187,7 @@ def post_next_uid_api(self):
         if response.status_code != 200:
             raise Exception(f"UID post request failed with error: {e}")
     except Exception as e:
-        bt.logging.info(
+        self.logger.info(
             f"Error {e} getting UID from: {self.uid_api_url}. Attempting to get UID manually."
         )
 
@@ -226,7 +226,7 @@ def map_uid_to_peerid(self):
 
         hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids.tolist()))
     except Exception as e:
-        bt.logging.info(f"Error {e} when querying UID commitments")
+        self.logger.info(f"Error {e} when querying UID commitments")
 
     for key, value in result:
         try:
@@ -241,12 +241,12 @@ def map_uid_to_peerid(self):
             concatenated = eval(metadata)
 
             if "peer_id" not in concatenated:
-                bt.logging.debug(
+                self.logger.debug(
                     f"Invalid commitment for UID {uid}: peer_id not in commitment metadata"
                 )
                 continue
             if "model_huggingface_id" not in concatenated:
-                bt.logging.debug(
+                self.logger.debug(
                     f"Invalid commitment for UID {uid}: model_huggingface_id not in commitment metadata"
                 )
             if concatenated["peer_id"] != self.uid_tracker[uid].all_reduce.peer_id:
@@ -323,10 +323,10 @@ def map_uid_to_peerid(self):
                             self.uid_tracker[uid].train.model_id = None
                             self.uid_tracker[uid].all_reduce.peer_id = None
 
-            bt.logging.debug(f"Retrieved commitment for UID {uid}: {metadata}")
+            self.logger.debug(f"Retrieved commitment for UID {uid}: {metadata}")
 
         except Exception as e:
-            bt.logging.debug(f"Failed to decode commitment for UID {uid}: {e}")
+            self.logger.debug(f"Failed to decode commitment for UID {uid}: {e}")
             continue
 
-    bt.logging.debug("Finished extracting commitments for all uids")
+    self.logger.debug("Finished extracting commitments for all uids")

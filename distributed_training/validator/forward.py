@@ -45,7 +45,7 @@ from distributed_training.validator.reward import (
     benchmark_uids,
     score_uids,
     update_total_scores,
-    update_openskill_ratings,
+    update_train_scores,
 )
 
 
@@ -66,7 +66,7 @@ async def forward(self):
     self.should_all_reduce = (
         blocks_since_allreduce >= self.config.neuron.blocks_per_allreduce
     )
-    bt.logging.info(
+    self.logger.info(
         f"Current block {self.current_block} | Blocks Since Last AllReduce: {blocks_since_allreduce} | Should AllReduce: {self.should_all_reduce}"
     )
 
@@ -87,7 +87,7 @@ async def forward(self):
 
             # Get active miners
             while len(self.miner_uids) < (101 - 1):
-                bt.logging.info(
+                self.logger.info(
                     f"Found {len(self.miner_uids)} UIDs. Attempting to find {101 - len(self.miner_uids) - 1} more UIDs."
                 )
                 self.miner_uids = await get_random_uids(
@@ -99,7 +99,7 @@ async def forward(self):
 
         else:
             # For non-master validators
-            bt.logging.info(
+            self.logger.info(
                 f"Waiting {self.allreduce_timeout + self.upload_state_duration} seconds whilst master UID completes all reduce."
             )
             time.sleep(self.allreduce_timeout + self.upload_state_duration)
@@ -122,7 +122,7 @@ async def forward(self):
         # )
         alive_uids = self.miner_uids
         self.event.update({"UIDs": self.miner_uids})
-        bt.logging.info(f"UIDs:  {self.miner_uids}")
+        self.logger.info(f"UIDs:  {self.miner_uids}")
 
         try:
             top_uid = get_top_uid(self)
@@ -224,7 +224,7 @@ async def forward(self):
                     )
                     # -------
                 except Exception as e:
-                    bt.logging.info(
+                    self.logger.info(
                         f"Error reporting allreduce metrics to dashboard {e}"
                     )
                 self.config.neuron.blocks_per_allreduce = 1000
@@ -233,7 +233,7 @@ async def forward(self):
                 raise GradientAveragingError("Unsuccessful AllReduce Step")
 
         except Exception as e:
-            bt.logging.error(f"AllReduce Failed: {e}")
+            self.logger.error(f"AllReduce Failed: {e}")
             self.global_progress.epoch = get_global_epoch(self)
             self.all_reduce_success_status = False
             return
@@ -241,29 +241,25 @@ async def forward(self):
     else:
         # If running HF validation round, only call one UID each step
         self.event.update({"synapse_type": "train"})
-        # self.miner_uids = get_next_uid_api(
-        #     self,
-        # )
+        self.miner_uids = get_next_uid_api(
+            self,
+        )
 
         # Benchmark any untested uids
         benchmark_uids(self)
 
-        self.miner_uids = get_next_uids_manual(self, k=25)
-
         # Early return if no active miners found
         if len(self.miner_uids) == 0:
-            bt.logging.info("No Active Miners Found This Step.")
+            self.logger.info("No Active Miners Found This Step.")
             return responses
 
         self.event.update({"UIDs": self.miner_uids})
-        bt.logging.info(f"UIDs:  {self.miner_uids}")
-
-        uid = self.miner_uids[0]
+        self.logger.info(f"UIDs:  {self.miner_uids}")
 
         await score_uids(self, self.miner_uids)
 
-        # Update total.scores for each UID
-        update_openskill_ratings(self, self.miner_uids)
+        # Update train.scores for each UID
+        update_train_scores(self, self.miner_uids)
 
         # Update total.scores for each UID
         update_total_scores(self)
@@ -298,6 +294,6 @@ async def forward(self):
     try:
         self.event.update(get_bandwidth())
     except Exception:
-        bt.logging.info("Error getting bandwidth metrics")
+        self.logger.info("Error getting bandwidth metrics")
 
     return responses

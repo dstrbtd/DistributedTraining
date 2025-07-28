@@ -43,6 +43,11 @@ class LossProfile(BaseModel):
     relative: float = 0.0
 
 
+class LossType(BaseModel):
+    random: LossProfile = Field(default_factory=LossProfile)
+    assigned: LossProfile = Field(default_factory=LossProfile)
+
+
 class Chaindata(BaseModel):
     last_updated_block: int = 0
 
@@ -56,7 +61,7 @@ class ScoreAllReduce(BaseModel):
 class ScoreTrain(BaseModel):
     model_id: Optional[str] = None
     is_valid: bool = True
-    loss: LossProfile = Field(default_factory=LossProfile)
+    loss: LossType = Field(default_factory=LossType)
     openskill_rating: float = 0.0
     score: float = 0.0
     updated_time: float = 0
@@ -97,7 +102,7 @@ def get_global_epoch(self):
         )
         return global_epoch
     except Exception as e:
-        bt.logging.warning(f"Error in get_global_epoch: {str(e)}")
+        self.logger.warning(f"Error in get_global_epoch: {str(e)}")
         return 0
 
 
@@ -123,7 +128,7 @@ def get_local_epoch(self, repo_id: str = None):
         )
         return local_epoch
     except Exception as e:
-        bt.logging.warning(f"Error in get_local_epoch: {str(e)}")
+        self.logger.warning(f"Error in get_local_epoch: {str(e)}")
         return None
 
 
@@ -152,7 +157,7 @@ def get_local_inner_step(self, repo_id: str = None, epoch: int = None):
         )
         return local_steps
     except Exception as e:
-        bt.logging.warning(f"Error in get_local_inner_step: {str(e)}")
+        self.logger.warning(f"Error in get_local_inner_step: {str(e)}")
         return 0
 
 
@@ -181,5 +186,5 @@ def get_min_local_inner_Step(self, repo_id: str = None, epoch: int = None):
         )
         return local_steps
     except Exception as e:
-        bt.logging.warning(f"Error in get_local_inner_step: {str(e)}")
+        self.logger.warning(f"Error in get_local_inner_step: {str(e)}")
         return 0

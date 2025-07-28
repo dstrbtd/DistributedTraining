@@ -118,11 +118,11 @@ class Validator(BaseValidatorNeuron):
                 org=self.config.neuron.influxdb_org,
                 record=point,
             )
-            bt.logging.info(
+            self.logger.info(
                 f"Validator {validator_uid} reported AllReduce operation {op_id} metrics to InfluxDB"
             )
         except Exception as e:
-            bt.logging.error(f"Error reporting AllReduce metrics: {e}")
+            self.logger.error(f"Error reporting AllReduce metrics: {e}")
 
     def report_train_scores(self):
         """Send validator scoring metrics to InfluxDB"""
@@ -137,24 +137,23 @@ class Validator(BaseValidatorNeuron):
                     .tag("hotkey", self.wallet.hotkey.ss58_address)
                     .tag("run_id", __run__)
                     .field("train_score", data.train.score)
-                    .field("all_reduce_score", data.all_reduce.score)
-                    .field("repo_valid_score", data.train.is_valid)
+                    .field("all_reduce_score", float(data.all_reduce.score))
+                    .field("repo_valid_score", float(data.train.is_valid))
                     .field("total_score", data.total.score)
                 )
                 points.append(point)
 
-                if "loss" in data:
-                    point = (
-                        Point("miner_loss")
-                        .tag("validator_uid", str(self.uid))
-                        .tag("miner_uid", str(uid))
-                        .tag("hotkey", self.wallet.hotkey.ss58_address)
-                        .tag("run_id", __run__)
-                        .field("loss", float(data["loss"] or 0))
-                    )
-                    points.append(point)
+                point = (
+                    Point("miner_loss")
+                    .tag("validator_uid", str(self.uid))
+                    .tag("miner_uid", str(uid))
+                    .tag("hotkey", self.wallet.hotkey.ss58_address)
+                    .tag("run_id", __run__)
+                    .field("loss", float(data.train.loss.after or 0))
+                )
+                points.append(point)
 
-                if uid in self.openskill_ratings:
+                if uid in self.openskill_ratings.keys():
                     point = (
                         Point("openskill_scores")
                         .tag("validator_uid", str(self.uid))
@@ -174,14 +173,14 @@ class Validator(BaseValidatorNeuron):
                 record=points,
             )
         except Exception as e:
-            bt.logging.error(f"Error reporting scoring metrics: {e}")
+            self.logger.error(f"Error reporting scoring metrics: {e}")
 
     def _init_metrics_collection(self):
         # Initialize InfluxDB client
         self.influx_client = None
         self.influx_write_api = None
         try:
-            bt.logging.info(
+            self.logger.info(
                 "Attempting to initialize InfluxDB client for metrics collection..."
             )
             self.influx_client = InfluxDBClient(
@@ -192,17 +191,17 @@ class Validator(BaseValidatorNeuron):
             self.influx_write_api = self.influx_client.write_api(
                 write_options=SYNCHRONOUS
             )
-            bt.logging.info("InfluxDB client and write_api initialized successfully.")
+            self.logger.info("InfluxDB client and write_api initialized successfully.")
 
         except Exception as e:
-            bt.logging.error(
+            self.logger.error(
                 f"Failed to initialize InfluxDB client: {e}. Metrics collection will be disabled."
             )
             if self.influx_client:
                 try:
                     self.influx_client.close()
                 except Exception as close_e:
-                    bt.logging.error(
+                    self.logger.error(
                         f"Error closing InfluxDB client during cleanup: {close_e}"
                     )
             self.influx_client = None
@@ -245,7 +244,7 @@ class Validator(BaseValidatorNeuron):
         self.local_progress.epoch = self.global_progress.epoch
 
         if self.global_progress.epoch is None:
-            bt.logging.error(
+            self.logger.error(
                 "Model Tag Is None. Make Sure You Are Using The Correct Model Name"
             )
 
@@ -308,7 +307,7 @@ class Validator(BaseValidatorNeuron):
 
     def _init_network_components(self):
         """Initialize network and P2P components"""
-        bt.logging.info("Logging PeerID to chain")
+        self.logger.info("Logging PeerID to chain")
         log_peerid_to_chain(self)
 
     def _init_uid_components(self):
@@ -515,7 +514,7 @@ class Validator(BaseValidatorNeuron):
 
                 # Validate indices are within bounds
                 if self.totalks.get(n) is None:
-                    bt.logging.info(
+                    self.logger.info(
                         f"Missing totalk for parameter {n}, skipping peer {eval_uid}"
                     )
                     raise ValueError(
@@ -532,7 +531,7 @@ class Validator(BaseValidatorNeuron):
 
                 # Check for NaN or Inf values
                 if torch.isnan(vals).any() or torch.isinf(vals).any():
-                    bt.logging.info(
+                    self.logger.info(
                         f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {eval_uid}"
                     )
                     raise ValueError(
@@ -566,7 +565,7 @@ class Validator(BaseValidatorNeuron):
 
                 # Final safety check on the gradient itself
                 if torch.isnan(grad).any() or torch.isinf(grad).any():
-                    bt.logging.info(
+                    self.logger.info(
                         f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}"
                     )
                     raise ValueError(

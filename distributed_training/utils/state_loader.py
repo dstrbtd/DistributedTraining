@@ -61,7 +61,7 @@ def check_model_exists(repo_id: str, revision: Optional[str] = None) -> bool:
             list_repo_files(repo_id)
         return True
     except Exception as e:
-        bt.logging.info(f"Model or revision check failed with error: {e}")
+        self.logger.info(f"Model or revision check failed with error: {e}")
         return False
 
 
@@ -82,7 +82,7 @@ def load_model_optimizer_gradient_averager(
     against this for now gc.collect() is run after each component
     with optimizers and state averagers are deleted.
     """
-    bt.logging.debug(
+    self.logger.debug(
         f"CPU Memory Before Loading State {psutil.virtual_memory().available / 10**9} GB"
     )
     global_model_name = self.config.neuron.global_model_name
@@ -124,7 +124,7 @@ def load_model_optimizer_gradient_averager(
 
         gc.collect()
         torch.cuda.empty_cache()
-        bt.logging.info("Deleted State Averager and Gradient Averager")
+        self.logger.info("Deleted State Averager and Gradient Averager")
 
     # Delete existing averag handler
     if hasattr(self, "avg_handler"):
@@ -135,7 +135,7 @@ def load_model_optimizer_gradient_averager(
         del self.avg_handler
         gc.collect()
         torch.cuda.empty_cache()
-        bt.logging.info("Deleted Average Handler")
+        self.logger.info("Deleted Average Handler")
 
     for model_name in model_name_list:
         optimizer_state = None
@@ -154,7 +154,7 @@ def load_model_optimizer_gradient_averager(
                 revision=revision,
                 trust_remote_code=False,
             )
-            bt.logging.info(
+            self.logger.info(
                 f"Successfully Loaded Model From {model_name} With Revision {revision}"
             )
 
@@ -185,7 +185,7 @@ def load_model_optimizer_gradient_averager(
                     del self.inner_optimizer
                     gc.collect()
                     torch.cuda.empty_cache()
-                    bt.logging.info("Deleted Inner Optimizer")
+                    self.logger.info("Deleted Inner Optimizer")
 
                 self.inner_optimizer = torch.optim.AdamW(
                     self.model.parameters(),
@@ -193,7 +193,7 @@ def load_model_optimizer_gradient_averager(
                     betas=(0.9, 0.95),
                     weight_decay=0.1,
                 )
-                bt.logging.info(f"Loaded Inner Optimizer")
+                self.logger.info(f"Loaded Inner Optimizer")
 
                 self.scheduler = get_cosine_schedule_with_warmup(
                     self.inner_optimizer,
@@ -221,7 +221,7 @@ def load_model_optimizer_gradient_averager(
                         group["lr"] = optimizer_state["learning_rate"]
                 if "scheduler_state" in optimizer_state:
                     self.scheduler.load_state_dict(optimizer_state["scheduler_state"])
-                bt.logging.info(
+                self.logger.info(
                     f"Successfully Loaded Inner Optimizer State From {model_name} For Revision {revision}"
                 )
 
@@ -231,7 +231,9 @@ def load_model_optimizer_gradient_averager(
             if model_name == model_name_list[-1]:
                 raise Exception(f"Failed to load model despite repo existing: {str(e)}")
             else:
-                bt.logging.info(f"Failed to load model despite repo existing: {str(e)}")
+                self.logger.info(
+                    f"Failed to load model despite repo existing: {str(e)}"
+                )
 
         finally:
             if isinstance(optimizer_state, dict):
@@ -262,7 +264,7 @@ def load_model_optimizer_gradient_averager(
         allreduce_timeout=self.allreduce_timeout - 30.0 - 15.0,
         start=True,
     )
-    bt.logging.info("Successfully Loaded Gradient Averager")
+    self.logger.info("Successfully Loaded Gradient Averager")
 
     # Load a new gradient averager
     self.grad_averager = DTGradAverager(
@@ -279,7 +281,7 @@ def load_model_optimizer_gradient_averager(
         allreduce_timeout=self.allreduce_timeout - 30.0 - 15.0,
         start=True,
     )
-    bt.logging.info("Successfully Loaded State Averager")
+    self.logger.info("Successfully Loaded State Averager")
 
     if reload_outer_optimizer:
         optimizer_state = None
@@ -300,12 +302,12 @@ def load_model_optimizer_gradient_averager(
                     optimizer_state["optimizer_state_dict"]
                 )
 
-            bt.logging.info(
+            self.logger.info(
                 f"Successfully Loaded Outer Optimizer State From {global_model_name} For Revision {'.'.join(revision.split('.')[:-1] + ['0'])}"
             )
 
         except Exception as e:
-            bt.logging.warning(
+            self.logger.warning(
                 f"No optimizer state found or failed to load: {str(e)}. Initializing fresh optimizer."
             )
 
@@ -344,7 +346,7 @@ def load_model_optimizer_gradient_averager(
             ),
         )
 
-    bt.logging.debug(
+    self.logger.debug(
         f"CPU Memory After Loading State {psutil.virtual_memory().available / 10**9} GB"
     )
 
@@ -369,16 +371,16 @@ def load_state_from_peer(
             self, repo_id, epoch=self.global_progress.epoch
         )
 
-        bt.logging.debug("Model Weights Before Loading State")
+        self.logger.debug("Model Weights Before Loading State")
         current_model_weights_sample = copy.copy(
             [layer for layer in self.model.parameters()][-2][-10:].tolist()
         )
-        bt.logging.debug(current_model_weights_sample)
+        self.logger.debug(current_model_weights_sample)
 
-        bt.logging.debug(f"Old Model Tag: {self.local_progress.epoch}")
+        self.logger.debug(f"Old Model Tag: {self.local_progress.epoch}")
 
         if self.global_progress.epoch is not None:
-            bt.logging.debug(
+            self.logger.debug(
                 f"Latest Model State Found On The HF Hub With The Tag: {self.global_progress.epoch}. Loading That Model State."
             )
 
@@ -405,27 +407,27 @@ def load_state_from_peer(
                         raise Exception(
                             f"Failed to load model after {MAX_ATTEMPTS} attempts: {str(e)}"
                         )
-                    bt.logging.warning(
+                    self.logger.warning(
                         f"Failed to load model, retrying. Attempt {attempt}/{MAX_ATTEMPTS}. Error {str(e)}"
                     )
 
             state_loaded = True
 
-            bt.logging.debug("Model Weights After Loading State")
+            self.logger.debug("Model Weights After Loading State")
             new_model_weights_sample = copy.copy(
                 [layer for layer in self.model.parameters()][-2][-10:].tolist()
             )
-            bt.logging.debug(new_model_weights_sample)
+            self.logger.debug(new_model_weights_sample)
 
             self.local_progress.epoch = epoch
             self.local_progress.samples_accumulated = 0
-            bt.logging.debug(f"New Model Tag: {self.global_progress.epoch}")
+            self.logger.debug(f"New Model Tag: {self.global_progress.epoch}")
 
             # # Clean up old cache
             # try:
             #     cleanup_old_cache(self, repo_id, revision)
             # except Exception as e:
-            #     bt.logging.warning(f"Failed to cleanup cache: {str(e)}")
+            #     self.logger.warning(f"Failed to cleanup cache: {str(e)}")
 
             # if repo_id != self.config.neuron.global_model_name:
             #     try:
@@ -435,15 +437,15 @@ def load_state_from_peer(
             #             current_revision=None,
             #         )
             #     except Exception as e:
-            #         bt.logging.warning(f"Failed to cleanup cache: {str(e)}")
+            #         self.logger.warning(f"Failed to cleanup cache: {str(e)}")
 
         else:
-            bt.logging.debug(f"Model With Tag: {epoch} Does Not Exist")
+            self.logger.debug(f"Model With Tag: {epoch} Does Not Exist")
 
         return state_loaded
 
     except Exception as e:
-        bt.logging.error(f"Error loading state: {str(e)}")
+        self.logger.error(f"Error loading state: {str(e)}")
         return False
 
 
@@ -457,18 +459,20 @@ def cleanup_old_cache(self, repo_id=None, current_revision=None):
     broken_cache_list = [str(warning) for warning in cache_info.warnings]
     cache_dir = HF_HUB_CACHE
     cache_dir = Path(cache_dir).expanduser().resolve()
-    bt.logging.info("Cache clearing warnings:")
-    bt.logging.info(f"{cache_info.warnings}")
+    self.logger.info("Cache clearing warnings:")
+    self.logger.info(f"{cache_info.warnings}")
 
     # Delete cache using preferred huggingface cache clearing method
     if current_revision is None:
         for cache in cache_dir.iterdir():
             if repo_id.replace("/", "--") in str(cache):
-                bt.logging.info(f"Deleting the entire cache folder for repo {repo_id}.")
+                self.logger.info(
+                    f"Deleting the entire cache folder for repo {repo_id}."
+                )
                 try:
                     shutil.rmtree(str(cache))
                 except OSError as e:
-                    bt.logging.info(
+                    self.logger.info(
                         "Error: %s - %s deleting the entire cache folder for the repo: %s"
                         % (e.filename, e.strerror, repo_id)
                     )
@@ -480,19 +484,19 @@ def cleanup_old_cache(self, repo_id=None, current_revision=None):
                     repo.revisions, key=lambda r: r.last_modified, reverse=True
                 )
 
-                bt.logging.info(
+                self.logger.info(
                     f"Found {len(revisions)} model revisions in .cache folder. Proceeding to delete all non-current revision."
                 )
                 for revision in revisions:
                     if (current_revision is not None) and (
                         revision.commit_hash == current_revision
                     ):
-                        bt.logging.info(
+                        self.logger.info(
                             f"Skipping cache for current revision {revision.commit_hash}"
                         )
                         continue
                     else:
-                        bt.logging.info(
+                        self.logger.info(
                             f"Deleting cache for revision {revision.commit_hash}"
                         )
                         cache_info.delete_revisions(revision.commit_hash).execute()
@@ -502,13 +506,13 @@ def cleanup_old_cache(self, repo_id=None, current_revision=None):
     if len(broken_cache_list) > 1:
         for cache in cache_dir.iterdir():
             if str(cache) in str(broken_cache_list):
-                bt.logging.info(
+                self.logger.info(
                     f"Found repo {repo_id} in HF cache warning message. Proceeding to delete the entire cache folder."
                 )
                 try:
                     shutil.rmtree(str(cache))
                 except OSError as e:
-                    bt.logging.info(
+                    self.logger.info(
                         "Error: %s - %s deleting the entire cache folder for the repo: %s"
                         % (e.filename, e.strerror, repo_id)
                     )
@@ -518,7 +522,7 @@ def upload_new_state(self, epoch: int, results: dict, block: int = None):
     attempt = 0
     while attempt < self.model_upload_retry_limit:
         try:
-            bt.logging.info(
+            self.logger.info(
                 f"Pushing new model and optimizer state to HF Hub with tag {epoch}"
             )
 
@@ -547,26 +551,26 @@ def upload_new_state(self, epoch: int, results: dict, block: int = None):
                     if updated_refs.tags
                     else 0
                 )
-                bt.logging.info(f"Successfully pushed new model with tag {new_tag}")
+                self.logger.info(f"Successfully pushed new model with tag {new_tag}")
                 # Wait to allow out of sync miners to download new model state
                 time.sleep(self.load_state_timeout)
                 break
 
         except HfHubHTTPError as e:
             attempt += 1
-            bt.logging.info(f"{e}. Loading State from Peer.")
+            self.logger.info(f"{e}. Loading State from Peer.")
             state_loaded = load_state_from_peer(self, epoch=self.global_progress.epoch)
             if state_loaded:
                 break
         except Exception:
             attempt += 1
-            bt.logging.warning(
+            self.logger.warning(
                 f"Failed To Upload Model To HF hub, Retrying. Attempt {attempt}/{self.model_upload_retry_limit}."
             )
             if attempt < self.model_upload_retry_limit:
                 time.sleep(self.model_upload_retry_delay)
             else:
-                bt.logging.error(
+                self.logger.error(
                     "Maximum Retry Limit Reached. Unable To Upload Model To HF Hub."
                 )
                 raise
@@ -584,7 +588,7 @@ def save_and_upload_state(self, epoch: int, results: dict, block: int = None):
     while attempt < self.model_upload_retry_limit:
         try:
             with tempfile.TemporaryDirectory() as tmp_folder:
-                bt.logging.info(
+                self.logger.info(
                     f"Preparing model and optimizer state for epoch {epoch}"
                 )
                 if block is not None:
@@ -617,7 +621,7 @@ def save_and_upload_state(self, epoch: int, results: dict, block: int = None):
                     os.path.join(tmp_folder, "inner_optimizer.pt"),
                 )
 
-                bt.logging.info(
+                self.logger.info(
                     f"Uploading model and optimizer states to repo: {self.config.neuron.global_model_name}"
                 )
 
@@ -638,20 +642,20 @@ def save_and_upload_state(self, epoch: int, results: dict, block: int = None):
                     tag_message=commit_message,
                 )
 
-                bt.logging.info(
+                self.logger.info(
                     f"Successfully pushed new model and optimizer state with tag {epoch} to repo: {self.config.neuron.global_model_name}"
                 )
                 return True
 
         except Exception as e:
             attempt += 1
-            bt.logging.warning(
+            self.logger.warning(
                 f"Failed to upload state to HF hub, Retrying. Attempt {attempt}/{self.model_upload_retry_limit}. Error: {str(e)}"
             )
             if attempt < self.model_upload_retry_limit:
                 time.sleep(self.model_upload_retry_delay)
             else:
-                bt.logging.error(
+                self.logger.error(
                     "Maximum retry limit reached. Unable to upload state to HF Hub."
                 )
                 raise
@@ -692,5 +696,5 @@ def get_top_uid(self):
     ]
     if top_uid_list != []:
         top_uid = top_uid_list[-1]
-    bt.logging.info(f"Top UID Identified As {top_uid}")
+    self.logger.info(f"Top UID Identified As {top_uid}")
     return top_uid

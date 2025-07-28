@@ -101,7 +101,7 @@ class Miner(BaseMinerNeuron):
 
     def _init_basic_components(self):
         """Initialize basic miner components and configurations."""
-        setup_logging(config=self.config)
+        setup_logging(self, config=self.config)
 
         # Core setup
         self.device = self.config.neuron.device
@@ -128,7 +128,7 @@ class Miner(BaseMinerNeuron):
         self.influx_client = None
         self.influx_write_api = None
         try:
-            bt.logging.info(
+            self.logger.info(
                 "Attempting to initialize InfluxDB client for metrics collection..."
             )
             self.influx_client = InfluxDBClient(
@@ -140,23 +140,23 @@ class Miner(BaseMinerNeuron):
             self.influx_write_api = self.influx_client.write_api(
                 write_options=SYNCHRONOUS
             )
-            bt.logging.info("InfluxDB client and write_api initialized successfully.")
+            self.logger.info("InfluxDB client and write_api initialized successfully.")
 
             # Create a background thread for periodic metric submission
             self.metrics_thread = threading.Thread(target=self._report_metrics_loop)
             self.metrics_thread.daemon = True
             self.metrics_thread.start()
-            bt.logging.info("Metrics tracking thread initialized successfully.")
+            self.logger.info("Metrics tracking thread initialized successfully.")
 
         except Exception as e:
-            bt.logging.error(
+            self.logger.error(
                 f"Failed to initialize InfluxDB client: {e}. Metrics collection will be disabled."
             )
             if self.influx_client:
                 try:
                     self.influx_client.close()
                 except Exception as close_e:
-                    bt.logging.error(
+                    self.logger.error(
                         f"Error closing InfluxDB client during cleanup: {close_e}"
                     )
             self.influx_client = None
@@ -168,7 +168,7 @@ class Miner(BaseMinerNeuron):
             try:
                 self._report_current_metrics()
             except Exception as e:
-                bt.logging.error(f"Error reporting metrics: {e}")
+                self.logger.error(f"Error reporting metrics: {e}")
             time.sleep(30)  # Report every 30 seconds
 
     def _report_current_metrics(self):
@@ -278,7 +278,7 @@ class Miner(BaseMinerNeuron):
         self.local_progress.inner_step = get_local_inner_step(self)
 
         if self.global_progress.epoch is None:
-            bt.logging.error(
+            self.logger.error(
                 "Model Tag Is None. Make Sure You Are Using The Correct Model Name"
             )
 
@@ -325,9 +325,9 @@ class Miner(BaseMinerNeuron):
                         repo_type="model",
                         tag=tag_name,
                     )
-                    bt.logging.info(f"Succesfully deleted tag {tag_name}")
+                    self.logger.info(f"Succesfully deleted tag {tag_name}")
                 except Exception as e:
-                    bt.logging.info(f"Failed to delete tag {tag_name} with error {e}")
+                    self.logger.info(f"Failed to delete tag {tag_name} with error {e}")
                 time.sleep(30)
 
     def _init_model_components(self):
@@ -416,7 +416,7 @@ class Miner(BaseMinerNeuron):
 
     def _init_network_components(self):
         """Initialize network and P2P components"""
-        bt.logging.info("Logging PeerID to chain")
+        self.logger.info("Logging PeerID to chain")
         log_peerid_to_chain(self)
 
     def _sync_with_global_model(self):
@@ -427,7 +427,7 @@ class Miner(BaseMinerNeuron):
         )
 
         if self.config.neuron.global_model_name == self.config.neuron.local_model_name:
-            bt.logging.warning(
+            self.logger.warning(
                 "Your local miner_hf_repo_id set to the global model_name. This will harm your incentive. Set miner_hf_repo_id to a unique huggingface repo id."
             )
 
@@ -518,7 +518,7 @@ class Miner(BaseMinerNeuron):
                 encoded, self.config.neuron.topk_compression
             )
             if totalk is None:
-                bt.logging.info("totalk is None")
+                self.logger.info("totalk is None")
             del encoded  # Free the encoded tensor immediately
 
             # Estimate transmitted gradient
@@ -567,23 +567,23 @@ class Miner(BaseMinerNeuron):
                     repo_type="model",
                     private=False,
                 )
-                bt.logging.info(
+                self.logger.info(
                     f"Created new repository: {self.config.neuron.local_model_name}"
                 )
             except Exception as e:
-                bt.logging.error(f"Failed to create repository: {str(e)}")
+                self.logger.error(f"Failed to create repository: {str(e)}")
                 raise
 
         attempt = 0
         while attempt < self.model_upload_retry_limit:
             # Check if training is paused (i.e. all_reduce is happening)
             if not self.training_active.is_set():
-                bt.logging.info("Upload Cancelled Due To AllReduce Operation")
+                self.logger.info("Upload Cancelled Due To AllReduce Operation")
                 return False
             try:
                 if not os.path.exists(self.output_dir):
                     os.makedirs(self.output_dir)
-                bt.logging.info(
+                self.logger.info(
                     f":memory: Saving model state locally for epoch {epoch}"
                 )
                 self.model.config.inner_step = self.local_progress.inner_step
@@ -618,7 +618,7 @@ class Miner(BaseMinerNeuron):
                     ),
                 )
 
-                bt.logging.info(
+                self.logger.info(
                     f":upload: Uploading model and optimizer states to repo: {self.config.neuron.local_model_name}"
                 )
                 commit_message = f"Run {__run__}. Outer Step {epoch}. Inner Step {self.local_progress.inner_step}."
@@ -637,7 +637,7 @@ class Miner(BaseMinerNeuron):
                 while self.upload_process.poll() is None:
                     if not self.training_active.is_set():
                         self.upload_process.kill()
-                        bt.logging.info(
+                        self.logger.info(
                             "Cancelling Ongoing Model Upload For AllReduce Operation"
                         )
                         self.model.config.block_list = (
@@ -681,7 +681,7 @@ class Miner(BaseMinerNeuron):
                     current_revision=None,
                 )
 
-                bt.logging.info(
+                self.logger.info(
                     f"Successfully pushed new model state with tag {__run__}.{epoch}.{self.model.config.inner_step} to repo: {self.config.neuron.local_model_name}"
                 )
 
@@ -689,13 +689,13 @@ class Miner(BaseMinerNeuron):
 
             except Exception as e:
                 attempt += 1
-                bt.logging.warning(
+                self.logger.warning(
                     f":error: Failed to upload state to HF hub, Retrying. Attempt {attempt}/{self.model_upload_retry_limit}. Error: {str(e)}"
                 )
                 if attempt < self.model_upload_retry_limit:
                     time.sleep(self.model_upload_retry_delay)
                 else:
-                    bt.logging.error(
+                    self.logger.error(
                         "Maximum retry limit reached. Unable to upload state to HF Hub."
                     )
                     self.model.config.block_list = (
@@ -709,7 +709,7 @@ class Miner(BaseMinerNeuron):
         """Starts a background upload of the model state, managing ongoing uploads."""
         # If there's an ongoing upload, check if it's done
         if self.current_upload_future and not self.current_upload_future.done():
-            bt.logging.info("Previous upload still in progress, skipping new upload")
+            self.logger.info("Previous upload still in progress, skipping new upload")
             return
 
         # Start new upload
@@ -721,9 +721,9 @@ class Miner(BaseMinerNeuron):
         def upload_completed(future):
             try:
                 result = future.result()  # This will raise any exceptions that occurred
-                bt.logging.info(f"Model state upload completed with result: {result}")
+                self.logger.info(f"Model state upload completed with result: {result}")
             except Exception as e:
-                bt.logging.error(f"Model state upload failed: {str(e)}")
+                self.logger.error(f"Model state upload failed: {str(e)}")
 
         self.current_upload_future.add_done_callback(upload_completed)
 
@@ -740,7 +740,7 @@ class Miner(BaseMinerNeuron):
     async def is_alive(
         self, synapse: distributed_training.protocol.IsAlive
     ) -> distributed_training.protocol.IsAlive:
-        bt.logging.info("Responded to be Active")
+        self.logger.info("Responded to be Active")
         synapse.completion = "True"
         synapse.epoch = self.local_progress.epoch
         return synapse
@@ -751,7 +751,7 @@ class Miner(BaseMinerNeuron):
             self.training_status = TrainingStatus.RUNNING
             self.training_error = None
             self.training_executor.submit(self._training_worker)
-            bt.logging.info(
+            self.logger.info(
                 ":white_heavy_check_mark: Starting continuous training worker"
             )
 
@@ -760,13 +760,13 @@ class Miner(BaseMinerNeuron):
         self.training_active.clear()
         time.sleep(1)
         self.training_status = TrainingStatus.PAUSED
-        bt.logging.info(":warning:  Pausing continuous training.")
+        self.logger.info(":warning:  Pausing continuous training.")
 
     def resume_training(self):
         """Resumes the continuous training loop"""
         self.training_active.set()
         self.training_status = TrainingStatus.RUNNING
-        bt.logging.info(":white_heavy_check_mark: Resuming continuous training.")
+        self.logger.info(":white_heavy_check_mark: Resuming continuous training.")
 
     async def fetch_training_data(self):
         """Async function to fetch training data"""
@@ -790,15 +790,15 @@ class Miner(BaseMinerNeuron):
 
                 return dataset
             except Exception as e:
-                bt.logging.error(f"Error fetching training data: {str(e)}")
+                self.logger.error(f"Error fetching training data: {str(e)}")
                 attempt += 1
-                bt.logging.warning(
+                self.logger.warning(
                     f"Failed to fetch data, retrying. Attempt {attempt}/{self.retry_limit}"
                 )
                 if attempt < self.retry_limit:
                     time.sleep(self.retry_delay * attempt)  # Wait before the next retry
                 else:
-                    bt.logging.error(
+                    self.logger.error(
                         "Maximum retry limit reached. Unable to fetch data."
                     )
                     raise
@@ -822,7 +822,7 @@ class Miner(BaseMinerNeuron):
                         epoch=self.local_progress.epoch,
                     )
 
-                bt.logging.debug(":pages: Fetching fineweb-edu pages")
+                self.logger.debug(":pages: Fetching fineweb-edu pages")
                 dataset = self.training_loop.run_until_complete(
                     self.fetch_training_data()
                 )
@@ -833,7 +833,7 @@ class Miner(BaseMinerNeuron):
                 self.model.config.block_list.append(self.current_block)
                 self._process_training_batch(dataset)
             except Exception as e:
-                bt.logging.warning(f"Training Loop Failed with error: {e}")
+                self.logger.warning(f"Training Loop Failed with error: {e}")
                 self.training_status = TrainingStatus.ERROR
                 self.training_error = str(e)
                 break
@@ -866,7 +866,7 @@ class Miner(BaseMinerNeuron):
                 self.local_progress.samples_accumulated
                 >= self.local_batch_size_train_effective
             ):
-                bt.logging.info(
+                self.logger.info(
                     f":training:  Outer Step: {self.local_progress.epoch} | "
                     f"Inner Step: {self.local_progress.inner_step} | "
                     f"Learning Rate: {self.inner_optimizer.param_groups[0]['lr']:.8f} | "
@@ -907,13 +907,13 @@ class Miner(BaseMinerNeuron):
         self, synapse: distributed_training.protocol.AllReduce
     ) -> distributed_training.protocol.AllReduce:
         """Handle incoming all_reduce requests by pausing continuous training"""
-        bt.logging.info("Received All Reduce Call")
+        self.logger.info("Received All Reduce Call")
         self.all_reduce_start_time = time.perf_counter()
         try:
             async with self.training_lock:
                 # Cancel any ongoing upload
                 if self.current_upload_future and not self.current_upload_future.done():
-                    bt.logging.info(
+                    self.logger.info(
                         "Cancelling Ongoing Model Upload For AllReduce Operation"
                     )
                     self.current_upload_future.cancel()
@@ -956,7 +956,7 @@ class Miner(BaseMinerNeuron):
                     if not synapse.completion:
                         raise Exception("AllReduce Failed, Loading Latest State")
                 except Exception as e:
-                    bt.logging.info(f"All Reduce Failed with error: {e}")
+                    self.logger.info(f"All Reduce Failed with error: {e}")
                     synapse.completion = False
 
         except Exception as e:
@@ -971,7 +971,7 @@ class Miner(BaseMinerNeuron):
                 self.local_progress.inner_step = 0
                 self.local_progress.epoch += 1
                 self.last_allreduce_block = self.current_block
-                bt.logging.info("AllReduce Operation Finished Succesfully")
+                self.logger.info("AllReduce Operation Finished Succesfully")
                 self.start_background_upload(
                     epoch=self.local_progress.epoch,
                 )
@@ -1024,7 +1024,7 @@ class Miner(BaseMinerNeuron):
                 break
 
         if uid is None:
-            bt.logging.trace(
+            self.logger.trace(
                 f"Blacklisting unrecognized hotkey: {synapse.dendrite.hotkey}"
             )
             return (
@@ -1045,12 +1045,12 @@ class Miner(BaseMinerNeuron):
 
         if synapse.dendrite.hotkey not in self.metagraph.hotkeys:
             # Ignore requests from unrecognized entities.
-            bt.logging.trace(
+            self.logger.trace(
                 f"Blacklisting unrecognized hotkey {synapse.dendrite.hotkey}"
             )
             return True, "Unrecognized hotkey"
 
-        bt.logging.trace(
+        self.logger.trace(
             f"Not Blacklisting recognized hotkey {synapse.dendrite.hotkey}"
         )
         return False, "Hotkey recognized!"
@@ -1059,14 +1059,14 @@ class Miner(BaseMinerNeuron):
         self, synapse: distributed_training.protocol.IsAlive
     ) -> typing.Tuple[bool, str]:
         blacklist = await self.blacklist_base(synapse)
-        bt.logging.debug(blacklist[1])
+        self.logger.debug(blacklist[1])
         return blacklist
 
     async def blacklist_all_reduce(
         self, synapse: distributed_training.protocol.AllReduce
     ) -> typing.Tuple[bool, str]:
         blacklist = await self.blacklist_base(synapse)
-        bt.logging.debug(blacklist[1])
+        self.logger.debug(blacklist[1])
         return blacklist
 
 

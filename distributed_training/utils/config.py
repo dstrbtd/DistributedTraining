@@ -179,7 +179,7 @@ def add_args(cls, parser, prefix=None):
         "--neuron.min_group_size",
         type=int,
         help="The minimum group size for an all reduce",
-        default=50,
+        default=25,
     )
 
     parser.add_argument(

@@ -381,10 +381,10 @@ class DatasetLoader(SubsetLoader):
                 # Handle HTTP client errors with a retry mechanism
                 attempt += 1
                 if attempt < retry_limit:
-                    bt.logging.info(
+                    self.logger.info(
                         f"Retrying page {page} due to error: {e}. Attempt {attempt} of {retry_limit}"
                     )
-                    bt.logging.info(
+                    self.logger.info(
                         f"Waiting {self.retry_delay * attempt} seconds before retrying..."
                     )
                     await asyncio.sleep(
