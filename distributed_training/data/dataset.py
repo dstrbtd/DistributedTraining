@@ -220,6 +220,8 @@ class DatasetLoader(SubsetLoader):
     retry_delay: int = 60  # Seconds to wait between retries
     num_rows_per_page: int = 100
 
+    logger = bt.logging
+
     @staticmethod
     async def next_pages(
         offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100

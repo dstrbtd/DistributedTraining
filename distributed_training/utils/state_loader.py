@@ -246,7 +246,7 @@ def load_model_optimizer_gradient_averager(
             torch.cuda.empty_cache()
 
     # Set outer optimizer
-    self.outer_optimizer = partial(torch.optim.SGD, lr=0.7, momentum=0.9, nesterov=True)
+    self.outer_optimizer = partial(torch.optim.SGD, lr=1, momentum=0.9, nesterov=True)
 
     # Load a new state averager
     self.state_averager = DTStateAverager(

@@ -405,7 +405,7 @@ class Miner(BaseMinerNeuron):
         for n, p in self.model.named_parameters():
             self.owned_params.add(n)
             self.error_feedback[n] = torch.zeros_like(p, device=self.device)
-            _, _, xshape, totalk, _ = self.compressor.compress(
+            _, _, xshape, totalk = self.compressor.compress(
                 self.transformer.encode(
                     torch.zeros_like(p), use_dct=self.config.neuron.use_dct
                 ),
