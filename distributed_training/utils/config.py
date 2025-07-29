@@ -403,6 +403,13 @@ def add_args(cls, parser, prefix=None):
             default=0.1,
         )
 
+        parser.add_argument(
+            "--neuron.assigned_loss_score_moving_average_alpha",
+            type=float,
+            help="The value of the alpha for the assinged loss score moving average.",
+            default=0.05,
+        )
+
     else:
         parser.add_argument(
             "--blacklist.force_validator_permit",

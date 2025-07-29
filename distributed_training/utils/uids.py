@@ -149,7 +149,6 @@ def get_next_uids_manual(self, k: int = 25) -> List[int]:
                 ),
             )
         )
-        self.logger.info({k: v.train.updated_time for k, v in self.uid_tracker.items()})
         uids = list(self.uid_tracker.keys())
         uids = uids[:k]
         return uids
@@ -171,7 +170,7 @@ def get_next_uid_api(self):
         self.logger.info(
             f"Error {e} getting UID from: {self.uid_api_url}. Attempting to get UID manually."
         )
-        uids = get_next_uids_manual(self)
+        uids = get_next_uids_manual(self, k=self.config.neuron.min_group_size)
 
     return uids
 

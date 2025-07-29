@@ -505,6 +505,12 @@ class BaseValidatorNeuron(BaseNeuron):
                             f"Failed to load saved uid_tracker for UID: {uid} with error: {e}"
                         )
                         self.uid_tracker[uid] = UidTracker(uid=uid)
+                    self.openskill_ratings[uid] = self.openskill_model.rating(
+                        mu=self.uid_tracker[uid].train.openskill_rating.mu,
+                        sigma=self.uid_tracker[uid].train.openskill_rating.sigma,
+                        name=str(uid),
+                    )
+
         elif os.path.isfile(self.config.neuron.full_path + "/state.pt"):
             self.logger.info(
                 "Pre-saved validator state found in .pt format. Loading validator state."

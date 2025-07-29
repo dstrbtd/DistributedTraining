@@ -41,11 +41,7 @@ class LossProfile(BaseModel):
     after: float = 0.0
     absolute: float = 0.0
     relative: float = 0.0
-
-
-class LossType(BaseModel):
-    random: LossProfile = Field(default_factory=LossProfile)
-    assigned: LossProfile = Field(default_factory=LossProfile)
+    score: float = 0.0
 
 
 class Chaindata(BaseModel):
@@ -61,7 +57,8 @@ class ScoreAllReduce(BaseModel):
 class ScoreTrain(BaseModel):
     model_id: Optional[str] = None
     is_valid: bool = True
-    loss: LossType = Field(default_factory=LossType)
+    random: LossProfile = Field(default_factory=LossProfile)
+    assigned: LossProfile = Field(default_factory=LossProfile)
     openskill_rating: float = 0.0
     score: float = 0.0
     updated_time: float = 0

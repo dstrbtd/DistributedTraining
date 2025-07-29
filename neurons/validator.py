@@ -68,8 +68,6 @@ from distributed_training.utils.uids import map_uid_to_peerid, update_run_peerid
 from distributed_training.validator import forward
 from distributed_training import __run__
 
-from openskill.models import PlackettLuce
-
 from distributed_training.utils.compression import CompressDCT, TransformDCT
 from typing import Any
 
@@ -136,9 +134,11 @@ class Validator(BaseValidatorNeuron):
                     .tag("miner_uid", str(uid))
                     .tag("hotkey", self.wallet.hotkey.ss58_address)
                     .tag("run_id", __run__)
-                    .field("train_score", data.train.score)
-                    .field("all_reduce_score", float(data.all_reduce.score))
                     .field("repo_valid_score", float(data.train.is_valid))
+                    .field("all_reduce_score", float(data.all_reduce.score))
+                    .field("train_score", data.train.score)
+                    .field("train_random_score", data.train.random.score)
+                    .field("train_assigned_score", data.train.assigned.score)
                     .field("total_score", data.total.score)
                 )
                 points.append(point)
@@ -149,7 +149,7 @@ class Validator(BaseValidatorNeuron):
                     .tag("miner_uid", str(uid))
                     .tag("hotkey", self.wallet.hotkey.ss58_address)
                     .tag("run_id", __run__)
-                    .field("loss", float(data.train.loss.after or 0))
+                    .field("loss", float(data.train.random.after or 0))
                 )
                 points.append(point)
 
@@ -209,7 +209,7 @@ class Validator(BaseValidatorNeuron):
 
     def _init_basic_components(self):
         """Initialize basic validator components"""
-        setup_logging(config=self.config)
+        setup_logging(self, config=self.config)
 
         # Core setup
         self.device = self.config.neuron.device
@@ -262,6 +262,7 @@ class Validator(BaseValidatorNeuron):
 
         # Core parameters
         self.learning_rate_maximum = 4e-4
+        self.learning_rate_eval = 0.5
         self.weight_decay = 0.1
         self.num_inner_steps = 500
         self.offload_optimizer = True
@@ -321,16 +322,6 @@ class Validator(BaseValidatorNeuron):
         )
         self.failed_is_alive_counter = {uid: 0 for uid in self.metagraph.uids.tolist()}
         self.miner_uids = []
-
-    def _init_open_skill_model(self):
-        self.openskill_model = PlackettLuce(
-            beta=self.config.neuron.openskill_beta, tau=self.config.neuron.openskill_tau
-        )
-        self.openskill_ratings = {}
-        self.openskill_ratings = {
-            int(uid): self.openskill_model.rating(name=str(uid))
-            for uid in range(self.metagraph.n)
-        }
 
     def _load_gradient_compressors(self):
         # Init compression
@@ -492,10 +483,9 @@ class Validator(BaseValidatorNeuron):
             )
         _bounds_check(t)
 
-    def update_model_with_gradient(
-        self, model: torch.nn.Module, eval_uid: int, eval_state_dict: dict
+    def update_model_with_pseudo_gradient(
+        self, model: torch.nn.Module, uid: int, state_dict: dict
     ) -> None:
-        self.eval_lr_factor = 0.5
         model.zero_grad()
 
         # First validate all gradients before applying any
@@ -503,9 +493,9 @@ class Validator(BaseValidatorNeuron):
             idxs_key = n + "idxs"
             vals_key = n + "vals"
             quant_key = n + "quant_params"
-            idxs = eval_state_dict.get(idxs_key, None)
-            vals = eval_state_dict.get(vals_key, None)
-            quant_params = eval_state_dict.get(quant_key, None)
+            idxs = state_dict.get(idxs_key, None)
+            vals = state_dict.get(vals_key, None)
+            quant_params = state_dict.get(quant_key, None)
 
             if idxs is not None and vals is not None and quant_params is not None:
                 # Move tensors to device
@@ -515,10 +505,10 @@ class Validator(BaseValidatorNeuron):
                 # Validate indices are within bounds
                 if self.totalks.get(n) is None:
                     self.logger.info(
-                        f"Missing totalk for parameter {n}, skipping peer {eval_uid}"
+                        f"Missing totalk for parameter {n}, skipping peer {uid}"
                     )
                     raise ValueError(
-                        f"Invalid gradient data from peer {eval_uid}: Missing totalk for parameter {n}"
+                        f"Invalid gradient data from peer {uid}: Missing totalk for parameter {n}"
                     )
 
                 # Check compressed indices are valid
@@ -532,10 +522,10 @@ class Validator(BaseValidatorNeuron):
                 # Check for NaN or Inf values
                 if torch.isnan(vals).any() or torch.isinf(vals).any():
                     self.logger.info(
-                        f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {eval_uid}"
+                        f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {uid}"
                     )
                     raise ValueError(
-                        f"Invalid gradient data from peer {eval_uid}: NaN or Inf values in {vals_key}"
+                        f"Invalid gradient data from peer {uid}: NaN or Inf values in {vals_key}"
                     )
 
         # If all validations pass, apply the gradients
@@ -543,9 +533,9 @@ class Validator(BaseValidatorNeuron):
             idxs_key = n + "idxs"
             vals_key = n + "vals"
             quant_key = n + "quant_params"
-            idxs = eval_state_dict.get(idxs_key, None)
-            vals = eval_state_dict.get(vals_key, None)
-            quant_params = eval_state_dict.get(quant_key, None)
+            idxs = state_dict.get(idxs_key, None)
+            vals = state_dict.get(vals_key, None)
+            quant_params = state_dict.get(quant_key, None)
 
             if idxs is not None and vals is not None and quant_params is not None:
                 idxs = idxs.to(self.device)
@@ -566,15 +556,15 @@ class Validator(BaseValidatorNeuron):
                 # Final safety check on the gradient itself
                 if torch.isnan(grad).any() or torch.isinf(grad).any():
                     self.logger.info(
-                        f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}"
+                        f"Decompressed gradient for parameter {n} contains NaN/Inf, skipping UID {uid}"
                     )
                     raise ValueError(
-                        f"Invalid gradient from peer {eval_uid}: NaN or Inf in decompressed gradient for {n}"
+                        f"Invalid gradient from UID {uid}: NaN or Inf in decompressed gradient for parameter {n}"
                     )
                 p.data.sub_(
                     grad,
                     alpha=self.state_averager.optimizer.param_groups[0]["lr"]
-                    * self.eval_lr_factor,
+                    * self.learning_rate_eval,
                 )
 
 

@@ -204,9 +204,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
         f"UID {uid:03d}: Gradient loaded from {self.uid_tracker[uid].train.model_id} "
         f"with revision {revision}"
     )
-    self.update_model_with_gradient(
-        model=model_t1, eval_uid=uid, eval_state_dict=gradient
-    )
+    self.update_model_with_pseudo_gradient(model=model_t1, uid=uid, state_dict=gradient)
     self.logger.info(f"UID {uid:03d}: Model updated with current gradient")
 
     # 3. Evaluate loss after applying gradient
@@ -292,23 +290,21 @@ async def score_uids(self, uids: list):
                     revision=revision,
                 )
             )
-            # breakpoint()
 
             for k, v in loss_scores.items():
-                setattr(self.uid_tracker[uid].train.loss.random, k, v)
+                setattr(self.uid_tracker[uid].train.random, k, v)
 
             self.logger.info(
-                f"UID {uid:03d}: Absolute loss improvement: {loss_scores['absolute']}"
+                f"UID {uid:03d}: Absolute loss improvement: {loss_scores['absolute']:.6f}"
             )
             self.logger.info(
-                f"UID {uid:03d}: Relative loss improvement: {loss_scores['relative']}"
+                f"UID {uid:03d}: Relative loss improvement: {loss_scores['relative']:.6f}"
             )
 
             # ──────────────────────────────────────────────────────────────────────────
             # Step 2: Evaluate on UID's assigned data
             # ──────────────────────────────────────────────────────────────────────────
 
-            # 2.1 Sample data indices and assigned block
             self.logger.info(f"UID {uid:03d}: Sampling dataset indices for testing")
             assigned_block = random.sample(
                 json.load(
@@ -334,13 +330,13 @@ async def score_uids(self, uids: list):
             )
 
             for k, v in loss_scores.items():
-                setattr(self.uid_tracker[uid].train.loss.assigned, k, v)
+                setattr(self.uid_tracker[uid].train.assigned, k, v)
 
             self.logger.info(
-                f"UID {uid:03d}: Absolute loss improvement: {loss_scores['absolute']}"
+                f"UID {uid:03d}: Absolute loss improvement: {loss_scores['absolute']:.6f}"
             )
             self.logger.info(
-                f"UID {uid:03d}: Relative loss improvement: {loss_scores['relative']}"
+                f"UID {uid:03d}: Relative loss improvement: {loss_scores['relative']:.6f}"
             )
 
         except Exception as e:
@@ -412,26 +408,22 @@ def benchmark_uids(self):
             self.logger.info(
                 f"UID {uid} benchmarking failed with error {e}. Keeping score as is."
             )
-    self.logger.info(
-        {uid: self.uid_tracker[uid].train.is_valid for uid in self.uid_tracker}
-    )
 
 
-def display_rankings(self, uids: list, original_ordinals: dict):
+def display_rankings(self, uids: list, original_openskill_scores: dict):
     """
-    This function creates a table showing the current match rankings based on OpenSkill ratings.
-    Inspired by https://github.com/tplr-ai/templar/blob/c0d2cf02cd7da6f100debf230ddb5a6592e7c697/neurons/validator.py#L393
+    This function prints a table showing this round's UID rankings based off train.assigned.scores and train.random.scores
 
     Args:
         uids (list): UIDs of miners to be evaluated.
-        original_ordinals (dict): original OpenSkill ordinal values before update
+        original_openskill_scores (dict): original OpenSkill ordinal values before update
     """
     # Create a ranking table to display current match rankings
     try:
         # Sort UIDs by current window gradient scores (descending)
         sorted_uids = sorted(
             uids,
-            key=lambda uid: self.uid_tracker[uid].train.loss.relative,
+            key=lambda uid: (self.uid_tracker[uid].train.score),
             reverse=True,
         )
 
@@ -441,10 +433,12 @@ def display_rankings(self, uids: list, original_ordinals: dict):
             width = 0
         os.environ["COLUMNS"] = str(max(200, width))
 
-        rich_table = Table(title=f"Current Match Rankings (Block {self.current_block})")
-        rich_table.add_column("Match Rank")
+        rich_table = Table(title=f"Current Round Rankings (Block {self.current_block})")
+        rich_table.add_column("Round Rank")
         rich_table.add_column("UID")
-        rich_table.add_column("Match Score")
+        rich_table.add_column("Train Final")
+        rich_table.add_column("Train Assigned")
+        rich_table.add_column("Train Random")
         rich_table.add_column("OpenSkill μ (After)")
         rich_table.add_column("OpenSkill σ (After)")
         rich_table.add_column("Ordinal (After)")
@@ -453,7 +447,7 @@ def display_rankings(self, uids: list, original_ordinals: dict):
         # Add rows to table
         for rank, uid in enumerate(sorted_uids, 1):
             rating = self.openskill_ratings[uid]
-            ordinal_before = original_ordinals[uid]
+            ordinal_before = original_openskill_scores[uid]
             ordinal_after = rating.ordinal()
             ordinal_diff = ordinal_after - ordinal_before
 
@@ -463,7 +457,9 @@ def display_rankings(self, uids: list, original_ordinals: dict):
             rich_table.add_row(
                 str(rank),
                 str(uid),
-                f"{self.uid_tracker[uid].train.loss.relative:.6f}",  # instead of self.current_window_scores[uid]
+                f"{self.uid_tracker[uid].train.score:.6f}",
+                f"{self.uid_tracker[uid].train.assigned.score:.6f}",
+                f"{self.uid_tracker[uid].train.random.score:.6f}",
                 f"{rating.mu:.4f}",
                 f"{rating.sigma:.4f}",
                 f"{ordinal_after:.4f}",
@@ -477,15 +473,20 @@ def display_rankings(self, uids: list, original_ordinals: dict):
         table_str = sio.getvalue()
 
         self.logger.info(
-            f"Current Match Rankings (Block {self.current_block}):\n{table_str}"
+            f"Current Round Rankings (Block {self.current_block}):\n{table_str}"
         )
     except Exception as e:
-        self.logger.info(f"Failed to create OpenSkill rankings table: {str(e)}")
+        self.logger.info(f"Failed to create Round Rankings Table: {str(e)}")
 
 
 def update_train_scores(self, uids: list):
     """
-    Update selected miners' train.score using OpenSkill ratings of their gradient.
+    Update selected miners' train.score using the following method:
+    1. Calculates train.random.score using the OpenSkill ratings of the relative improvement of a model's loss
+    after applying a miner's pseudo gradients on a random unseen dataset.
+    2. Calculates train.assigned.score which is a binary indicator of wether relative improvement of a model's
+    loss on an unseen dataset is lower than the relative improvement of a model's loss on the miner's assigned dataset.
+    3. Calculates train.score as the product of train.random.score and train.assigned.score.
 
     The OpenSkill rating system (https://arxiv.org/pdf/2401.05451) provides a probabilistic skill rating
     that accounts for uncertainty and relative performance between peers. Ratings are updated using the
@@ -495,16 +496,18 @@ def update_train_scores(self, uids: list):
         uids (list): UIDs of miners to be evaluated.
     """
     # Store original Openskill ordinal values to calculate diff after update
-    original_ordinals = {}
+    original_openskill_scores = {}
     for uid in uids:
         if uid in self.openskill_ratings:
-            original_ordinals[uid] = float(self.openskill_ratings[uid].ordinal())
+            original_openskill_scores[uid] = float(
+                self.openskill_ratings[uid].ordinal()
+            )
         else:
             # For new peers without previous ratings
-            original_ordinals[uid] = 0.0
+            original_openskill_scores[uid] = 0.0
 
     # Calculate ranks based on gradient scores (lower rank = better performance)
-    scores = [self.uid_tracker[uid].train.loss.relative for uid in uids]
+    scores = [self.uid_tracker[uid].train.random.relative for uid in uids]
 
     # Create teams list for OpenSkill where each miner is a team of one
     teams = [[self.openskill_ratings[uid]] for uid in uids]
@@ -523,13 +526,19 @@ def update_train_scores(self, uids: list):
         self.uid_tracker[uid].train.openskill_rating.sigma = float(
             self.openskill_ratings[uid].sigma
         )
-        self.uid_tracker[uid].train.score = float(self.openskill_ratings[uid].ordinal())
-
-        self.logger.info(
-            f"Train Score for UID {uid}: {self.uid_tracker[uid].train.score}",
+        self.uid_tracker[uid].train.random.score = float(
+            self.openskill_ratings[uid].ordinal()
+        )
+        self.uid_tracker[uid].train.assigned.score += (
+            self.uid_tracker[uid].train.assigned.absolute
+            > self.uid_tracker[uid].train.random.absolute
+        ) * self.config.neuron.assigned_loss_score_moving_average_alpha
+        self.uid_tracker[uid].train.score = (
+            self.uid_tracker[uid].train.random.score
+            * self.uid_tracker[uid].train.assigned.score
         )
 
-    display_rankings(self, uids, original_ordinals)
+    display_rankings(self, uids, original_openskill_scores)
 
     self.logger.info(
         f"Updated train scores for {len(uids)} UIDs based on OpenSkill ratings of gradient scores",

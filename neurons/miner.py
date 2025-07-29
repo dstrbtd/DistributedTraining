@@ -475,13 +475,14 @@ class Miner(BaseMinerNeuron):
             )
         return gradients
 
-    def prepare_gradient_dict(self):
+    def prepare_gradient_dict(self, quantize: bool = False):
         """
         Prepares the gradient dictionary for sharing by compressing the
         momentum for each parameter and attaching metadata.
 
         Args:
             self (Miner): Instance of Miner containing model, scheduler, state_averager, gradient_averager, compressor, transformer and configs.
+            quantize (bool): Whether to apply quantization during compression.
 
         Returns:
             tuple: (gradient, xshapes, totalks, transmitted) where:
@@ -514,17 +515,28 @@ class Miner(BaseMinerNeuron):
             encoded = self.transformer.encode(
                 self.error_feedback[n], use_dct=self.config.neuron.use_dct
             )
-            idxs, vals, xshape, totalk, quant_params = self.compressor.compress(
-                encoded, self.config.neuron.topk_compression
-            )
+            if quantize:
+                idxs, vals, xshape, totalk, quant_params = self.compressor.compress(
+                    encoded, self.config.neuron.topk_compression, quantize
+                )
+            else:
+                idxs, vals, xshape, totalk = self.compressor.compress(
+                    encoded, self.config.neuron.topk_compression, quantize
+                )
             if totalk is None:
-                self.logger.info("totalk is None")
+                bt.logging.info("totalk is None")
             del encoded  # Free the encoded tensor immediately
 
-            # Estimate transmitted gradient
-            decompressed = self.compressor.decompress(
-                p, idxs, vals, xshape, totalk, quant_params
-            )
+            if quantize:
+                # Estimate transmitted gradient
+                decompressed = self.compressor.decompress(
+                    p, idxs, vals, xshape, totalk, quant_params
+                )
+            else:
+                # Estimate transmitted gradient
+                decompressed = self.compressor.decompress(
+                    p, idxs, vals, xshape, totalk, None
+                )
             transmit_grad = self.transformer.decode(
                 decompressed, use_dct=self.config.neuron.use_dct
             )
@@ -539,7 +551,8 @@ class Miner(BaseMinerNeuron):
             gradient[n + "vals"] = (
                 vals.cpu() if isinstance(vals, torch.Tensor) else vals
             )
-            gradient[n + "quant_params"] = quant_params
+            if quantize:
+                gradient[n + "quant_params"] = quant_params
             xshapes[n] = xshape
             totalks[n] = totalk
 
@@ -609,7 +622,7 @@ class Miner(BaseMinerNeuron):
                 )
 
                 # Create and save pseudo gradient state
-                gradient_state, _, _ = self.prepare_gradient_dict()
+                gradient_state, _, _ = self.prepare_gradient_dict(quantize=False)
                 torch.save(
                     gradient_state,
                     os.path.join(
