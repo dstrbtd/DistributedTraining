@@ -410,125 +410,12 @@ class Validator(BaseValidatorNeuron):
     async def forward(self):
         return await forward(self)
 
-    def check_compressed_indices(
-        self,
-        param_name: str,
-        idxs: Any,
-        totalk: int,
-        allowed_topk: int | None = None,
-    ) -> None:
-        allowed_topk = (
-            min(self.config.neuron.topk_compression, totalk)
-            if allowed_topk is None
-            else min(allowed_topk, totalk)
-        )
-
-        def _bounds_check(t: torch.Tensor):
-            """fast min/max bounds check"""
-            if t.numel() == 0:
-                raise ValueError(f"[{param_name}] empty index list")
-            if t.min().item() < 0 or t.max().item() >= totalk:
-                bad = t[(t < 0) | (t >= totalk)][0].item()
-                raise ValueError(
-                    f"[{param_name}] Index {bad} out of bounds (totalk = {totalk})"
-                )
-
-        if isinstance(idxs, (int, float)) or (torch.is_tensor(idxs) and idxs.ndim == 0):
-            idx_int = int(idxs)
-            if not (0 <= idx_int < totalk):
-                raise ValueError(
-                    f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
-                )
-            return  # single scalar is always length-independent
-
-        if (
-            isinstance(idxs, (list, tuple))
-            and idxs
-            and isinstance(idxs[0], (list, tuple))
-        ):
-            for sub in idxs:
-                if len(sub) != allowed_topk:
-                    raise ValueError(
-                        f"[{param_name}] Invalid number of indices: "
-                        f"got {len(sub)} but expected {allowed_topk}"
-                    )
-                # vectorised bounds check on each sub-tensor
-                t = torch.as_tensor(sub, dtype=torch.long)
-                _bounds_check(t)
-            return
-
-        try:
-            t = (
-                idxs
-                if torch.is_tensor(idxs)
-                else torch.as_tensor(idxs, dtype=torch.long)
-            )
-        except Exception as e:
-            raise ValueError(f"[{param_name}] Failed to convert indices to tensor: {e}")
-
-        if t.ndim == 1:  # flat
-            if t.numel() != allowed_topk:
-                raise ValueError(
-                    f"[{param_name}] Invalid number of indices: "
-                    f"{t.numel()} but expected {allowed_topk}"
-                )
-            _bounds_check(t)
-            return
-
-        # n-D compressed: last dim must be allowed_topk
-        if t.size(-1) != allowed_topk:
-            raise ValueError(
-                f"[{param_name}] Last dimension size invalid: "
-                f"{t.size(-1)} but expected {allowed_topk}"
-            )
-        _bounds_check(t)
-
     def update_model_with_pseudo_gradient(
         self, model: torch.nn.Module, uid: int, state_dict: dict
     ) -> None:
         model.zero_grad()
 
-        # First validate all gradients before applying any
-        for n, p in model.named_parameters():
-            idxs_key = n + "idxs"
-            vals_key = n + "vals"
-            quant_key = n + "quant_params"
-            idxs = state_dict.get(idxs_key, None)
-            vals = state_dict.get(vals_key, None)
-            quant_params = state_dict.get(quant_key, None)
-
-            if idxs is not None and vals is not None and quant_params is not None:
-                # Move tensors to device
-                idxs = idxs.to(self.device)
-                vals = vals.to(self.device)
-
-                # Validate indices are within bounds
-                if self.totalks.get(n) is None:
-                    self.logger.info(
-                        f"Missing totalk for parameter {n}, skipping peer {uid}"
-                    )
-                    raise ValueError(
-                        f"Invalid gradient data from peer {uid}: Missing totalk for parameter {n}"
-                    )
-
-                # Check compressed indices are valid
-                self.check_compressed_indices(
-                    idxs_key,
-                    idxs,
-                    self.totalks[n],
-                    allowed_topk=self.config.neuron.topk_compression,
-                )
-
-                # Check for NaN or Inf values
-                if torch.isnan(vals).any() or torch.isinf(vals).any():
-                    self.logger.info(
-                        f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {uid}"
-                    )
-                    raise ValueError(
-                        f"Invalid gradient data from peer {uid}: NaN or Inf values in {vals_key}"
-                    )
-
-        # If all validations pass, apply the gradients
+        # Apply the pseudo-gradient to the model parameters
         for n, p in model.named_parameters():
             idxs_key = n + "idxs"
             vals_key = n + "vals"

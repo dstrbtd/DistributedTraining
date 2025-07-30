@@ -179,7 +179,7 @@ def add_args(cls, parser, prefix=None):
         "--neuron.min_group_size",
         type=int,
         help="The minimum group size for an all reduce",
-        default=25,
+        default=32,
     )
 
     parser.add_argument(
@@ -355,7 +355,7 @@ def add_args(cls, parser, prefix=None):
             "--neuron.sample_size",
             type=int,
             help="The number of miners to query in a single step.",
-            default=25,
+            default=50,
         )
 
         parser.add_argument(

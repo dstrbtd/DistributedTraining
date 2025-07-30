@@ -15,7 +15,7 @@ from huggingface_hub import list_repo_commits
 from distributed_training.utils.state_loader import check_model_exists
 
 
-async def check_uid(dendrite, axon, uid, epoch=None):
+async def check_uid(self, dendrite, axon, uid, epoch=None):
     try:
         response = await dendrite(
             axon,
@@ -43,6 +43,7 @@ async def check_uid(dendrite, axon, uid, epoch=None):
 
 
 async def check_uid_availability(
+    self,
     dendrite,
     metagraph: "bt.metagraph.Metagraph",
     uid: int,
@@ -68,7 +69,7 @@ async def check_uid_availability(
             return False
 
     # Filter for miners that are processing other responses
-    if not await check_uid(dendrite, metagraph.axons[uid], uid, epoch):
+    if not await check_uid(self, dendrite, metagraph.axons[uid], uid, epoch):
         return False
     # Available otherwise.
     return True
@@ -105,11 +106,12 @@ async def get_random_uids(
             # The dendrite client queries the network.
             tasks.append(
                 check_uid_availability(
+                    self,
                     dendrite,
                     self.metagraph,
                     uids[i],
                     self.config.neuron.vpermit_tao_limit,
-                    None,
+                    epoch,
                 )
             )
         responses += await asyncio.gather(*tasks)
@@ -170,13 +172,13 @@ def get_next_uid_api(self):
         self.logger.info(
             f"Error {e} getting UID from: {self.uid_api_url}. Attempting to get UID manually."
         )
-        uids = get_next_uids_manual(self, k=self.config.neuron.min_group_size)
+        uids = get_next_uids_manual(self, k=self.config.neuron.sample_size)
 
     return uids
 
 
 def post_next_uid_api(self):
-    uids = get_next_uids_manual(self, k=self.config.neuron.min_group_size)
+    uids = get_next_uids_manual(self, k=self.config.neuron.sample_size)
     try:
         response = requests.post(
             url=self.uid_api_url,
@@ -222,7 +224,6 @@ def map_uid_to_peerid(self):
             params=[self.config.netuid],
             block_hash=None,
         )
-
         hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids.tolist()))
     except Exception as e:
         self.logger.info(f"Error {e} when querying UID commitments")

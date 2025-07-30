@@ -423,21 +423,21 @@ def load_state_from_peer(
             self.local_progress.samples_accumulated = 0
             self.logger.debug(f"New Model Tag: {self.global_progress.epoch}")
 
-            # # Clean up old cache
-            # try:
-            #     cleanup_old_cache(self, repo_id, revision)
-            # except Exception as e:
-            #     self.logger.warning(f"Failed to cleanup cache: {str(e)}")
+            # Clean up old cache
+            try:
+                cleanup_old_cache(self, repo_id, revision)
+            except Exception as e:
+                self.logger.warning(f"Failed to cleanup cache: {str(e)}")
 
-            # if repo_id != self.config.neuron.global_model_name:
-            #     try:
-            #         cleanup_old_cache(
-            #             self,
-            #             self.config.neuron.global_model_name,
-            #             current_revision=None,
-            #         )
-            #     except Exception as e:
-            #         self.logger.warning(f"Failed to cleanup cache: {str(e)}")
+            if repo_id != self.config.neuron.global_model_name:
+                try:
+                    cleanup_old_cache(
+                        self,
+                        self.config.neuron.global_model_name,
+                        current_revision=None,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to cleanup cache: {str(e)}")
 
         else:
             self.logger.debug(f"Model With Tag: {epoch} Does Not Exist")

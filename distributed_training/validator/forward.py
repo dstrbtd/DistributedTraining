@@ -73,7 +73,6 @@ async def forward(self):
     responses = [[]]
     rewards = torch.tensor([])
 
-    self.should_all_reduce = False
     if self.should_all_reduce:
         self.event.update({"synapse_type": "all_reduce"})
 
@@ -86,9 +85,9 @@ async def forward(self):
             sample_size = int(self.metagraph.n)
 
             # Get active miners
-            while len(self.miner_uids) < (101 - 1):
+            while len(self.miner_uids) < (50 - 1):
                 self.logger.info(
-                    f"Found {len(self.miner_uids)} UIDs. Attempting to find {101 - len(self.miner_uids) - 1} more UIDs."
+                    f"Found {len(self.miner_uids)} UIDs. Attempting to find {50 - len(self.miner_uids) - 1} more UIDs."
                 )
                 self.miner_uids = await get_random_uids(
                     self,
@@ -107,37 +106,30 @@ async def forward(self):
             self.last_allreduce_block = self.block
             return responses
 
-        # self.miner_uids.sort()
-        # miner_uid_dict = {
-        #     uid: self.uid_tracker[uid]["train_duration"]
-        #     if self.uid_tracker[uid]["train_duration"] != 0
-        #     else 1000
-        #     for uid in self.miner_uids
-        # }
-        # alive_uids = {
-        #     k: v for k, v in sorted(miner_uid_dict.items(), key=lambda item: self.metagraph.incentive[item])
-        # }.keys()
-        # self.miner_uids = np.array(
-        #     [n.item() for n in alive_uids][: self.config.neuron.min_group_size + 10]
-        # )
-        alive_uids = self.miner_uids
+        self.miner_uids = np.flip(
+            np.array(
+                [
+                    self.miner_uids[i]
+                    for i in np.argsort(
+                        [
+                            self.metagraph.incentive[i].item()
+                            * self.uid_tracker[i].train.is_valid
+                            for i in self.miner_uids
+                        ]
+                    )
+                ]
+            )
+        )
         self.event.update({"UIDs": self.miner_uids})
         self.logger.info(f"UIDs:  {self.miner_uids}")
 
         try:
-            top_uid = get_top_uid(self)
-            self.local_progress.epoch = self.global_progress.epoch
-            self.local_progress.inner_step = get_local_inner_step(
-                self, repo_id=self.uid_tracker[int(top_uid)].train.model_id
-            )
-            top_uid_revision = f"{__run__}.{self.local_progress.epoch}.{self.local_progress.inner_step}"
-            load_state_from_peer(
-                self,
-                repo_id=self.uid_tracker[int(top_uid)].train.model_id,
-                revision=top_uid_revision,
-            )
-            if self.scheduler.__dict__["_step_count"] == 0:
-                top_uid = 22
+            top_uid_index = 0
+            while True:
+                if top_uid_index < len(self.miner_uids):
+                    top_uid = self.miner_uids[top_uid_index]
+                else:
+                    top_uid = 170
                 self.local_progress.epoch = self.global_progress.epoch
                 self.local_progress.inner_step = get_local_inner_step(
                     self, repo_id=self.uid_tracker[int(top_uid)].train.model_id
@@ -148,6 +140,10 @@ async def forward(self):
                     repo_id=self.uid_tracker[int(top_uid)].train.model_id,
                     revision=top_uid_revision,
                 )
+                if self.scheduler.__dict__["_step_count"] != 0:
+                    break
+                else:
+                    top_uid_index += 1
             (
                 all_reduce_success_status,
                 results,
@@ -178,7 +174,7 @@ async def forward(self):
                 ) = self.avg_handler.calculate_allreduce_scores(
                     participating_peers=results["participating_peers"],
                     failed_peers=results["failed_peers"],
-                    alive_uids=alive_uids,
+                    alive_uids=self.miner_uids,
                     modes=results["modes"],
                     bandwidths=results["bandwidths"],
                     peerids_to_uids=self.peerids_to_uids,

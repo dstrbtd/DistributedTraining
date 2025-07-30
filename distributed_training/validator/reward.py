@@ -54,6 +54,7 @@ from rich.table import Table
 # Set scoring weights
 TRAIN_SCORE_WEIGHT = 0.75
 ALL_REDUCE_SCORE_WEIGHT = 0.25
+MAX_UPLOAD_INTERVAL = 1800  # Seconds
 
 api = HfApi()
 
@@ -217,6 +218,13 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
     )
     average_loss_after = total_loss_after / n_batches_sampled_after
 
+    # Cleanup
+    del gradient
+    del model_t1
+    del total_loss_before, n_batches_total_before, n_batches_sampled_before
+    del total_loss_after, n_batches_total_after, n_batches_sampled_after
+    torch.cuda.empty_cache()
+
     return average_loss_before, average_loss_after
 
 
@@ -230,6 +238,44 @@ def compute_loss_improvement(before: float, after: float) -> dict:
         "absolute": absolute,
         "relative": relative,
     }
+
+
+def get_uids_blocks(self, uid: int, revision: str) -> list[int]:
+    """"""
+    uid_blocks = json.load(
+        open(
+            hf_hub_download(
+                repo_id=self.uid_tracker[uid].train.model_id,
+                filename="config.json",
+                revision=revision,
+            )
+        )
+    )["block_list"]
+    if (self.current_block - max(uid_blocks)) > (MAX_UPLOAD_INTERVAL / 12):
+        raise Exception(f"Uploaded datatset block older than 1 hour")
+    else:
+        assgined_blocks = random.sample(uid_blocks, 1)
+        return assgined_blocks
+
+
+def reset_uid_train_scores(self, uid: int):
+    """Penalize a uid by resetting thier train.random and train.assigned scores"""
+    train_scores = {
+        "random": {
+            "before": 0.0,
+            "after": 0.0,
+            "absolute": 0.0,
+            "relative": 0.0,
+        },
+        "assigned": {
+            "before": 0.0,
+            "after": 0.0,
+            "absolute": 0.0,
+            "relative": 0.0,
+        },
+    }
+    for k, v in train_scores.items():
+        setattr(self.uid_tracker[uid].train, k, v)
 
 
 async def score_uids(self, uids: list):
@@ -277,6 +323,10 @@ async def score_uids(self, uids: list):
         try:
             revision = self.uid_tracker[uid].train.revision
 
+            # Revision Checks
+            if revision.split(".")[-1] == 0:
+                raise Exception(f"Revision {revision} has 0 inner steps")
+
             # ──────────────────────────────────────────────────────────────────────────
             # Step 1: Evaluate on random unseen data
             # ──────────────────────────────────────────────────────────────────────────
@@ -295,10 +345,10 @@ async def score_uids(self, uids: list):
                 setattr(self.uid_tracker[uid].train.random, k, v)
 
             self.logger.info(
-                f"UID {uid:03d}: Absolute loss improvement: {loss_scores['absolute']:.6f}"
+                f"UID {uid:03d}: Random <=> Absolute loss improvement: {loss_scores['absolute']:.6f}"
             )
             self.logger.info(
-                f"UID {uid:03d}: Relative loss improvement: {loss_scores['relative']:.6f}"
+                f"UID {uid:03d}: Random <=> Relative loss improvement: {loss_scores['relative']:.6f}"
             )
 
             # ──────────────────────────────────────────────────────────────────────────
@@ -306,18 +356,7 @@ async def score_uids(self, uids: list):
             # ──────────────────────────────────────────────────────────────────────────
 
             self.logger.info(f"UID {uid:03d}: Sampling dataset indices for testing")
-            assigned_block = random.sample(
-                json.load(
-                    open(
-                        hf_hub_download(
-                            repo_id=self.uid_tracker[uid].train.model_id,
-                            filename="config.json",
-                            revision=revision,
-                        )
-                    )
-                )["block_list"],
-                1,
-            )
+            assigned_block = get_uids_blocks(self, uid, revision)
 
             loss_scores = compute_loss_improvement(
                 *await evaluate_with_gradient(
@@ -333,25 +372,19 @@ async def score_uids(self, uids: list):
                 setattr(self.uid_tracker[uid].train.assigned, k, v)
 
             self.logger.info(
-                f"UID {uid:03d}: Absolute loss improvement: {loss_scores['absolute']:.6f}"
+                f"UID {uid:03d}: Assigned <=> Absolute loss improvement: {loss_scores['absolute']:.6f}"
             )
             self.logger.info(
-                f"UID {uid:03d}: Relative loss improvement: {loss_scores['relative']:.6f}"
+                f"UID {uid:03d}: Assigned <=> Relative loss improvement: {loss_scores['relative']:.6f}"
             )
 
         except Exception as e:
             self.logger.info(f"UID {uid:03d}: Error calculating loss score: {e}")
+            reset_uid_train_scores(self, uid)
 
         finally:
             # Mark update time for UID
             self.uid_tracker[uid].train.updated_time = test_time
-
-    # # Cleanup
-    # del gradient
-    # del model_t1
-    # del total_loss_before, n_batches_total_before, n_batches_sampled_before
-    # del total_loss_after, n_batches_total_after, n_batches_sampled_after
-    # torch.cuda.empty_cache()
 
     # Remove stale gradient cache
     cleanup_old_cache(self)
@@ -385,9 +418,7 @@ def score_repo(self, repo_id: str) -> bool:
         return False
     latest_commit = api.repo_info(repo_id).lastModified
 
-    if (datetime.now(pytz.utc) - latest_commit).seconds > (
-        self.config.neuron.target_n_blocks * 60 * 10
-    ):
+    if (datetime.now(pytz.utc) - latest_commit).seconds > MAX_UPLOAD_INTERVAL:
         return False
     return True
 
