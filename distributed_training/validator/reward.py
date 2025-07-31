@@ -476,10 +476,9 @@ def display_rankings(self, uids: list, original_openskill_scores: dict):
         rich_table.add_column("Train Final")
         rich_table.add_column("Train Assigned")
         rich_table.add_column("Train Random")
-        rich_table.add_column("OpenSkill μ (After)")
-        rich_table.add_column("OpenSkill σ (After)")
-        rich_table.add_column("Ordinal (After)")
-        rich_table.add_column("Ordinal Δ")
+        rich_table.add_column("Train Random μ")
+        rich_table.add_column("Train Random σ")
+        rich_table.add_column("Train Random Δ")
 
         # Add rows to table
         for rank, uid in enumerate(sorted_uids, 1):
@@ -499,7 +498,6 @@ def display_rankings(self, uids: list, original_openskill_scores: dict):
                 f"{self.uid_tracker[uid].train.random.score:.6f}",
                 f"{rating.mu:.4f}",
                 f"{rating.sigma:.4f}",
-                f"{ordinal_after:.4f}",
                 diff_str,
             )
 
