@@ -53,7 +53,7 @@ from huggingface_hub import list_repo_commits
 hivemind_logger = get_logger(__name__)
 
 
-def check_model_exists(repo_id: str, revision: Optional[str] = None) -> bool:
+def check_model_exists(self, repo_id: str, revision: Optional[str] = None) -> bool:
     try:
         if revision and revision != "None":
             list_repo_files(repo_id, revision=revision)
@@ -144,6 +144,7 @@ def load_model_optimizer_gradient_averager(
             if model_name == global_model_name:
                 revision = ".".join(revision.split(".")[:-1] + ["0"])
             if not check_model_exists(
+                self,
                 model_name,
                 revision=revision,
             ):
