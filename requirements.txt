@@ -16,3 +16,4 @@ expecttest==0.2.1
 torch==2.5.1
 influxdb-client==1.48.0
 sentencepiece==0.2.0
+openskill==6.1.3

@@ -1,6 +1,5 @@
 # The MIT License (MIT)
-# Copyright © 2023 Yuma Rao
-# Copyright © 2023 KMFODA
+# Copyright © 2025 dstrbtd.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the “Software”), to deal in the Software without restriction, including without limitation
@@ -33,11 +32,10 @@ from distributed_training.utils.weight_utils import (
     convert_weights_and_uids_for_emit,
     process_weights_for_netuid,
 )
-from distributed_training.validator.reward import (
-    update_total_scores,
-)
-from distributed_training.utils.progress_tracker import get_global_epoch
+from distributed_training.utils.progress_tracker import UidTracker, get_global_epoch
 from distributed_training.utils.state_loader import load_state_from_peer
+from distributed_training.validator.reward import update_total_scores
+from openskill.models import PlackettLuce
 
 
 class BaseValidatorNeuron(BaseNeuron):
@@ -55,14 +53,28 @@ class BaseValidatorNeuron(BaseNeuron):
 
         # Dendrite lets us send messages to other nodes (axons) in the network.
         self.dendrite = bt.dendrite(wallet=self.wallet)
-        bt.logging.info(f"Dendrite: {self.dendrite}")
+        self.logger.info(f"Dendrite: {self.dendrite}")
 
         # Set up initial scoring weights for validation
-        bt.logging.info("Building validation weights.")
+        self.logger.info("Building validation weights.")
         self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
 
+        # Initialize openskill_model before loading state
+        self.openskill_model = PlackettLuce(
+            beta=self.config.neuron.openskill_beta, tau=self.config.neuron.openskill_tau
+        )
+        self.openskill_ratings = {
+            int(uid): self.openskill_model.rating(name=str(uid))
+            for uid in range(self.metagraph.n)
+        }
+
+        # Initialize uid_tracker
+        self.uid_tracker = {
+            uid: UidTracker(uid=uid) for uid in self.metagraph.uids.tolist()
+        }
+
         # Load current state
-        bt.logging.debug("load_state()")
+        self.logger.debug("load_state()")
         self.load_state()
 
         # Set event dictionary
@@ -75,7 +87,7 @@ class BaseValidatorNeuron(BaseNeuron):
         if not self.config.neuron.axon_off:
             self.serve_axon()
         else:
-            bt.logging.warning("axon off, not serving ip to chain.")
+            self.logger.warning("axon off, not serving ip to chain.")
 
         # Create asyncio event loop to manage async tasks.
         self.loop = asyncio.get_event_loop()
@@ -92,7 +104,7 @@ class BaseValidatorNeuron(BaseNeuron):
     def serve_axon(self):
         """Serve axon to enable external connections."""
 
-        bt.logging.info("serving ip to chain...")
+        self.logger.info("serving ip to chain...")
         try:
             self.axon = bt.axon(
                 wallet=self.wallet,
@@ -108,11 +120,11 @@ class BaseValidatorNeuron(BaseNeuron):
                     axon=self.axon,
                 )
             except Exception as e:
-                bt.logging.error(f"Failed to serve Axon with exception: {e}")
+                self.logger.error(f"Failed to serve Axon with exception: {e}")
                 pass
 
         except Exception as e:
-            bt.logging.error(f"Failed to create Axon initialize with exception: {e}")
+            self.logger.error(f"Failed to create Axon initialize with exception: {e}")
             pass
 
     async def concurrent_forward(self):
@@ -144,16 +156,16 @@ class BaseValidatorNeuron(BaseNeuron):
         # Check that validator is registered on the network.
         self.sync()
 
-        bt.logging.info(
+        self.logger.info(
             f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
         )
 
-        bt.logging.info(f"Validator starting at block: {self.block}")
+        self.logger.info(f"Validator starting at block: {self.block}")
 
         # This loop maintains the validator's operations until intentionally stopped.
         try:
             while True:
-                bt.logging.info(f"step({self.step}) block({self.block})")
+                self.logger.info(f"step({self.step}) block({self.block})")
 
                 # Init Wandb Event For Step
                 if self.event != {}:
@@ -165,11 +177,11 @@ class BaseValidatorNeuron(BaseNeuron):
                     not self.all_reduce_success_status
                 ):
                     if self.local_progress.epoch != self.global_progress.epoch:
-                        bt.logging.info(
+                        self.logger.info(
                             f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
                         )
                     if not self.all_reduce_success_status:
-                        bt.logging.info(
+                        self.logger.info(
                             "All Reduce Failed. Loading Latest Model State."
                         )
                     load_state_from_peer(self, epoch=self.global_progress.epoch)
@@ -211,13 +223,13 @@ class BaseValidatorNeuron(BaseNeuron):
             # self.dht.shutdown()
             # _thread.interrupt_main()
             self.axon.stop()
-            bt.logging.success("Validator killed by keyboard interrupt.")
+            self.logger.success("Validator killed by keyboard interrupt.")
             exit()
 
         # In case of unforeseen errors, the validator will log the error and continue operations.
         except Exception as err:
-            bt.logging.error("Error during validation", str(err))
-            bt.logging.debug(print_exception(type(err), err, err.__traceback__))
+            self.logger.error("Error during validation", str(err))
+            self.logger.debug(print_exception(type(err), err, err.__traceback__))
 
     def run_in_background_thread(self):
         """
@@ -225,23 +237,23 @@ class BaseValidatorNeuron(BaseNeuron):
         This method facilitates the use of the validator in a 'with' statement.
         """
         if not self.is_running:
-            bt.logging.debug("Starting validator in background thread.")
+            self.logger.debug("Starting validator in background thread.")
             self.should_exit = False
             self.thread = threading.Thread(target=self.run, daemon=True)
             self.thread.start()
             self.is_running = True
-            bt.logging.debug("Started")
+            self.logger.debug("Started")
 
     def stop_run_thread(self):
         """
         Stops the validator's operations that are running in the background thread.
         """
         if self.is_running:
-            bt.logging.debug("Stopping validator in background thread.")
+            self.logger.debug("Stopping validator in background thread.")
             self.should_exit = True
             self.thread.join(5)
             self.is_running = False
-            bt.logging.debug("Stopped")
+            self.logger.debug("Stopped")
 
     def __enter__(self):
         self.run_in_background_thread()
@@ -261,20 +273,20 @@ class BaseValidatorNeuron(BaseNeuron):
                        None if the context was exited without an exception.
         """
         if self.is_running:
-            bt.logging.debug("Stopping validator in background thread.")
+            self.logger.debug("Stopping validator in background thread.")
             self.should_exit = True
             self.thread.join(5)
             self.is_running = False
-            bt.logging.debug("Stopped")
+            self.logger.debug("Stopped")
 
     def set_weights(self):
         """
         Sets the validator weights to the metagraph hotkeys based on the scores it has received from the miners. The weights determine the trust and incentive level the validator assigns to miner nodes on the network.
         """
-        bt.logging.info(self.scores)
+        self.logger.info(self.scores)
         # Check if self.scores contains any NaN values and log a warning if it does.
         if np.isnan(self.scores).any():
-            bt.logging.warning(
+            self.logger.warning(
                 f"Scores contain NaN values. This may be due to a lack of responses from miners, or a bug in your reward functions."
             )
 
@@ -290,9 +302,9 @@ class BaseValidatorNeuron(BaseNeuron):
         # Compute raw_weights safely
         raw_weights = self.scores / norm
 
-        bt.logging.info(raw_weights)
-        bt.logging.info(f"raw_weights: {raw_weights}")
-        bt.logging.info(f"raw_weight_uids: {self.metagraph.uids.tolist()}")
+        self.logger.info(raw_weights)
+        self.logger.info(f"raw_weights: {raw_weights}")
+        self.logger.info(f"raw_weight_uids: {self.metagraph.uids.tolist()}")
 
         # Process the raw weights to final_weights via subtensor limitations.
         (
@@ -305,8 +317,8 @@ class BaseValidatorNeuron(BaseNeuron):
             subtensor=self.subtensor,
             metagraph=self.metagraph,
         )
-        bt.logging.info(f"processed_weights: {processed_weights}")
-        bt.logging.info(f"processed_weight_uids: {processed_weight_uids}")
+        self.logger.info(f"processed_weights: {processed_weights}")
+        self.logger.info(f"processed_weight_uids: {processed_weight_uids}")
 
         # Convert to uint16 weights and uids.
         (
@@ -316,8 +328,8 @@ class BaseValidatorNeuron(BaseNeuron):
             uids=processed_weight_uids, weights=processed_weights
         )
 
-        bt.logging.info(f"uint_weights: {uint_weights}")
-        bt.logging.info(f"uint_uids: {uint_uids}")
+        self.logger.info(f"uint_weights: {uint_weights}")
+        self.logger.info(f"uint_uids: {uint_uids}")
 
         # Set the weights on chain via our subtensor connection.
         result, msg = self.subtensor.set_weights(
@@ -330,9 +342,9 @@ class BaseValidatorNeuron(BaseNeuron):
             version_key=self.spec_version,
         )
         if result is True:
-            bt.logging.info("set_weights on chain successfully!")
+            self.logger.info("set_weights on chain successfully!")
         else:
-            bt.logging.error("set_weights failed", msg)
+            self.logger.error("set_weights failed", msg)
 
         # Log weigths to wandb
         self.event.update(
@@ -343,11 +355,11 @@ class BaseValidatorNeuron(BaseNeuron):
                 )
             }
         )
-        bt.logging.info(f"Set weights: {processed_weights}")
+        self.logger.info(f"Set weights: {processed_weights}")
 
     def resync_metagraph(self):
         """Resyncs the metagraph and updates the hotkeys and moving averages based on the new metagraph."""
-        bt.logging.info("resync_metagraph()")
+        self.logger.info("resync_metagraph()")
 
         # Copies state of metagraph before syncing.
         previous_metagraph = copy.deepcopy(self.metagraph)
@@ -359,24 +371,16 @@ class BaseValidatorNeuron(BaseNeuron):
         if previous_metagraph.axons == self.metagraph.axons:
             return
 
-        bt.logging.info(
+        self.logger.info(
             "Metagraph updated, re-syncing hotkeys, dendrite pool and moving averages"
         )
         # Zero out all hotkeys that have been replaced.
         for uid, hotkey in enumerate(self.hotkeys):
             if hotkey != self.metagraph.hotkeys[uid]:
                 self.scores[uid] = 0  # hotkey has been replaced
-                self.uid_tracker[uid] = self.uid_tracker_initial_state.copy()
-                train_similarity_score_last_updated_list = [
-                    self.uid_tracker[uid]["train_similarity_score_last_updated"]
-                    for uid in self.uid_tracker.keys()
-                    if self.uid_tracker[uid]["train_similarity_score_last_updated"] != 0
-                ]
-                if len(train_similarity_score_last_updated_list) >= 2:
-                    train_similarity_score_last_updated_list.sort()
-                    self.uid_tracker[uid][
-                        "train_similarity_score_last_updated"
-                    ] = train_similarity_score_last_updated_list[1] + (60 * 60)
+                self.uid_tracker[uid] = UidTracker(
+                    uid=uid
+                )  # reset uid_tracker for this uid
 
         # Check to see if the metagraph has changed size.
         # If so, we need to add new hotkeys and moving averages.
@@ -386,7 +390,9 @@ class BaseValidatorNeuron(BaseNeuron):
             min_len = min(len(self.hotkeys), len(self.scores))
             new_moving_average[:min_len] = self.scores[:min_len]
             self.scores = new_moving_average
-            self.uid_tracker[uid] = self.uid_tracker_initial_state.copy()
+            self.uid_tracker[uid] = UidTracker(
+                uid=uid
+            )  # reset uid_tracker for this uid
 
         # Update the hotkeys.
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
@@ -398,12 +404,12 @@ class BaseValidatorNeuron(BaseNeuron):
         self.uid_tracker = dict(sorted(self.uid_tracker.items()))
         uids = list(self.uid_tracker.keys())
         rewards = np.array(
-            [self.uid_tracker[i]["total_score"] for i in self.uid_tracker.keys()]
+            [self.uid_tracker[i].total.score for i in self.uid_tracker.keys()]
         )
 
         # Check if rewards contains NaN values.
         if np.isnan(rewards).any():
-            bt.logging.warning(f"NaN values detected in rewards: {rewards}")
+            self.logger.warning(f"NaN values detected in rewards: {rewards}")
             # Replace any NaN values in rewards with 0.
             rewards = np.nan_to_num(rewards, nan=0)
 
@@ -418,8 +424,8 @@ class BaseValidatorNeuron(BaseNeuron):
 
         # Handle edge case: If either rewards or uids_array is empty.
         if rewards.size == 0 or uids_array.size == 0:
-            bt.logging.info(f"rewards: {rewards}, uids_array: {uids_array}")
-            bt.logging.warning(
+            self.logger.info(f"rewards: {rewards}, uids_array: {uids_array}")
+            self.logger.warning(
                 "Either rewards or uids_array is empty. No updates will be performed."
             )
             return
@@ -440,22 +446,22 @@ class BaseValidatorNeuron(BaseNeuron):
                 self.failed_is_alive_counter[uid]
                 > self.failed_is_alive_counter_threshold
             ):
-                bt.logging.info(
+                self.logger.info(
                     f"UID {uid} above is_alive_failed_counter threshold. Setting score to 0."
                 )
                 scattered_rewards[uid] = 0
 
-        bt.logging.debug(f"Scattered rewards: {rewards}")
+        self.logger.debug(f"Scattered rewards: {rewards}")
 
         # Update scores with rewards produced by this step.
         # shape: [ metagraph.n ]
         alpha: float = self.config.neuron.moving_average_alpha
         self.scores: np.ndarray = alpha * scattered_rewards + (1 - alpha) * self.scores
-        bt.logging.debug(f"Updated moving avg scores: {self.scores}")
+        self.logger.debug(f"Updated moving avg scores: {self.scores}")
 
     def save_state(self):
         """Saves the state of the validator to a file."""
-        bt.logging.info("Saving validator state.")
+        self.logger.info("Saving validator state.")
         # Save the state of the validator to file.
         np.savez(
             self.config.neuron.full_path + "/state.npz",
@@ -463,15 +469,18 @@ class BaseValidatorNeuron(BaseNeuron):
             scores=self.scores,
             hotkeys=self.hotkeys,
             failed_is_alive_counter=self.failed_is_alive_counter,
-            uid_tracker=self.uid_tracker,
+            uid_tracker={
+                key: self.uid_tracker[key].model_dump()
+                for key in self.uid_tracker.keys()
+            },
         )
 
     def load_state(self):
         """Loads the state of the validator from a file."""
-        bt.logging.info("Loading validator state.")
+        self.logger.info("Loading validator state.")
 
         if os.path.isfile(self.config.neuron.full_path + "/state.npz"):
-            bt.logging.info(
+            self.logger.info(
                 "Pre-saved validator state found in .npz format. Loading validator state."
             )
             # Load the state of the validator from file.
@@ -487,26 +496,23 @@ class BaseValidatorNeuron(BaseNeuron):
                     "failed_is_alive_counter"
                 ].flatten()[0]
             if "uid_tracker" in state:
-                self.uid_tracker = state["uid_tracker"].flatten()[0]
-                for uid in self.uid_tracker:
-                    self.uid_tracker[uid] = self.uid_tracker[uid].copy()
-
-                for uid in self.uid_tracker:
+                uid_tracker_state = state["uid_tracker"].flatten()[0]
+                for uid in uid_tracker_state:
                     try:
-                        if (
-                            self.uid_tracker[uid].keys()
-                            != self.uid_tracker_initial_state.keys()
-                        ):
-                            self.uid_tracker[
-                                uid
-                            ] = self.uid_tracker_initial_state.copy()
+                        self.uid_tracker[uid] = UidTracker(**uid_tracker_state[uid])
                     except Exception as e:
-                        bt.logging.info(
+                        self.logger.info(
                             f"Failed to load saved uid_tracker for UID: {uid} with error: {e}"
                         )
-                        self.uid_tracker[uid] = self.uid_tracker_initial_state.copy()
+                        self.uid_tracker[uid] = UidTracker(uid=uid)
+                    self.openskill_ratings[uid] = self.openskill_model.rating(
+                        mu=self.uid_tracker[uid].train.openskill_rating.mu,
+                        sigma=self.uid_tracker[uid].train.openskill_rating.sigma,
+                        name=str(uid),
+                    )
+
         elif os.path.isfile(self.config.neuron.full_path + "/state.pt"):
-            bt.logging.info(
+            self.logger.info(
                 "Pre-saved validator state found in .pt format. Loading validator state."
             )
             state = torch.load(self.config.neuron.full_path + "/state.pt")
@@ -515,4 +521,4 @@ class BaseValidatorNeuron(BaseNeuron):
             self.hotkeys = state["hotkeys"]
 
         else:
-            bt.logging.info("Pre-saved validator state not found.")
+            self.logger.info("Pre-saved validator state not found.")

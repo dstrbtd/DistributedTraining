@@ -15,7 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-# Adapted from https://github.com/tplr-ai/templar
+# Adapted from NousResearch (https://github.com/bloc97/DeMo) and Templar (https://github.com/tplr-ai/templar)
 
 import math
 from typing import Generic, Literal, TypeAlias, TypeVar, cast, overload
@@ -202,7 +202,7 @@ class CompressDCT(Generic[Q]):
         ...
 
     @torch.no_grad()
-    def compress(self, x: torch.Tensor, topk: int):  # type: ignore[override]
+    def compress(self, x: torch.Tensor, topk: int, quantize: bool = False):  # type: ignore[override]
         xshape = x.shape
         if len(x.shape) > 2:  # 2D weights
             x = rearrange(x, "y x h w -> y x (h w)")
@@ -220,7 +220,7 @@ class CompressDCT(Generic[Q]):
         idx = idx_int64.to(torch.int16)
 
         # Apply 8-bit quantization if enabled
-        if self.use_quantization:
+        if self.use_quantization and quantize:
             val, quant_params = self._quantize_values(val)
             return idx, val, xshape, totalk, quant_params
 

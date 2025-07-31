@@ -198,6 +198,7 @@ def hive_log_filter(record):
 
 
 def setup_logging(
+    self,
     local_logfile="logs_mylogfile.txt",
     config=None,  # Add config parameter
 ):
@@ -260,8 +261,8 @@ def setup_logging(
         bt.logging()
 
     # Disable third party loggers in bittensor's queue system
-    bt.logging.debug("Disabling third party loggers from bittensor queue...")
-    bt.logging.disable_third_party_loggers()
+    self.logger.debug("Disabling third party loggers from bittensor queue...")
+    self.logger.disable_third_party_loggers()
 
     bt_level = logging.INFO
     if config and hasattr(config, "logging"):
@@ -354,7 +355,7 @@ def init_dht(self):
         announce_maddrs = [f"/ip{version}/{address}/tcp/{self.config.dht.port}"]
     else:
         address = bt.utils.networking.get_external_ip()
-        bt.logging.info(f"Received public IP address of this machine: {address}")
+        self.logger.info(f"Received public IP address of this machine: {address}")
         version = ip_address(address).version
         announce_maddrs = [f"/ip{version}/{address}/tcp/{self.config.dht.port}"]
 
@@ -407,7 +408,7 @@ def init_dht(self):
                         announce_maddrs=announce_maddrs,
                         start=True,
                     )
-                    bt.logging.info(
+                    self.logger.info(
                         f"Successfully initialised dht using initial_peer as {initial_peer}"
                     )
                     successful_connection = True
@@ -426,9 +427,9 @@ def init_dht(self):
                     ]
                     return
                 except Exception as e:
-                    bt.logging.error(
+                    self.logger.error(
                         f"Attempt {retries + 1} to init DHT using initial_peer as {initial_peer} failed with error: {e}"
                     )
                     retries += 1
                     time.sleep(5)
-                    bt.logging.error("Retrying...")
+                    self.logger.error("Retrying...")

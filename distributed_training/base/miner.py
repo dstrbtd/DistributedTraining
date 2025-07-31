@@ -49,11 +49,11 @@ class BaseMinerNeuron(BaseNeuron):
 
         # Warn if allowing incoming requests from anyone.
         if not self.config.blacklist.force_validator_permit:
-            bt.logging.warning(
+            self.logger.warning(
                 "You are allowing non-validators to send requests to your miner. This is a security risk."
             )
         if self.config.blacklist.allow_non_registered:
-            bt.logging.warning(
+            self.logger.warning(
                 "You are allowing non-registered entities to send requests to your miner. This is a security risk."
             )
 
@@ -68,7 +68,7 @@ class BaseMinerNeuron(BaseNeuron):
         )
 
         # Attach determiners which functions are called when servicing a request.
-        bt.logging.info("Attaching forward function to miner axon.")
+        self.logger.info("Attaching forward function to miner axon.")
         self.axon.attach(
             forward_fn=self.is_alive,
             blacklist_fn=self.blacklist_is_alive,
@@ -77,7 +77,7 @@ class BaseMinerNeuron(BaseNeuron):
             forward_fn=self.all_reduce,
             blacklist_fn=self.blacklist_all_reduce,
         )
-        bt.logging.info(f"Axon created: {self.axon}")
+        self.logger.info(f"Axon created: {self.axon}")
 
         # Instantiate runners
         self.should_exit: bool = False
@@ -118,14 +118,14 @@ class BaseMinerNeuron(BaseNeuron):
 
         # Serve passes the axon information to the network + netuid we are hosting on.
         # This will auto-update if the axon port of external ip have changed.
-        bt.logging.info(
+        self.logger.info(
             f"Serving miner axon {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid} and port: {self.axon.port}"
         )
         self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
 
         # Start  starts the miner's axon, making it active on the network.
         self.axon.start()
-        bt.logging.info(f"Miner starting at block: {self.block}")
+        self.logger.info(f"Miner starting at block: {self.block}")
 
         # Starting training thread
         self.start_continuous_training()
@@ -147,7 +147,7 @@ class BaseMinerNeuron(BaseNeuron):
                                 self.bandwidth = get_bandwidth()
                                 self.event.update(self.bandwidth)
                             except Exception:
-                                bt.logging.debug("Error getting bandwidth metrics")
+                                self.logger.debug("Error getting bandwidth metrics")
                             self.wandb.log(self.event)
                             self.event = {}
 
@@ -158,7 +158,7 @@ class BaseMinerNeuron(BaseNeuron):
                             - time.perf_counter()
                             + self.all_reduce_start_time
                         )
-                        bt.logging.info(
+                        self.logger.info(
                             f"Waiting {int(wait_time)} seconds until validator complete the all_reduce"
                         )
                         # Wait for the master validator to upload new global model
@@ -166,7 +166,7 @@ class BaseMinerNeuron(BaseNeuron):
                         # Check if master validator has failed to all_reduce
                         self.global_progress.epoch = get_global_epoch(self)
                         if self.local_progress.epoch > self.global_progress.epoch:
-                            bt.logging.info(
+                            self.logger.info(
                                 f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
                             )
                             load_state_from_peer(
@@ -210,25 +210,25 @@ class BaseMinerNeuron(BaseNeuron):
         except KeyboardInterrupt:
             self.should_exit = True
             self.axon.stop()
-            bt.logging.success(
+            self.logger.success(
                 ":white_heavy_check_mark: Miner killed by keyboard interrupt."
             )
             exit()
 
         # In case of unforeseen errors, the miner will log the error and continue operations.
         except Exception as e:
-            bt.logging.error(traceback.format_exc())
+            self.logger.error(traceback.format_exc())
 
     def load_state(self, reset_last_allreduce_block=False):
         self.global_progress.epoch = get_global_epoch(self)
         if self.local_progress.epoch != self.global_progress.epoch:
-            bt.logging.info(
+            self.logger.info(
                 f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
             )
             self.pause_training()
             # If there's an ongoing upload, check if it's done
             while self.current_upload_future and not self.current_upload_future.done():
-                bt.logging.info(
+                self.logger.info(
                     "Previous upload still in progress. Waiting until upload is complete."
                 )
                 time.sleep(1)
@@ -251,23 +251,23 @@ class BaseMinerNeuron(BaseNeuron):
         This is useful for non-blocking operations.
         """
         if not self.is_running:
-            bt.logging.debug("Starting miner in background thread.")
+            self.logger.debug("Starting miner in background thread.")
             self.should_exit = False
             self.thread = threading.Thread(target=self.run, daemon=True)
             self.thread.start()
             self.is_running = True
-            bt.logging.debug("Started")
+            self.logger.debug("Started")
 
     def stop_run_thread(self):
         """
         Stops the miner's operations that are running in the background thread.
         """
         if self.is_running:
-            bt.logging.debug("Stopping miner in background thread.")
+            self.logger.debug("Stopping miner in background thread.")
             self.should_exit = True
             self.thread.join(5)
             self.is_running = False
-            bt.logging.debug("Stopped")
+            self.logger.debug("Stopped")
 
     def __enter__(self):
         """
@@ -295,7 +295,7 @@ class BaseMinerNeuron(BaseNeuron):
 
     def resync_metagraph(self):
         """Resyncs the metagraph and updates the hotkeys and moving averages based on the new metagraph."""
-        bt.logging.info("resync_metagraph()")
+        self.logger.info("resync_metagraph()")
 
         # Sync the metagraph.
         self.metagraph.sync(subtensor=self.subtensor)

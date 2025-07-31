@@ -1,6 +1,5 @@
 # The MIT License (MIT)
-# Copyright © 2023 Yuma Rao
-# Copyright © 2023 KMFODA
+# Copyright © 2025 dstrbtd.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the “Software”), to deal in the Software without restriction, including without limitation
@@ -17,8 +16,10 @@
 # DEALINGS IN THE SOFTWARE.
 
 import asyncio
+import copy
+import os
 import json
-import math
+from io import StringIO
 import random
 import time
 from datetime import datetime
@@ -46,99 +47,39 @@ from distributed_training.utils.state_loader import (
     load_state_from_peer,
 )
 
-# GPU optimizations.
-torch.backends.cudnn.benchmark = True
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-
-# Seeds
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
+from huggingface_hub import hf_hub_download
+from rich.console import Console
+from rich.table import Table
 
 # Set scoring weights
 TRAIN_SCORE_WEIGHT = 0.75
 ALL_REDUCE_SCORE_WEIGHT = 0.25
+MAX_UPLOAD_INTERVAL = 1800  # Seconds
 
 api = HfApi()
 
 
-async def score_blacklist(self, uids):
-    scores = torch.FloatTensor([1 for _ in uids]).to(self.device)
-    for i, uid in enumerate(uids):
-        if self.uids_to_peerids[uid][0] == None:
-            scores[i] = 0.0
-        elif self.uids_to_peerids[uid][0] in self.run_peer_id_list:
-            scores[i] = 1.0
-        else:
-            scores[i] = 0.0
+async def fetch_training_data(
+    self, block: int, uid: int, n_pages: int
+) -> DatasetLoader:
+    """
+    Async function to fetch training data
 
-    return scores
+    Args:
+        block (_type_): the block number used to seed the data fetching.
+        uid (_type_): the uid of the miner to fetch data for.
+        n_pages (int): number of pages to fetch.
 
+    Returns:
+        DatasetLoader: An instance of DatasetLoader containing the training data.
 
-async def score_bandwidth(self, uids, timeout=30):
-    scores = torch.FloatTensor([1 for _ in uids]).to(self.device)
-    for i, uid in enumerate(uids):
-        peer_id = self.uids_to_peerids[uid][0]
-
-        if peer_id is None:
-            peer = None
-        else:
-            peer = PeerID(base58.b58decode(peer_id))
-
-        if peer is None:
-            scores[i] = 0
-
-        else:
-            try:
-                start_time = time.perf_counter()
-
-                metadata, tensors = await asyncio.wait_for(
-                    self.load_state_from_miner(peer), timeout=timeout
-                )
-                end_time = time.perf_counter()
-
-                if (metadata is None) or (tensors is None):
-                    scores[i] = 0
-                else:
-                    scores[i] = 1 - ((end_time - start_time) / timeout)
-
-                bt.logging.info(f"Reward for peer {peer} is {scores[i]}")
-
-            except Exception as e:
-                bt.logging.info(f"Failed to download state from {peer} - {repr(e)}")
-                scores[i] = 0
-                bt.logging.info(f"Reward for peer {peer} is {scores[i]}")
-
-    return scores
-
-
-def score_failed_senders(self, uids, failed_peers, participating_peers):
-    scores = torch.FloatTensor([0.0 for _ in uids]).to(self.device)
-    for i, uid in enumerate(uids):
-        peer_id = self.uids_to_peerids.get(uid)[0]
-
-        if peer_id in participating_peers:
-            if peer_id in failed_peers:
-                bt.logging.info(f"UID:{uid} - Failed participating peer")
-                scores[i] = 0.0
-            else:
-                bt.logging.info(f"UID:{uid} - Successful participating peer")
-                scores[i] = 1.0
-        else:
-            bt.logging.info(f"UID:{uid} - Non participating peer")
-            scores[i] = 0.0
-
-    return scores
-
-
-async def fetch_training_data(self, block, uid):
-    """Async function to fetch training data"""
+    """
     attempt = 0
     while attempt < self.retry_limit:
         try:
             pages = await DatasetLoader.next_pages(
                 offset=block,
-                n_pages=35,
+                n_pages=n_pages,
                 seed=uid,
             )
             random.seed(uid)
@@ -153,224 +94,318 @@ async def fetch_training_data(self, block, uid):
 
             return dataset
         except Exception as e:
-            bt.logging.error(f"Error fetching training data: {str(e)}")
+            self.logger.error(f"Error fetching training data: {str(e)}")
             attempt += 1
-            bt.logging.warning(
+            self.logger.warning(
                 f"Failed to fetch data, retrying. Attempt {attempt}/{self.retry_limit}"
             )
             if attempt < self.retry_limit:
                 time.sleep(self.retry_delay * attempt)  # Wait before the next retry
             else:
-                bt.logging.error("Maximum retry limit reached. Unable to fetch data.")
+                self.logger.error("Maximum retry limit reached. Unable to fetch data.")
                 raise
 
 
-async def score_uid(self, uid: int):
-    """Score a single UID"""
-    target_blocks = self.config.neuron.target_n_blocks
-    latest_commit = None
-    model_huggingface_id = self.uid_tracker[uid]["model_huggingface_id"]
-    local_epoch = get_local_epoch(self, model_huggingface_id)
-    self.local_progress.inner_step = get_local_inner_step(self, model_huggingface_id)
-    revision = f"{__run__}.{local_epoch}.{self.local_progress.inner_step}"
+async def evaluate_model(
+    self,
+    model: torch.nn.Module,
+    blocks: list[int],
+    uid: int,
+    n_pages: int,
+    samples: list[int] = None,
+) -> tuple[float, int, int]:
+    """
+    Evaluate the model on the training data for a given UID.
 
-    blocks = []
-    time_delta = 0
-    try:
-        if model_huggingface_id is None:
-            scores = 0
-            raise Exception(f"Score 0 for UID {uid}: HuggingFace Repo Id is None")
-        elif not check_model_exists(model_huggingface_id, revision):
-            scores = 0
-            raise Exception(
-                f"Score 0 for UID {uid}: HuggingFace Repo Id {self.uid_tracker[uid]['model_huggingface_id']} Doesn't Exist"
-            )
-        elif (local_epoch is None) or (local_epoch != self.global_progress.epoch):
-            scores = 0
-            raise Exception(
-                f"Score 0 for UID {uid}: Local Epoch {local_epoch} != Global Epoch {self.global_progress.epoch}"
-            )
+    Args:
+        model (torch.nn.Module): The model to evaluate.
+        blocks (list[int]): List of block numbers to use for fetching data.
+        uid (int): The UID of the miner to evaluate.
+        n_pages (int): Number of pages to fetch for evaluation.
+        samples (list[int], optional): Sample indices to use for testing. Defaults to None.
+        test_flag (bool, optional): Flag to indicate if this is a test run. Defaults to False.
 
-        cleanup_old_cache(
-            self,
-            repo_id=model_huggingface_id,
-            current_revision=None,
+    Returns:
+        tuple[float, int]: Total loss, number of batches processed, and number of batches sampled.
+    """
+    model = model
+    device = model.device
+    total_loss = 0.0
+    n_batches_total = 0
+    n_batches_sampled = 0
+
+    for block in blocks:
+        dataset = await fetch_training_data(self, block, uid, n_pages)
+
+        with torch.no_grad():
+            model.eval()
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                for i, batch in enumerate(dataset):
+                    inputs, labels = batch
+                    if inputs is None or len(inputs) == 0:
+                        self.logger.info(f"Empty batch at index {i}, skipping")
+                        continue
+                    n_batches_total += 1
+                    if (samples is not None) and (i not in samples):
+                        continue
+
+                    inputs, labels = inputs.to(device), labels.to(device)
+
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        outputs = model(input_ids=inputs, labels=labels)
+
+                    total_loss += outputs.loss.item()
+                    n_batches_sampled += 1
+                    del inputs, labels, outputs
+                    torch.cuda.empty_cache()
+
+    return total_loss, n_batches_total, n_batches_sampled
+
+
+async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
+    """
+    Apply pseudo gradient for a UID and evaluate loss before and after.
+
+    Args:
+        uid (int): UID being evaluated.
+        model_base (torch.nn.Module): The model to copy before applying gradient.
+        blocks (list[int]): Data blocks to evaluate on.
+        revision (str): Gradient file revision identifier.
+
+    Returns:
+        tuple: (average_loss_before, average_loss_after)
+    """
+    # 1. Evaluate loss before applying gradient
+    self.logger.info(f"UID {uid:03d}: Calculating loss before applying gradient")
+    (
+        total_loss_before,
+        n_batches_total_before,
+        n_batches_sampled_before,
+    ) = await evaluate_model(
+        self, model=model_base, blocks=blocks, uid=uid, samples=None, n_pages=1
+    )
+    average_loss_before = total_loss_before / n_batches_sampled_before
+    self.logger.debug(
+        f"UID {uid:03d}: Model loss before gradient update {average_loss_before:6f}"
+    )
+
+    # 2. Load and apply pseudo gradient
+    self.logger.info(f"UID {uid:03d}: Applying pseudo gradient")
+    model_t1 = copy.deepcopy(model_base)
+
+    gradient = torch.load(
+        hf_hub_download(
+            repo_id=self.uid_tracker[uid].train.model_id,
+            filename="gradients.pt",
+            revision=revision,
+        ),
+        weights_only=True,
+        map_location="cpu",
+    )
+    gradient.pop("metadata")
+
+    self.logger.info(
+        f"UID {uid:03d}: Gradient loaded from {self.uid_tracker[uid].train.model_id} "
+        f"with revision {revision}"
+    )
+    self.update_model_with_pseudo_gradient(model=model_t1, uid=uid, state_dict=gradient)
+    self.logger.info(f"UID {uid:03d}: Model updated with current gradient")
+
+    # 3. Evaluate loss after applying gradient
+    (
+        total_loss_after,
+        n_batches_total_after,
+        n_batches_sampled_after,
+    ) = await evaluate_model(
+        self, model=model_t1, blocks=blocks, uid=uid, samples=None, n_pages=1
+    )
+    average_loss_after = total_loss_after / n_batches_sampled_after
+    self.logger.debug(
+        f"UID {uid:03d}: Model loss after gradient update {average_loss_after:6f}"
+    )
+
+    # Cleanup
+    del gradient
+    del model_t1
+    del total_loss_before, n_batches_total_before, n_batches_sampled_before
+    del total_loss_after, n_batches_total_after, n_batches_sampled_after
+    torch.cuda.empty_cache()
+
+    return average_loss_before, average_loss_after
+
+
+def compute_loss_improvement(before: float, after: float) -> dict:
+    """Compute the absolute and relative loss improvement."""
+    absolute = before - after
+    relative = 0 if before == 0 else absolute / before
+    return {
+        "before": before,
+        "after": after,
+        "absolute": absolute,
+        "relative": relative,
+    }
+
+
+def get_uids_blocks(self, uid: int, revision: str) -> list[int]:
+    """"""
+    uid_blocks = json.load(
+        open(
+            hf_hub_download(
+                repo_id=self.uid_tracker[uid].train.model_id,
+                filename="config.json",
+                revision=revision,
+            )
         )
+    )["block_list"]
+    if (self.current_block - max(uid_blocks)) > (MAX_UPLOAD_INTERVAL / 12):
+        raise Exception(f"Uploaded datatset block older than 1 hour")
+    else:
+        assgined_blocks = random.sample(uid_blocks, 1)
+        return assgined_blocks
 
-        commits = list_repo_commits(model_huggingface_id, repo_type="model")[:2]
-        latest_commit = commits[0].commit_id
-        previous_commit = commits[1].commit_id
-        time_delta = (commits[0].created_at - commits[1].created_at).seconds
 
+def reset_uid_train_scores(self, uid: int):
+    """Penalize a uid by resetting thier train.random and train.assigned scores"""
+    random_train_scores = {
+        "before": 0.0,
+        "after": 0.0,
+        "absolute": 0.0,
+        "relative": 0.0,
+    }
+    assigned_train_score = {
+        "before": 0.0,
+        "after": 0.0,
+        "absolute": 0.0,
+        "relative": 0.0,
+    }
+    for k, v in random_train_scores.items():
+        setattr(self.uid_tracker[uid].train.random, k, v)
+    for k, v in assigned_train_score.items():
+        setattr(self.uid_tracker[uid].train.assigned, k, v)
+
+
+async def score_uids(self, uids: list):
+    """
+    Score each UID by calculating the loss before and after applying their pseudo gradient.
+
+    This scoring process is inspired by Templar's Gauntlet [1], particularly the approach for comparing UIDs'
+    loss using random and assigned datapoints pre and post applying their shared pseudo gradients.
+
+    References:
+        [1] Incentivizing Permissionless Distributed Learning of LLMs
+            ArXiv: https://arxiv.org/abs/2505.21684
+            Code: https://github.com/tplr-ai/templar
+
+    Args:
+        uids (list): UIDs of miners to be evaluated.
+    """
+    epoch = self.global_progress.epoch
+    model_huggingface_id = self.config.neuron.global_model_name
+    test_time = time.time()
+
+    # Sample a random evaluation block
+    random_blocks = random.sample(
+        range(self.current_block + 20, self.current_block * 10), 1
+    )
+
+    # Get revisions for all UIDs
+    for uid in uids:
+        self.uid_tracker[
+            uid
+        ].train.revision = f"5.{epoch}.{get_local_inner_step(self, repo_id=self.uid_tracker[uid].train.model_id, epoch=epoch)}"
+
+    # Sync global model if behind
+    if self.local_progress.epoch != epoch:
         load_state_from_peer(
             self,
             repo_id=model_huggingface_id,
-            epoch=local_epoch,
+            epoch=epoch,
             reload_inner_optimizer=True,
             reload_outer_optimizer=False,
-            revision=previous_commit,
             use_fallback_model=False,
         )
-        # Only set self.local_progress.epoch if model is correct format
-        self.local_progress.epoch = get_local_epoch(self, model_huggingface_id)
-        self.local_progress.samples_accumulated = 0
-        inner_step_t0 = (
-            self.model.config.inner_step
-            if "inner_step" in self.model.config.__dict__
-            else 0
-        )
-        self.local_progress.inner_step = inner_step_t0
 
-        model_final = AutoModelForCausalLM.from_pretrained(
-            model_huggingface_id, revision=latest_commit, trust_remote_code=True
-        )
-        inner_step_t1 = (
-            model_final.config.inner_step
-            if "inner_step" in model_final.config.__dict__
-            else 0
-        )
+    for uid in uids:
+        try:
+            revision = self.uid_tracker[uid].train.revision
 
-        if time_delta < (30 * target_blocks):
-            scores = 0
-            bt.logging.info(
-                f"Score 0 for UID {uid}: Time Delta {time_delta} > 30 * Target Blocks {target_blocks}"
-            )
-        elif (sum(p.numel() for p in model_final.parameters()) > 1100048384) or (
-            sum(p.numel() for p in self.model.parameters()) > 1100048384
-        ):
-            scores = 0
-            bt.logging.info(
-                f"Score 0 for UID {uid}: Repo {model_huggingface_id} Failed Model Size Validation"
-            )
-        elif ("block_list" in self.model.config.__dict__) and (
-            len(self.model.config.block_list) > target_blocks
-        ):
-            scores = 0
-            bt.logging.info(
-                f"Score 0 for UID {uid}: Block List Length {len(self.model.config.block_list)} > Target Blocks {target_blocks}"
-            )
-        elif inner_step_t0 >= inner_step_t1:
-            scores = 0
-            bt.logging.info(
-                f"Score 0 for UID {uid}: Inner Step T0 {inner_step_t0} == Inner Step T1 {inner_step_t1}"
-            )
-        else:
-            blocks = model_final.config.block_list
-            self.running_loss = 0.0
-            self.batch_count = 0
-            self.local_progress.samples_accumulated = 0
-            for block in blocks:
-                bt.logging.debug(":pages: Fetching fineweb-edu pages")
-                dataset = await fetch_training_data(self, block, uid)
-                for inputs, labels in dataset:
-                    # Move to device
-                    inputs, labels = inputs.to(self.device), labels.to(self.device)
+            # Revision Checks
+            if revision.split(".")[-1] == 0:
+                raise Exception(f"Revision {revision} has 0 inner steps")
 
-                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                        outputs = self.model(input_ids=inputs, labels=labels)
-                        loss = outputs.loss / self.number_of_local_steps
+            # ──────────────────────────────────────────────────────────────────────────
+            # Step 1: Evaluate on random unseen data
+            # ──────────────────────────────────────────────────────────────────────────
 
-                    if math.isnan(loss.item()):
-                        raise Exception(f"Score 0 for UID {uid}: NaN detected in Loss")
-
-                    loss.backward()
-
-                    self.running_loss += loss.item() * self.number_of_local_steps
-                    self.batch_count += 1
-                    self.local_progress.loss = self.running_loss / self.batch_count
-
-                    self.local_progress.samples_accumulated += (
-                        self.local_batch_size_train
-                    )
-
-                    # Check if we've accumulated enough samples for a step
-                    if (
-                        self.local_progress.samples_accumulated
-                        >= self.local_batch_size_train_effective
-                    ):
-                        bt.logging.info(
-                            f":training:  Outer Step: {self.local_progress.epoch} | "
-                            f"Inner Step: {self.local_progress.inner_step} | "
-                            f"Learning Rate: {self.inner_optimizer.param_groups[0]['lr']:.8f} | "
-                            f"Average Loss: {self.local_progress.loss:.2f}"
-                        )
-
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                        self.inner_optimizer.step()
-
-                        self.scheduler.step()
-
-                        self.inner_optimizer.zero_grad()
-
-                        self.local_progress.inner_step += 1
-
-                        self.running_loss = 0.0
-                        self.batch_count = 0
-
-                        self.local_progress.samples_accumulated = 0
-
-            scores = score_models(self.model, model_final)
-            if self.local_progress.inner_step == inner_step_t0:
-                scores = 0
-    except Exception as e:
-        # TODO if OSError and e.rrno == errno.ENOSPC score as 1
-        scores = 0.0
-        bt.logging.info(
-            f"Score {int(scores)} for UID {uid}: Forward Loop Failed With Error: {e}"
-        )
-
-    finally:
-        if model_huggingface_id is not None:
-            cleanup_old_cache(
-                self,
-                repo_id=model_huggingface_id,
-                current_revision=None,
+            loss_scores = compute_loss_improvement(
+                *await evaluate_with_gradient(
+                    self=self,
+                    uid=uid,
+                    model_base=self.model,
+                    blocks=random_blocks,
+                    revision=revision,
+                )
             )
 
-    self.uid_tracker[uid]["last_commit"] = latest_commit
-    self.uid_tracker[uid]["train_number_of_blocks"] = len(blocks)
-    self.uid_tracker[uid]["train_duration"] = time_delta
-    self.uid_tracker[uid]["train_similarity_score_last_updated"] = time.time()
-    self.uid_tracker[uid]["train_similarity_score"] = (
-        0 if math.isnan(scores) else scores
-    )
-    self.uid_tracker[uid]["train_validation_count"] += 1
-    self.uid_tracker[uid]["loss"] = self.local_progress.loss
+            for k, v in loss_scores.items():
+                setattr(self.uid_tracker[uid].train.random, k, v)
 
-    bt.logging.info(f"UID {uid} Current Train Score: {scores}")
-    update_individual_scores(self, uid, target_blocks)
+            self.logger.info(
+                f"UID {uid:03d}: Random <=> Absolute loss improvement: {loss_scores['absolute']:.6f}"
+            )
+            self.logger.info(
+                f"UID {uid:03d}: Random <=> Relative loss improvement: {loss_scores['relative']:.6f}"
+            )
 
+            # ──────────────────────────────────────────────────────────────────────────
+            # Step 2: Evaluate on UID's assigned data
+            # ──────────────────────────────────────────────────────────────────────────
 
-def update_individual_scores(self, uid, target_blocks):
-    uid_data = self.uid_tracker[uid]
+            self.logger.info(f"UID {uid:03d}: Sampling dataset indices for testing")
+            assigned_block = get_uids_blocks(self, uid, revision)
 
-    if uid_data.get("train_duration", 0) != 0:
-        uid_data["train_score"] = (
-            uid_data["train_similarity_score"]
-            * min(uid_data["train_number_of_blocks"], target_blocks)
-        ) / uid_data["train_duration"]
-    else:
-        uid_data["train_score"] = 0.0
+            loss_scores = compute_loss_improvement(
+                *await evaluate_with_gradient(
+                    self=self,
+                    uid=uid,
+                    model_base=self.model,
+                    blocks=assigned_block,
+                    revision=revision,
+                )
+            )
 
+            for k, v in loss_scores.items():
+                setattr(self.uid_tracker[uid].train.assigned, k, v)
 
-def score_models(model_1, model_2):
-    """Calculate the cosine similarity score between two model states"""
-    score = 0
-    index = 0
+            self.logger.info(
+                f"UID {uid:03d}: Assigned <=> Absolute loss improvement: {loss_scores['absolute']:.6f}"
+            )
+            self.logger.info(
+                f"UID {uid:03d}: Assigned <=> Relative loss improvement: {loss_scores['relative']:.6f}"
+            )
 
-    for param_1, param_2 in zip(model_1.parameters(), model_2.parameters()):
-        score += (
-            F.cosine_similarity(param_1.to("cpu"), param_2.to("cpu"), dim=0)
-            .mean()
-            .item()
-        )
-        index += 1
+        except Exception as e:
+            self.logger.info(f"UID {uid:03d}: Error calculating loss score: {e}")
+            reset_uid_train_scores(self, uid)
 
-    average_score = score / index
-    return average_score
+        finally:
+            # Mark update time for UID
+            self.uid_tracker[uid].train.updated_time = test_time
+
+    # Remove stale gradient cache
+    cleanup_old_cache(self)
 
 
 def score_repo(self, repo_id: str) -> bool:
+    """
+    Check if the model repository is valid and udpated in the last 20 minutes.
+
+    Args:
+        repo_id (str): huggingface repository ID of the model.
+
+    Returns:
+        bool: True if the model is valid and up-to-date, False otherwise.
+    """
     local_config = AutoConfig.from_pretrained(repo_id, trust_remote_code=True)
     if (
         (self.global_model_config.hidden_size != local_config.hidden_size)
@@ -389,32 +424,166 @@ def score_repo(self, repo_id: str) -> bool:
         return False
     latest_commit = api.repo_info(repo_id).lastModified
 
-    if (datetime.now(pytz.utc) - latest_commit).seconds > (
-        self.config.neuron.target_n_blocks * 60 * 10
-    ):
+    if (datetime.now(pytz.utc) - latest_commit).seconds > MAX_UPLOAD_INTERVAL:
         return False
     return True
 
 
 def benchmark_uids(self):
+    """
+    Benchmark each UID by checking if their model is valid and up-to-date.
+    """
     for uid in self.uid_tracker:
         try:
-            self.uid_tracker[uid]["repo_valid_score"] = score_repo(
-                self, self.uid_tracker[uid]["model_huggingface_id"]
+            self.uid_tracker[uid].train.is_valid = score_repo(
+                self, self.uid_tracker[uid].train.model_id
             )
         except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
-            # bt.logging.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
-            self.uid_tracker[uid]["repo_valid_score"] = False
+            # self.logger.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
+            self.uid_tracker[uid].train.is_valid = False
         except Exception as e:
-            bt.logging.info(
+            self.logger.info(
                 f"UID {uid} benchmarking failed with error {e}. Keeping score as is."
             )
-    bt.logging.info(
-        {uid: self.uid_tracker[uid]["repo_valid_score"] for uid in self.uid_tracker}
+
+
+def display_rankings(self, uids: list, original_openskill_scores: dict):
+    """
+    This function prints a table showing this round's UID rankings based off train.assigned.scores and train.random.scores
+
+    Args:
+        uids (list): UIDs of miners to be evaluated.
+        original_openskill_scores (dict): original OpenSkill ordinal values before update
+    """
+    # Create a ranking table to display current match rankings
+    try:
+        # Sort UIDs by current window gradient scores (descending)
+        sorted_uids = sorted(
+            uids,
+            key=lambda uid: (self.uid_tracker[uid].train.score),
+            reverse=True,
+        )
+
+        try:
+            width = os.get_terminal_size().columns
+        except Exception:
+            width = 0
+        os.environ["COLUMNS"] = str(max(200, width))
+
+        rich_table = Table(title=f"Current Round Rankings (Block {self.current_block})")
+        rich_table.add_column("Round Rank")
+        rich_table.add_column("UID")
+        rich_table.add_column("Train Final")
+        rich_table.add_column("Train Assigned")
+        rich_table.add_column("Train Random")
+        rich_table.add_column("Train Random μ")
+        rich_table.add_column("Train Random σ")
+        rich_table.add_column("Train Random Δ")
+
+        # Add rows to table
+        for rank, uid in enumerate(sorted_uids, 1):
+            rating = self.openskill_ratings[uid]
+            ordinal_before = original_openskill_scores[uid]
+            ordinal_after = rating.ordinal()
+            ordinal_diff = ordinal_after - ordinal_before
+
+            # Format the diff with color indicators
+            diff_str = f"{ordinal_diff:+.4f}"
+
+            rich_table.add_row(
+                str(rank),
+                str(uid),
+                f"{self.uid_tracker[uid].train.score:.6f}",
+                f"{self.uid_tracker[uid].train.assigned.score:.6f}",
+                f"{self.uid_tracker[uid].train.random.score:.6f}",
+                f"{rating.mu:.4f}",
+                f"{rating.sigma:.4f}",
+                diff_str,
+            )
+
+        # Render table to string
+        sio = StringIO()
+        console = Console(file=sio, width=int(os.environ["COLUMNS"]))
+        console.print(rich_table)
+        table_str = sio.getvalue()
+
+        self.logger.info(
+            f"Current Round Rankings (Block {self.current_block}):\n{table_str}"
+        )
+    except Exception as e:
+        self.logger.info(f"Failed to create Round Rankings Table: {str(e)}")
+
+
+def update_train_scores(self, uids: list):
+    """
+    Update selected miners' train.score using the following method:
+    1. Calculates train.random.score using the OpenSkill ratings of the relative improvement of a model's loss
+    after applying a miner's pseudo gradients on a random unseen dataset.
+    2. Calculates train.assigned.score which is a binary indicator of wether relative improvement of a model's
+    loss on an unseen dataset is lower than the relative improvement of a model's loss on the miner's assigned dataset.
+    3. Calculates train.score as the product of train.random.score and train.assigned.score.
+
+    The OpenSkill rating system (https://arxiv.org/pdf/2401.05451) provides a probabilistic skill rating
+    that accounts for uncertainty and relative performance between peers. Ratings are updated using the
+    PlackettLuce model where higher gradient scores indicate better performance.
+
+    Args:
+        uids (list): UIDs of miners to be evaluated.
+    """
+    # Store original Openskill ordinal values to calculate diff after update
+    original_openskill_scores = {}
+    for uid in uids:
+        if uid in self.openskill_ratings:
+            original_openskill_scores[uid] = float(
+                self.openskill_ratings[uid].ordinal()
+            )
+        else:
+            # For new peers without previous ratings
+            original_openskill_scores[uid] = 0.0
+
+    # Calculate ranks based on gradient scores (lower rank = better performance)
+    scores = [self.uid_tracker[uid].train.random.relative for uid in uids]
+
+    # Create teams list for OpenSkill where each miner is a team of one
+    teams = [[self.openskill_ratings[uid]] for uid in uids]
+
+    # Rate each teams using scores (higher score = better performance)
+    rated_teams = self.openskill_model.rate(teams, scores=scores)
+
+    # Store updated ratings
+    for i, uid in enumerate(uids):
+        self.openskill_ratings[uid] = rated_teams[i][0]
+
+        # Log updated OpenSkill values
+        self.uid_tracker[uid].train.openskill_rating.mu = float(
+            self.openskill_ratings[uid].mu
+        )
+        self.uid_tracker[uid].train.openskill_rating.sigma = float(
+            self.openskill_ratings[uid].sigma
+        )
+        self.uid_tracker[uid].train.random.score = float(
+            self.openskill_ratings[uid].ordinal()
+        )
+        self.uid_tracker[uid].train.assigned.score += (
+            self.uid_tracker[uid].train.assigned.absolute
+            > self.uid_tracker[uid].train.random.absolute
+        ) * self.config.neuron.assigned_loss_score_moving_average_alpha
+        self.uid_tracker[uid].train.score = (
+            self.uid_tracker[uid].train.random.score
+            * self.uid_tracker[uid].train.assigned.score
+        )
+
+    display_rankings(self, uids, original_openskill_scores)
+
+    self.logger.info(
+        f"Updated train scores for {len(uids)} UIDs based on OpenSkill ratings of gradient scores",
     )
 
 
 def update_all_reduce_scores(self):
+    """
+    Update all_reduce.score based on the allreduce_status_dict.
+    """
     try:
         if self.allreduce_status_dict != {}:
             for uid in self.allreduce_status_dict.keys():
@@ -424,14 +593,17 @@ def update_all_reduce_scores(self):
                     score = 1
                 else:
                     score = 0
-                if self.uid_tracker[int(uid)]["all_reduce_score"] != score:
-                    self.uid_tracker[int(uid)]["all_reduce_count"] += 1
-                self.uid_tracker[int(uid)]["all_reduce_score"] = score
+                if self.uid_tracker[int(uid)].all_reduce.score != score:
+                    self.uid_tracker[int(uid)].all_reduce.count += 1
+                self.uid_tracker[int(uid)].all_reduce.score = score
     except Exception as e:
-        bt.logging.info(f"Error {e} updating all_reduce scores")
+        self.logger.info(f"Error {e} updating all_reduce scores")
 
 
 def update_total_scores(self):
+    """
+    Update total.scores for each UID based on train.score and all_reduce.score.
+    """
     # Update AllReduce stats from the latest round
     update_all_reduce_scores(self)
 
@@ -439,14 +611,12 @@ def update_total_scores(self):
     self.uid_tracker = dict(sorted(self.uid_tracker.items()))
 
     # Normalise each type of reward
-    train_scores = [
-        self.uid_tracker[uid].get("train_score", 0.0) for uid in self.uid_tracker
-    ]
+    train_scores = [self.uid_tracker[uid].train.score for uid in self.uid_tracker]
     all_reduce_scores = [
-        self.uid_tracker[uid].get("all_reduce_score", 0.0) for uid in self.uid_tracker
+        self.uid_tracker[uid].all_reduce.score for uid in self.uid_tracker
     ]
     repo_valid_scores = [
-        self.uid_tracker[uid].get("repo_valid_score", 0.0) for uid in self.uid_tracker
+        self.uid_tracker[uid].train.is_valid for uid in self.uid_tracker
     ]
 
     train_scores_normalised = (
@@ -477,27 +647,19 @@ def update_total_scores(self):
     # Otherwise score using weighted train_score and all_reduce_score
     for uid_key in self.uid_tracker:
         uid_data = self.uid_tracker[uid_key]
-        train_score = uid_data.get("train_score", 0.0)
-        all_reduce_score = uid_data.get("all_reduce_score", 0.0)
-        repo_valid_score = uid_data.get("repo_valid_score", 0.0)
+        train_score = uid_data.train.score
+        all_reduce_score = uid_data.all_reduce.score
+        repo_valid_score = uid_data.train.is_valid
 
-        if (uid_data["train_validation_count"] == 0) and (
-            uid_data["all_reduce_count"] == 0
-        ):
-            normalized_repo_valid_score = (
-                repo_valid_score / repo_valid_scores_normalised
-            )
-            uid_data["total_score"] = normalized_repo_valid_score
-        else:
-            normalized_train_score = (
-                TRAIN_SCORE_WEIGHT * train_score
-            ) / train_scores_normalised
-            normalized_all_reduce_score = (
-                ALL_REDUCE_SCORE_WEIGHT * all_reduce_score
-            ) / all_reduce_scores_normalised
-            uid_data["total_score"] = (
-                normalized_train_score + normalized_all_reduce_score
-            ) * repo_valid_score
+        normalized_train_score = (
+            TRAIN_SCORE_WEIGHT * train_score
+        ) / train_scores_normalised
+        normalized_all_reduce_score = (
+            ALL_REDUCE_SCORE_WEIGHT * all_reduce_score
+        ) / all_reduce_scores_normalised
+        uid_data.total.score = (
+            normalized_train_score + normalized_all_reduce_score
+        ) * repo_valid_score
 
     # Add metrics reporting
-    self.report_scoring_metrics()
+    self.report_train_scores()

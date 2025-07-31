@@ -67,63 +67,41 @@ class BaseNeuron(ABC):
 
         # Set up logging with the provided configuration and directory.
         bt.logging.set_config(config=self.config.logging)
+        self.logger = bt.logging
 
         # If a gpu is required, set the device to cuda:N (e.g. cuda:0)
         self.device = self.config.neuron.device
 
         # Log the configuration for reference.
-        bt.logging.info(self.config)
+        self.logger.info(self.config)
 
         # Build Bittensor objects
         # These are core Bittensor classes to interact with the network.
-        bt.logging.info("Setting up bittensor objects.")
+        self.logger.info("Setting up bittensor objects.")
 
         # The wallet holds the cryptographic key pairs for the miner.
         self.wallet = bt.wallet(config=self.config)
-        bt.logging.info(f"Wallet: {self.wallet}")
+        self.logger.info(f"Wallet: {self.wallet}")
 
         # The subtensor is our connection to the Bittensor blockchain.
         self.subtensor = bt.subtensor(config=self.config)
-        bt.logging.info(f"Subtensor: {self.subtensor}")
+        self.logger.info(f"Subtensor: {self.subtensor}")
 
         # The metagraph holds the state of the network, letting us know about other validators and miners.
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
-        bt.logging.info(f"Metagraph: {self.metagraph}")
+        self.logger.info(f"Metagraph: {self.metagraph}")
 
         # Check if the miner is registered on the Bittensor network before proceeding further.
         self.check_registered()
 
         # Each miner gets a unique identity (UID) in the network for differentiation.
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
-        bt.logging.info(
+        self.logger.info(
             f"Running neuron on subnet: {self.config.netuid} with uid {self.uid} using network: {self.subtensor.chain_endpoint}"
         )
         self.step = 0
 
-        self.uid_tracker_initial_state = {
-            "peer_id": None,
-            "model_huggingface_id": None,
-            "last_updated_block": None,
-            "last_commit": None,
-            "train_similarity_score_last_updated": 0,
-            "train_similarity_score": 0,
-            "train_validation_count": 0,
-            "train_number_of_blocks": 0,
-            "train_duration": 0,
-            "train_score": 0,
-            "repo_valid_sum": 0,
-            "repo_valid_count": 0,
-            "repo_valid_score": 0,
-            "all_reduce_successes": 0,
-            "all_reduce_count": 0,
-            "all_reduce_score": 0,
-            "total_score": 0,
-            "loss": 0,
-        }
-        self.uid_tracker = {
-            uid: self.uid_tracker_initial_state.copy()
-            for uid in self.metagraph.uids.tolist()
-        }
+        # Initialize the all_reduce, download and upload variables.
         self.allreduce_timeout = 540
         self.upload_state_duration = 420
         self.all_reduce_success_status = True
@@ -150,7 +128,7 @@ class BaseNeuron(ABC):
             self.resync_metagraph()
 
         if self.should_set_weights():
-            bt.logging.info("Should Set Weights")
+            self.logger.info("Should Set Weights")
             self.set_weights()
 
         if self.should_sync_metagraph():
@@ -165,7 +143,7 @@ class BaseNeuron(ABC):
             netuid=self.config.netuid,
             hotkey_ss58=self.wallet.hotkey.ss58_address,
         ):
-            bt.logging.error(
+            self.logger.error(
                 f"Wallet: {self.wallet} is not registered on netuid {self.config.netuid}."
                 f" Please register the hotkey using `btcli subnets register` before trying again"
             )
@@ -194,11 +172,11 @@ class BaseNeuron(ABC):
         ) > self.config.neuron.epoch_length and self.neuron_type != "MinerNeuron"  # don't set weights if you're a miner
 
     def save_state(self):
-        bt.logging.warning(
+        self.logger.warning(
             "save_state() not implemented for this neuron. You can implement this function to save model checkpoints or other useful data."
         )
 
     def load_state(self):
-        bt.logging.warning(
+        self.logger.warning(
             "load_state() not implemented for this neuron. You can implement this function to load model checkpoints or other useful data."
         )

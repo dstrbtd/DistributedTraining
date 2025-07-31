@@ -220,6 +220,8 @@ class DatasetLoader(SubsetLoader):
     retry_delay: int = 60  # Seconds to wait between retries
     num_rows_per_page: int = 100
 
+    logger = bt.logging
+
     @staticmethod
     async def next_pages(
         offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100
@@ -381,6 +383,12 @@ class DatasetLoader(SubsetLoader):
                 # Handle HTTP client errors with a retry mechanism
                 attempt += 1
                 if attempt < retry_limit:
+                    self.logger.info(
+                        f"Retrying page {page} due to error: {e}. Attempt {attempt} of {retry_limit}"
+                    )
+                    self.logger.info(
+                        f"Waiting {self.retry_delay * attempt} seconds before retrying..."
+                    )
                     await asyncio.sleep(
                         self.retry_delay * attempt
                     )  # Wait before retrying

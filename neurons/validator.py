@@ -1,6 +1,5 @@
 # The MIT License (MIT)
-# Copyright © 2023 Yuma Rao
-# Copyright © 2023 KMFODA
+# Copyright © 2025 dstrbtd.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the “Software”), to deal in the Software without restriction, including without limitation
@@ -21,6 +20,24 @@ import os
 
 os.environ["NEST_ASYNCIO"] = "0"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
+# Set seed and enable deterministic settings to ensure reproducibility
+import numpy as np
+import random
+import torch
+
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+random.seed(42)
+np.random.seed(42)
+
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+# torch.use_deterministic_algorithms(True)
+
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
 import math
 import threading
 
@@ -43,13 +60,16 @@ from distributed_training.utils.progress_tracker import (
 )
 from random import randrange
 from distributed_training.utils.state_loader import (
-    FastModelLoader,
     cleanup_old_cache,
     load_model_optimizer_gradient_averager,
     load_state_from_peer,
 )
 from distributed_training.utils.uids import map_uid_to_peerid, update_run_peerid_list
 from distributed_training.validator import forward
+from distributed_training import __run__
+
+from distributed_training.utils.compression import CompressDCT, TransformDCT
+from typing import Any
 
 
 class Validator(BaseValidatorNeuron):
@@ -60,13 +80,13 @@ class Validator(BaseValidatorNeuron):
         self._init_model_components()
         self._init_network_components()
         self._init_uid_components()
-        self._randomly_reset_uid_tracker()
+        self._load_gradient_compressors()
 
     def _update_wandb_project(self):
         suffix = "_validators" if self.neuron_type == "ValidatorNeuron" else "_miners"
         self.config.neuron.wandb_project += suffix
 
-    def report_allreduce_operation(
+    def report_allreduce_scores(
         self,
         op_id,
         epoch,
@@ -96,13 +116,13 @@ class Validator(BaseValidatorNeuron):
                 org=self.config.neuron.influxdb_org,
                 record=point,
             )
-            bt.logging.info(
+            self.logger.info(
                 f"Validator {validator_uid} reported AllReduce operation {op_id} metrics to InfluxDB"
             )
         except Exception as e:
-            bt.logging.error(f"Error reporting AllReduce metrics: {e}")
+            self.logger.error(f"Error reporting AllReduce metrics: {e}")
 
-    def report_scoring_metrics(self):
+    def report_train_scores(self):
         """Send validator scoring metrics to InfluxDB"""
         try:
             points = []
@@ -112,19 +132,37 @@ class Validator(BaseValidatorNeuron):
                     Point("miner_scores")
                     .tag("validator_uid", str(self.uid))
                     .tag("miner_uid", str(uid))
-                    .field("train_score", float(data["train_score"] or 0))
-                    .field("all_reduce_score", float(data["all_reduce_score"] or 0))
-                    .field("repo_valid_score", float(data["repo_valid_score"] or 0))
-                    .field("total_score", float(data["total_score"] or 0))
+                    .tag("hotkey", self.wallet.hotkey.ss58_address)
+                    .tag("run_id", __run__)
+                    .field("repo_valid_score", float(data.train.is_valid))
+                    .field("all_reduce_score", float(data.all_reduce.score))
+                    .field("train_score", data.train.score)
+                    .field("train_random_score", data.train.random.score)
+                    .field("train_assigned_score", data.train.assigned.score)
+                    .field("total_score", data.total.score)
                 )
                 points.append(point)
 
-                if "loss" in data:
+                point = (
+                    Point("miner_loss")
+                    .tag("validator_uid", str(self.uid))
+                    .tag("miner_uid", str(uid))
+                    .tag("hotkey", self.wallet.hotkey.ss58_address)
+                    .tag("run_id", __run__)
+                    .field("loss", float(data.train.random.after or 0))
+                )
+                points.append(point)
+
+                if uid in self.openskill_ratings.keys():
                     point = (
-                        Point("miner_loss")
+                        Point("openskill_scores")
                         .tag("validator_uid", str(self.uid))
                         .tag("miner_uid", str(uid))
-                        .field("loss", float(data["loss"] or 0))
+                        .tag("hotkey", self.wallet.hotkey.ss58_address)
+                        .tag("run_id", __run__)
+                        .field("mu", float(self.openskill_ratings[uid].mu))
+                        .field("sigma", float(self.openskill_ratings[uid].sigma))
+                        .field("ordinal", float(self.openskill_ratings[uid].ordinal()))
                     )
                     points.append(point)
 
@@ -135,14 +173,14 @@ class Validator(BaseValidatorNeuron):
                 record=points,
             )
         except Exception as e:
-            bt.logging.error(f"Error reporting scoring metrics: {e}")
+            self.logger.error(f"Error reporting scoring metrics: {e}")
 
     def _init_metrics_collection(self):
         # Initialize InfluxDB client
         self.influx_client = None
         self.influx_write_api = None
         try:
-            bt.logging.info(
+            self.logger.info(
                 "Attempting to initialize InfluxDB client for metrics collection..."
             )
             self.influx_client = InfluxDBClient(
@@ -153,17 +191,17 @@ class Validator(BaseValidatorNeuron):
             self.influx_write_api = self.influx_client.write_api(
                 write_options=SYNCHRONOUS
             )
-            bt.logging.info("InfluxDB client and write_api initialized successfully.")
+            self.logger.info("InfluxDB client and write_api initialized successfully.")
 
         except Exception as e:
-            bt.logging.error(
+            self.logger.error(
                 f"Failed to initialize InfluxDB client: {e}. Metrics collection will be disabled."
             )
             if self.influx_client:
                 try:
                     self.influx_client.close()
                 except Exception as close_e:
-                    bt.logging.error(
+                    self.logger.error(
                         f"Error closing InfluxDB client during cleanup: {close_e}"
                     )
             self.influx_client = None
@@ -171,7 +209,7 @@ class Validator(BaseValidatorNeuron):
 
     def _init_basic_components(self):
         """Initialize basic validator components"""
-        setup_logging(config=self.config)
+        setup_logging(self, config=self.config)
 
         # Core setup
         self.device = self.config.neuron.device
@@ -206,7 +244,7 @@ class Validator(BaseValidatorNeuron):
         self.local_progress.epoch = self.global_progress.epoch
 
         if self.global_progress.epoch is None:
-            bt.logging.error(
+            self.logger.error(
                 "Model Tag Is None. Make Sure You Are Using The Correct Model Name"
             )
 
@@ -224,6 +262,7 @@ class Validator(BaseValidatorNeuron):
 
         # Core parameters
         self.learning_rate_maximum = 4e-4
+        self.learning_rate_eval = 0.5
         self.weight_decay = 0.1
         self.num_inner_steps = 500
         self.offload_optimizer = True
@@ -244,12 +283,11 @@ class Validator(BaseValidatorNeuron):
     def _setup_model_state(self):
         self.learning_rate = self.get_learning_rate()
         self.average_loss = None
-        self.loader = FastModelLoader(self.config.neuron.hf_repo_id)
 
         load_model_optimizer_gradient_averager(
             self, self.config.neuron.global_model_name, self.global_progress.epoch
         )
-        cleanup_old_cache(self)
+        # cleanup_old_cache(self)
 
         if self.local_progress.epoch < self.global_progress.epoch:
             load_state_from_peer(self, epoch=self.global_progress.epoch)
@@ -270,7 +308,7 @@ class Validator(BaseValidatorNeuron):
 
     def _init_network_components(self):
         """Initialize network and P2P components"""
-        bt.logging.info("Logging PeerID to chain")
+        self.logger.info("Logging PeerID to chain")
         log_peerid_to_chain(self)
 
     def _init_uid_components(self):
@@ -285,9 +323,31 @@ class Validator(BaseValidatorNeuron):
         self.failed_is_alive_counter = {uid: 0 for uid in self.metagraph.uids.tolist()}
         self.miner_uids = []
 
-    def _randomly_reset_uid_tracker(self):
-        if self.uid == self.master_uid:
-            self.uid_tracker[randrange(256)]["train_similarity_score_last_updated"] = 0
+    def _load_gradient_compressors(self):
+        # Init compression
+        self.transformer = TransformDCT(
+            self.model, target_chunk=self.config.neuron.target_chunk
+        )
+        self.compressor = CompressDCT(
+            use_quantization=True,
+            quantization_bins=self.config.neuron.quantization_bins,
+            quantization_range=self.config.neuron.quantization_range,
+        )
+        self.xshapes = {}
+        self.totalks = {}
+        self.error_feedback = {}
+        self.owned_params = set()
+        for n, p in self.model.named_parameters():
+            self.owned_params.add(n)
+            self.error_feedback[n] = torch.zeros_like(p, device=self.device)
+            _, _, xshape, totalk = self.compressor.compress(
+                self.transformer.encode(
+                    torch.zeros_like(p), use_dct=self.config.neuron.use_dct
+                ),
+                self.config.neuron.topk_compression,
+            )
+            self.xshapes[n] = xshape
+            self.totalks[n] = totalk
 
     def _init_peer_mapping(self):
         self.stop_event = threading.Event()
@@ -349,6 +409,52 @@ class Validator(BaseValidatorNeuron):
 
     async def forward(self):
         return await forward(self)
+
+    def update_model_with_pseudo_gradient(
+        self, model: torch.nn.Module, uid: int, state_dict: dict, quantize: bool = False
+    ) -> None:
+        model.zero_grad()
+
+        # Apply the pseudo-gradient to the model parameters
+        for n, p in model.named_parameters():
+            idxs_key = n + "idxs"
+            vals_key = n + "vals"
+            quant_key = n + "quant_params"
+            idxs = state_dict.get(idxs_key, None)
+            vals = state_dict.get(vals_key, None)
+            quant_params = state_dict.get(quant_key, None)
+            if (
+                (idxs is not None)
+                and (vals is not None)
+                and ((quant_params is not None) or (quantize is False))
+            ):
+                idxs = idxs.to(self.device)
+                vals = vals.to(self.device)
+                grad = self.transformer.decode(
+                    self.compressor.decompress(
+                        p.to(self.device),
+                        idxs,
+                        vals,
+                        self.xshapes[n],
+                        self.totalks[n],
+                        quant_params,
+                    ),
+                    use_dct=self.config.neuron.use_dct,
+                ).to(self.device)
+
+                # Final safety check on the gradient itself
+                if torch.isnan(grad).any() or torch.isinf(grad).any():
+                    self.logger.info(
+                        f"Decompressed gradient for parameter {n} contains NaN/Inf, skipping UID {uid}"
+                    )
+                    raise ValueError(
+                        f"Invalid gradient from UID {uid}: NaN or Inf in decompressed gradient for parameter {n}"
+                    )
+                p.data.sub_(
+                    grad,
+                    alpha=self.state_averager.optimizer.param_groups[0]["lr"]
+                    * self.learning_rate_eval,
+                )
 
 
 # The main function parses the configuration and runs the validator.
