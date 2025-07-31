@@ -62,6 +62,11 @@ async def forward(self):
     # Evaluate wether to run an AllReduce or validate HF miner states
     if self.step % 2 == 0:
         map_uid_to_peerid(self)
+
+    # Benchmark UIDs
+    benchmark_uids(self)
+
+    # Get number of blocks since last allreduce
     blocks_since_allreduce = self.current_block - self.last_allreduce_block
     self.should_all_reduce = (
         blocks_since_allreduce >= self.config.neuron.blocks_per_allreduce
@@ -240,9 +245,6 @@ async def forward(self):
         self.miner_uids = get_next_uid_api(
             self,
         )
-
-        # Benchmark any untested uids
-        benchmark_uids(self)
 
         # Early return if no active miners found
         if len(self.miner_uids) == 0:

@@ -411,7 +411,7 @@ class Validator(BaseValidatorNeuron):
         return await forward(self)
 
     def update_model_with_pseudo_gradient(
-        self, model: torch.nn.Module, uid: int, state_dict: dict
+        self, model: torch.nn.Module, uid: int, state_dict: dict, quantize: bool = False
     ) -> None:
         model.zero_grad()
 
@@ -423,11 +423,13 @@ class Validator(BaseValidatorNeuron):
             idxs = state_dict.get(idxs_key, None)
             vals = state_dict.get(vals_key, None)
             quant_params = state_dict.get(quant_key, None)
-
-            if idxs is not None and vals is not None and quant_params is not None:
+            if (
+                (idxs is not None)
+                and (vals is not None)
+                and ((quant_params is not None) or (quantize is False))
+            ):
                 idxs = idxs.to(self.device)
                 vals = vals.to(self.device)
-
                 grad = self.transformer.decode(
                     self.compressor.decompress(
                         p.to(self.device),

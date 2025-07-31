@@ -185,6 +185,9 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
         self, model=model_base, blocks=blocks, uid=uid, samples=None, n_pages=1
     )
     average_loss_before = total_loss_before / n_batches_sampled_before
+    self.logger.debug(
+        f"UID {uid:03d}: Model loss before gradient update {average_loss_after:6f}"
+    )
 
     # 2. Load and apply pseudo gradient
     self.logger.info(f"UID {uid:03d}: Applying pseudo gradient")
@@ -217,6 +220,9 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
         self, model=model_t1, blocks=blocks, uid=uid, samples=None, n_pages=1
     )
     average_loss_after = total_loss_after / n_batches_sampled_after
+    self.logger.debug(
+        f"UID {uid:03d}: Model loss after gradient update {average_loss_after:6f}"
+    )
 
     # Cleanup
     del gradient
@@ -260,22 +266,22 @@ def get_uids_blocks(self, uid: int, revision: str) -> list[int]:
 
 def reset_uid_train_scores(self, uid: int):
     """Penalize a uid by resetting thier train.random and train.assigned scores"""
-    train_scores = {
-        "random": {
-            "before": 0.0,
-            "after": 0.0,
-            "absolute": 0.0,
-            "relative": 0.0,
-        },
-        "assigned": {
-            "before": 0.0,
-            "after": 0.0,
-            "absolute": 0.0,
-            "relative": 0.0,
-        },
+    random_train_scores = {
+        "before": 0.0,
+        "after": 0.0,
+        "absolute": 0.0,
+        "relative": 0.0,
     }
-    for k, v in train_scores.items():
-        setattr(self.uid_tracker[uid].train, k, v)
+    assigned_train_score = {
+        "before": 0.0,
+        "after": 0.0,
+        "absolute": 0.0,
+        "relative": 0.0,
+    }
+    for k, v in random_train_scores.items():
+        setattr(self.uid_tracker[uid].train.random, k, v)
+    for k, v in assigned_train_score.items():
+        setattr(self.uid_tracker[uid].train.assigned, k, v)
 
 
 async def score_uids(self, uids: list):
