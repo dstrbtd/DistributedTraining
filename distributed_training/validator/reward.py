@@ -186,7 +186,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
     )
     average_loss_before = total_loss_before / n_batches_sampled_before
     self.logger.debug(
-        f"UID {uid:03d}: Model loss before gradient update {average_loss_after:6f}"
+        f"UID {uid:03d}: Model loss before gradient update {average_loss_before:6f}"
     )
 
     # 2. Load and apply pseudo gradient
