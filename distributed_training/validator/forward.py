@@ -67,16 +67,15 @@ async def forward(self):
     benchmark_uids(self)
 
     # Get number of blocks since last allreduce
-    blocks_since_allreduce = self.current_block - self.last_allreduce_block
+    self.blocks_since_allreduce = self.current_block - self.last_allreduce_block
     self.should_all_reduce = (
-        blocks_since_allreduce >= self.config.neuron.blocks_per_allreduce
+        self.blocks_since_allreduce >= self.config.neuron.blocks_per_allreduce
     )
     self.logger.info(
-        f"Current block {self.current_block} | Blocks Since Last AllReduce: {blocks_since_allreduce} | Should AllReduce: {self.should_all_reduce}"
+        f"Current block {self.current_block} | Blocks Since Last AllReduce: {self.blocks_since_allreduce} | Should AllReduce: {self.should_all_reduce}"
     )
 
     responses = [[]]
-    rewards = torch.tensor([])
 
     if self.should_all_reduce:
         self.event.update({"synapse_type": "all_reduce"})
@@ -117,7 +116,8 @@ async def forward(self):
                     self.miner_uids[i]
                     for i in np.argsort(
                         [
-                            self.metagraph.incentive[i].item()
+                            # self.metagraph.incentive[i].item()
+                            self.uid_tracker[i].total.score
                             * self.uid_tracker[i].train.is_valid
                             for i in self.miner_uids
                         ]
@@ -125,6 +125,8 @@ async def forward(self):
                 ]
             )
         )
+        alive_uids = self.miner_uids
+        self.miner_uids = self.miner_uids[: self.config.neuron.min_group_size * 2]
         self.event.update({"UIDs": self.miner_uids})
         self.logger.info(f"UIDs:  {self.miner_uids}")
 
@@ -179,7 +181,7 @@ async def forward(self):
                 ) = self.avg_handler.calculate_allreduce_scores(
                     participating_peers=results["participating_peers"],
                     failed_peers=results["failed_peers"],
-                    alive_uids=self.miner_uids,
+                    alive_uids=alive_uids,
                     modes=results["modes"],
                     bandwidths=results["bandwidths"],
                     peerids_to_uids=self.peerids_to_uids,
@@ -228,8 +230,7 @@ async def forward(self):
                     self.logger.info(
                         f"Error reporting allreduce metrics to dashboard {e}"
                     )
-                self.config.neuron.blocks_per_allreduce = 1000
-                time.sleep(360)
+                self.config.neuron.blocks_per_allreduce = 500
             else:
                 raise GradientAveragingError("Unsuccessful AllReduce Step")
 
