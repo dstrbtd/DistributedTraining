@@ -224,12 +224,15 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
         f"UID {uid:03d}: Model loss after gradient update {average_loss_after:6f}"
     )
 
-    # Cleanup
+    # Cleanup variables taking up memory
     del gradient
     del model_t1
     del total_loss_before, n_batches_total_before, n_batches_sampled_before
     del total_loss_after, n_batches_total_after, n_batches_sampled_after
     torch.cuda.empty_cache()
+
+    # Remove repo from cache
+    cleanup_old_cache(self, repo_id=self.uid_tracker[uid].train.model_id)
 
     return average_loss_before, average_loss_after
 
@@ -299,7 +302,10 @@ async def score_uids(self, uids: list):
     Args:
         uids (list): UIDs of miners to be evaluated.
     """
-    epoch = self.global_progress.epoch
+    if self.blocks_since_allreduce < 0:
+        epoch = self.global_progress.epoch - 1
+    else:
+        epoch = self.global_progress.epoch
     model_huggingface_id = self.config.neuron.global_model_name
     test_time = time.time()
 
@@ -312,7 +318,7 @@ async def score_uids(self, uids: list):
     for uid in uids:
         self.uid_tracker[
             uid
-        ].train.revision = f"5.{epoch}.{get_local_inner_step(self, repo_id=self.uid_tracker[uid].train.model_id, epoch=epoch)}"
+        ].train.revision = f"{__run__}.{epoch}.{get_local_inner_step(self, repo_id=self.uid_tracker[uid].train.model_id, epoch=epoch)}"
 
     # Sync global model if behind
     if self.local_progress.epoch != epoch:
@@ -564,10 +570,16 @@ def update_train_scores(self, uids: list):
         self.uid_tracker[uid].train.random.score = float(
             self.openskill_ratings[uid].ordinal()
         )
-        self.uid_tracker[uid].train.assigned.score += (
-            self.uid_tracker[uid].train.assigned.absolute
-            > self.uid_tracker[uid].train.random.absolute
-        ) * self.config.neuron.assigned_loss_score_moving_average_alpha
+        self.uid_tracker[uid].train.assigned.score = (
+            (1 - self.config.neuron.assigned_loss_score_moving_average_alpha)
+            * self.uid_tracker[uid].train.assigned.score
+        ) + (
+            self.config.neuron.assigned_loss_score_moving_average_alpha
+            * (
+                self.uid_tracker[uid].train.assigned.absolute
+                > self.uid_tracker[uid].train.random.absolute
+            )
+        )
         self.uid_tracker[uid].train.score = (
             self.uid_tracker[uid].train.random.score
             * self.uid_tracker[uid].train.assigned.score

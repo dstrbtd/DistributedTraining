@@ -167,6 +167,8 @@ def get_next_uid_api(self):
         uids = response.json()["uids"]
 
         assert uids != self.miner_uids
+        assert type(uids) == list
+        assert all(isinstance(uid, int) for uid in uids)
         return uids
     except Exception as e:
         self.logger.info(

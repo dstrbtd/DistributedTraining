@@ -173,8 +173,9 @@ class BaseValidatorNeuron(BaseNeuron):
 
                 current_global_epoch = self.global_progress.epoch
                 self.global_progress.epoch = get_global_epoch(self)
-                if (self.local_progress.epoch != self.global_progress.epoch) or (
-                    not self.all_reduce_success_status
+                if (self.blocks_since_allreduce > 100) and (
+                    (self.local_progress.epoch != self.global_progress.epoch)
+                    or (not self.all_reduce_success_status)
                 ):
                     if self.local_progress.epoch != self.global_progress.epoch:
                         self.logger.info(
@@ -510,7 +511,6 @@ class BaseValidatorNeuron(BaseNeuron):
                         sigma=self.uid_tracker[uid].train.openskill_rating.sigma,
                         name=str(uid),
                     )
-
         elif os.path.isfile(self.config.neuron.full_path + "/state.pt"):
             self.logger.info(
                 "Pre-saved validator state found in .pt format. Loading validator state."

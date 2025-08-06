@@ -504,9 +504,9 @@ class Miner(BaseMinerNeuron):
 
             # Ensure the gradient is on the same device as the parameter.
             assert p is not None
-            grad = p.to(p.device)
+            grad = p.detach().to(p.device)
             if self.error_feedback[n].device != p.device:
-                self.error_feedback[n] = self.error_feedback[n].to(p.device)
+                self.error_feedback[n] = self.error_feedback[n].detach().to(p.device)
 
             # Normal behavior for later iterations
             self.error_feedback[n].add_(grad, alpha=lr)
@@ -556,7 +556,10 @@ class Miner(BaseMinerNeuron):
             xshapes[n] = xshape
             totalks[n] = totalk
 
-            del transmit_grad
+            del grad, transmit_grad, idxs, vals, xshape, totalk
+            if quantize:
+                del quant_params
+            gc.collect()
 
         # Delete graident iterator to free up memory
         del gradient_iterator

@@ -102,6 +102,7 @@ class Validator(BaseValidatorNeuron):
                 Point("allreduce_operations")
                 .tag("operation_id", str(op_id))
                 .tag("epoch", str(epoch))
+                .tag("run_id", __run__)
                 .tag("validator_uid", str(validator_uid))
                 .field("success_rate", float(success_rate))
                 .field("duration", float(duration))
@@ -138,7 +139,7 @@ class Validator(BaseValidatorNeuron):
                     .field("all_reduce_score", float(data.all_reduce.score))
                     .field("train_score", data.train.score)
                     .field("train_random_score", data.train.random.score)
-                    .field("train_assigned_score", data.train.assigned.score)
+                    .field("train_assigned_score", float(data.train.assigned.score))
                     .field("total_score", data.total.score)
                 )
                 points.append(point)
@@ -358,9 +359,10 @@ class Validator(BaseValidatorNeuron):
         if (self.uid == self.master_uid) or (
             "last_allreduce_block" not in self.model.config.__dict__
         ):
-            self.last_allreduce_block = self.block
+            self.last_allreduce_block = self.current_block
         else:
             self.last_allreduce_block = self.model.config.last_allreduce_block
+        self.blocks_since_allreduce = self.current_block - self.last_allreduce_block
 
     def _setup_uid_api(self):
         self.uid_api_url = self.config.neuron.uid_api_url
