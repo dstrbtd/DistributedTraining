@@ -260,8 +260,12 @@ def get_uids_blocks(self, uid: int, revision: str) -> list[int]:
             )
         )
     )["block_list"]
-    if (self.current_block - max(uid_blocks)) > (MAX_UPLOAD_INTERVAL / 12):
-        raise Exception(f"Uploaded datatset block older than 1 hour")
+    if (self.current_block - max(uid_blocks)) > (
+        self.config.neuron.blocks_per_allreduce / 2
+    ):
+        raise Exception(
+            f"Uploaded datatset block older than {((self.config.neuron.blocks_per_allreduce / 2) *12) / 60} minutes"
+        )
     else:
         assgined_blocks = random.sample(uid_blocks, 1)
         return assgined_blocks
@@ -302,7 +306,7 @@ async def score_uids(self, uids: list):
     Args:
         uids (list): UIDs of miners to be evaluated.
     """
-    if self.blocks_since_allreduce < 0:
+    if self.blocks_since_allreduce < (self.config.neuron.blocks_per_allreduce / 2):
         epoch = self.global_progress.epoch - 1
     else:
         epoch = self.global_progress.epoch
