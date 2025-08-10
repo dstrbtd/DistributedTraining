@@ -189,7 +189,7 @@ class BaseMinerNeuron(BaseNeuron):
                         ):
                             self.load_state(reset_last_allreduce_block=True)
                         elif (self.last_allreduce_block is None) and (
-                            self.current_block % self.config.neuron.epoch_length == 0
+                            self.current_block % 50 == 0
                         ):
                             self.load_state(reset_last_allreduce_block=False)
 

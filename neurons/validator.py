@@ -104,9 +104,12 @@ class Validator(BaseValidatorNeuron):
                 .tag("epoch", str(epoch))
                 .tag("run_id", __run__)
                 .tag("validator_uid", str(validator_uid))
-                .tag("run_id", __run__) 
+                .tag("run_id", __run__)
                 .field("success_rate", float(success_rate))
                 .field("duration", float(duration))
+                .field(
+                    "learning_rate", float(self.inner_optimizer.param_groups[0]["lr"])
+                )
                 .field("participating_miners", int(participating_miners_count))
             )
 

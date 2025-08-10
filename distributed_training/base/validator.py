@@ -173,7 +173,10 @@ class BaseValidatorNeuron(BaseNeuron):
 
                 current_global_epoch = self.global_progress.epoch
                 self.global_progress.epoch = get_global_epoch(self)
-                if (self.blocks_since_allreduce > 100) and (
+                if (
+                    self.blocks_since_allreduce
+                    > (self.config.neuron.blocks_per_allreduce / 2)
+                ) and (
                     (self.local_progress.epoch != self.global_progress.epoch)
                     or (not self.all_reduce_success_status)
                 ):
