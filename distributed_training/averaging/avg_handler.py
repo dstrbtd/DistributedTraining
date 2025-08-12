@@ -108,9 +108,9 @@ class AveragingHandler:
     async def _test_model_loss(self, block) -> bool:
         dataset = await self.fetch_training_data(block)
         for inputs, labels in dataset:
-            inputs, labels = inputs.to(self.device), labels.to(self.device)
+            inputs = inputs.to(self.device)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                outputs = self.model(input_ids=inputs, labels=labels)
+                outputs = self.model(input_ids=inputs, labels=inputs)
                 loss = outputs.loss / self.number_of_local_steps
 
         return math.isnan(loss.item())

@@ -149,10 +149,10 @@ async def evaluate_model(
                     if (samples is not None) and (i not in samples):
                         continue
 
-                    inputs, labels = inputs.to(device), labels.to(device)
+                    inputs = inputs.to(device)
 
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                        outputs = model(input_ids=inputs, labels=labels)
+                        outputs = model(input_ids=inputs, labels=inputs)
 
                     total_loss += outputs.loss.item()
                     n_batches_sampled += 1
