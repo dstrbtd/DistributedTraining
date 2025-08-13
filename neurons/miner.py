@@ -72,7 +72,7 @@ from distributed_training.utils.misc import (
     init_dht,
     load_wandb,
 )
-from distributed_training.utils.logging import setup_logging
+from distributed_training.utils.logger import setup_logging
 from distributed_training.utils.progress_tracker import (
     GlobalTrainingProgress,
     LocalTrainingProgress,
