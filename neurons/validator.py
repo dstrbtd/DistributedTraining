@@ -145,7 +145,6 @@ class Validator(BaseValidatorNeuron):
                     if isinstance(
                         v, (int, float, bool)
                     ):  # only store valid Influx types
-                        # breakpoint()
                         if (
                             (k == "all_reduce.count")
                             or (k == "chaindata.last_updated_block")
