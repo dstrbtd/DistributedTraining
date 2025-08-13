@@ -106,9 +106,6 @@ def hive_log_filter(record):
     }
 
 
-# ------------------------------
-# Main Setup Function
-# ------------------------------
 def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
     """
     Configure and start logging for the distributed training miner.
