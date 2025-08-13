@@ -71,8 +71,8 @@ from distributed_training.utils.chain import log_peerid_to_chain
 from distributed_training.utils.misc import (
     init_dht,
     load_wandb,
-    setup_logging,
 )
+from distributed_training.utils.logging import setup_logging
 from distributed_training.utils.progress_tracker import (
     GlobalTrainingProgress,
     LocalTrainingProgress,

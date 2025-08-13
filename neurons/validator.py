@@ -51,8 +51,8 @@ from distributed_training.utils.chain import log_peerid_to_chain
 from distributed_training.utils.misc import (
     init_dht,
     load_wandb,
-    setup_logging,
 )
+from distributed_training.utils.logging import setup_logging
 from distributed_training.utils.progress_tracker import (
     GlobalTrainingProgress,
     LocalTrainingProgress,
@@ -133,37 +133,36 @@ class Validator(BaseValidatorNeuron):
             points = []
 
             for uid, data in self.uid_tracker.items():
+                fields = self.flatten_model(data)  # dotted key dict
                 point = (
                     Point("miner_scores")
                     .tag("validator_uid", str(self.uid))
+                    .tag("validator_hotkey", self.wallet.hotkey.ss58_address)
                     .tag("miner_uid", str(uid))
-                    .tag("hotkey", self.wallet.hotkey.ss58_address)
                     .tag("run_id", __run__)
-                    .field("repo_valid_score", float(data.train.is_valid))
-                    .field("all_reduce_score", float(data.all_reduce.score))
-                    .field("train_score", data.train.score)
-                    .field("train_random_score", data.train.random.score)
-                    .field("train_assigned_score", float(data.train.assigned.score))
-                    .field("total_score", data.total.score)
                 )
-                points.append(point)
+                for k, v in fields.items():
+                    if isinstance(
+                        v, (int, float, bool)
+                    ):  # only store valid Influx types
+                        # breakpoint()
+                        if (
+                            (k == "all_reduce.count")
+                            or (k == "chaindata.last_updated_block")
+                            or (k == "uid")
+                        ):
+                            point = point.field(k, v)
+                        else:
+                            point = point.field(k, float(v))
 
-                point = (
-                    Point("miner_loss")
-                    .tag("validator_uid", str(self.uid))
-                    .tag("miner_uid", str(uid))
-                    .tag("hotkey", self.wallet.hotkey.ss58_address)
-                    .tag("run_id", __run__)
-                    .field("loss", float(data.train.random.after or 0))
-                )
                 points.append(point)
 
                 if uid in self.openskill_ratings.keys():
                     point = (
                         Point("openskill_scores")
                         .tag("validator_uid", str(self.uid))
+                        .tag("validator_hotkey", self.wallet.hotkey.ss58_address)
                         .tag("miner_uid", str(uid))
-                        .tag("hotkey", self.wallet.hotkey.ss58_address)
                         .tag("run_id", __run__)
                         .field("mu", float(self.openskill_ratings[uid].mu))
                         .field("sigma", float(self.openskill_ratings[uid].sigma))
@@ -461,6 +460,19 @@ class Validator(BaseValidatorNeuron):
                     alpha=self.state_averager.optimizer.param_groups[0]["lr"]
                     * self.learning_rate_eval,
                 )
+
+    def flatten_model(self, model, parent_key="", sep="."):
+        """Recursively flatten a Pydantic model or dict into dotted key format."""
+        items = []
+        if hasattr(model, "model_dump"):  # Pydantic model
+            model = model.model_dump()
+        for k, v in model.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.extend(self.flatten_model(v, new_key, sep=sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
 
 
 # The main function parses the configuration and runs the validator.
