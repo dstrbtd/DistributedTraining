@@ -17,19 +17,35 @@ from bittensor.utils.btlogging import format as bt_format
 load_dotenv()
 
 
-# ------------------------------
-# Loki Handler with Error Safety
-# ------------------------------
 class LokiHandler(logging_loki.LokiHandler):
+    """
+    Custom Loki logging handler that safely handles errors.
+
+    Overrides `handleError` to log any exceptions that occur during logging
+    to Loki, without shutting down the emitter. This ensures that retry logic
+    remains active instead of terminating on the first failure.
+    """
+
     def handleError(self, record):
         logging.getLogger(__name__).error("Loki logging error", exc_info=True)
         # No emitter.close() here — keeps retry alive
 
 
-# ------------------------------
-# JSON Formatter for Loki
-# ------------------------------
 class JSONFormatter(logging.Formatter):
+    """
+    Formats log records as JSON for Loki ingestion.
+
+    Adds extra metadata about the miner, such as:
+    - network and netuid
+    - hotkey
+    - neuron type
+    - IP/port
+    - Bittensor and spec version numbers
+    - UID
+
+    If exception info is present, it is included as a formatted string.
+    """
+
     def __init__(self, miner):
         self.network = miner.config.subtensor.network
         self.netuid = miner.config.netuid
@@ -47,19 +63,10 @@ class JSONFormatter(logging.Formatter):
         self.neuron_type = "validator"
 
     def format(self, record):
-        # try:
-        #     msg = "".join(record.getMessage().split(" - ")[1:])
-        # except Exception:
         msg = record.getMessage()
-
-        # # Terminal-style formatting (without colors)
-        # pretty_msg = f"[{record.levelname}] {msg}"
-        # if record.name.startswith("bittensor"):
-        #     pretty_msg = bt_format.format(record)  # Keep emoji mappings
 
         log_record = {
             "level": record.levelname.lower(),
-            # "pretty": pretty_msg,
             "module": record.module,
             "func_name": record.funcName,
             "thread": record.threadName,
@@ -85,10 +92,13 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(log_record)
 
 
-# ------------------------------
-# Hivemind Filter
-# ------------------------------
 def hive_log_filter(record):
+    """
+    Filters out noisy Hivemind loggers that are not relevant to application output.
+
+    Returns:
+        bool: True if the record should be logged, False otherwise.
+    """
     return record.name not in {
         "hivemind.dht.protocol",
         "hivemind.optim.progress_tracker",
@@ -101,10 +111,18 @@ def hive_log_filter(record):
 # ------------------------------
 def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
     """
-    Sets up:
-    - Bittensor terminal logging
-    - Loki via queue
-    - Hivemind logs to file
+    Configure and start logging for the distributed training miner.
+
+    This includes:
+    - Bittensor terminal logging with custom emoji mapping
+    - Loki logging via a background queue listener
+    - File logging for Hivemind output (filtered)
+    - Disabling noisy loggers and default Hivemind handlers
+
+    Args:
+        self: Miner instance containing config, wallet, and UID.
+        local_logfile (str): Path to the local log file.
+        config: Optional Bittensor config object for logging.
     """
 
     # Configure Bittensor terminal output
