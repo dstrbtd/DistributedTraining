@@ -67,6 +67,7 @@ from distributed_training import __run__
 # from distributed_training.averaging.avg_handler import AllReduceError
 from distributed_training.base.miner import BaseMinerNeuron, TrainingStatus
 from distributed_training.data.dataset import DatasetLoader
+from distributed_training.data.r2_dataset import R2DatasetLoader 
 from distributed_training.utils.chain import log_peerid_to_chain
 from distributed_training.utils.misc import (
     init_dht,
@@ -88,12 +89,13 @@ from distributed_training.utils.compression import TransformDCT, CompressDCT
 
 
 class Miner(BaseMinerNeuron):
-    def __init__(self, config=None):
+    def __init__(self, config=None, use_r2=False):
         super(Miner, self).__init__(config=config)
         self._update_wandb_project()
         self._init_basic_components()
         self._init_model_components()
         self._init_network_components()
+        self.data_loader = R2DatasetLoader if use_r2 else DatasetLoader
 
     def _update_wandb_project(self):
         suffix = "_miners" if self.neuron_type == "MinerNeuron" else "_validators"
@@ -789,7 +791,7 @@ class Miner(BaseMinerNeuron):
         attempt = 0
         while attempt < self.retry_limit:
             try:
-                pages = await DatasetLoader.next_pages(
+                pages = await self.data_loader.next_pages(
                     offset=self.current_block,
                     n_pages=35,
                     seed=self.uid,
@@ -797,7 +799,7 @@ class Miner(BaseMinerNeuron):
                 random.seed(self.uid)
                 random.shuffle(pages)
 
-                dataset = await DatasetLoader.create(
+                dataset = await self.data_loader.create(
                     batch_size=self.config.neuron.local_batch_size_train,
                     sequence_length=1024,
                     pages_info=pages,
