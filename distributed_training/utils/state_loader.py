@@ -10,18 +10,11 @@ from functools import partial
 from pathlib import Path
 from typing import Optional
 
-import bittensor as bt
-import hivemind
 import psutil
 import torch
-from memory_profiler import profile
 from datetime import datetime
 
-from hivemind.compression import deserialize_torch_tensor
-from hivemind.proto import averaging_pb2
 from hivemind.utils import get_logger
-from hivemind.utils.asyncio import aiter_with_timeout
-from hivemind.utils.streaming import combine_from_streaming
 from huggingface_hub import (
     create_tag,
     hf_hub_download,
@@ -273,8 +266,6 @@ def load_model_optimizer_gradient_averager(
         main_parameters=self.state_averager.main_parameters,
         offloaded_optimizer=self.state_averager.optimizer,
         prefix=f"{self.config.neuron.run_id}_grad_averager",
-        compression=hivemind.Uniform8BitQuantization(),
-        state_compression=hivemind.Uniform8BitQuantization(),
         min_group_size=self.config.neuron.min_group_size,
         min_matchmaking_time=30.0,
         request_timeout=10.0,

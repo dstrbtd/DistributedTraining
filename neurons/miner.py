@@ -71,8 +71,8 @@ from distributed_training.utils.chain import log_peerid_to_chain
 from distributed_training.utils.misc import (
     init_dht,
     load_wandb,
-    setup_logging,
 )
+from distributed_training.utils.logging import setup_logging
 from distributed_training.utils.progress_tracker import (
     GlobalTrainingProgress,
     LocalTrainingProgress,
@@ -864,10 +864,10 @@ class Miner(BaseMinerNeuron):
                 break
 
             # Move to device
-            inputs, labels = inputs.to(self.device), labels.to(self.device)
+            inputs = inputs.to(self.device)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                outputs = self.model(input_ids=inputs, labels=labels)
+                outputs = self.model(input_ids=inputs, labels=inputs)
                 loss = outputs.loss / self.number_of_local_steps
 
             loss.backward()
