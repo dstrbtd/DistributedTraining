@@ -13,6 +13,7 @@ from typing import Optional
 import psutil
 import torch
 from datetime import datetime
+from muon import MuonWithAuxAdam
 
 from hivemind.utils import get_logger
 from huggingface_hub import (
@@ -181,12 +182,39 @@ def load_model_optimizer_gradient_averager(
                     torch.cuda.empty_cache()
                     self.logger.info("Deleted Inner Optimizer")
 
-                self.inner_optimizer = torch.optim.AdamW(
-                    self.model.parameters(),
-                    lr=self.learning_rate_maximum,
-                    betas=(0.9, 0.95),
-                    weight_decay=0.1,
-                )
+                # hidden_weights = [p for p in self.model.parameters() if p.ndim >= 2]
+                # hidden_gains_biases = [p for p in self.model.parameters() if p.ndim < 2]
+                # nonhidden_params = [*model.head.parameters(), *model.embed.parameters()]
+                # [n for p in self.model.parameters() if p.ndim >= 2]
+                # [n for n, p in self.model.named_parameters() if (p.ndim < 2) or ("embed" in n) or ("head" in n)]
+                # [group['lr'] for group in self.inner_optimizer.param_groups]
+                # self.scheduler.step()
+                parameters_adam = [
+                    p
+                    for n, p in self.model.named_parameters()
+                    if (p.ndim >= 2) and ("embed" not in n) and ("head" not in n)
+                ]
+                parameters_muon = [
+                    p
+                    for n, p in self.model.named_parameters()
+                    if (p.ndim < 2) or ("embed" in n) or ("head" in n)
+                ]
+                param_groups = [
+                    dict(
+                        params=parameters_muon,
+                        use_muon=True,
+                        lr=0.02,
+                        weight_decay=0.01,
+                    ),
+                    dict(
+                        params=parameters_adam,
+                        use_muon=False,
+                        lr=3e-4,
+                        betas=(0.9, 0.95),
+                        weight_decay=0.01,
+                    ),
+                ]
+                self.inner_optimizer = MuonWithAuxAdam(param_groups)
                 self.logger.info(f"Loaded Inner Optimizer")
 
                 self.scheduler = get_cosine_schedule_with_warmup(
