@@ -12,8 +12,10 @@ from typing import Optional
 
 import psutil
 import torch
+import torch.distributed as dist
 from datetime import datetime
-from muon import MuonWithAuxAdam
+from muon import MuonWithAuxAdam, SingleDeviceMuonWithAuxAdam
+import hivemind
 
 from hivemind.utils import get_logger
 from huggingface_hub import (
@@ -182,23 +184,37 @@ def load_model_optimizer_gradient_averager(
                     torch.cuda.empty_cache()
                     self.logger.info("Deleted Inner Optimizer")
 
-                # hidden_weights = [p for p in self.model.parameters() if p.ndim >= 2]
-                # hidden_gains_biases = [p for p in self.model.parameters() if p.ndim < 2]
-                # nonhidden_params = [*model.head.parameters(), *model.embed.parameters()]
-                # [n for p in self.model.parameters() if p.ndim >= 2]
-                # [n for n, p in self.model.named_parameters() if (p.ndim < 2) or ("embed" in n) or ("head" in n)]
-                # [group['lr'] for group in self.inner_optimizer.param_groups]
-                # self.scheduler.step()
-                parameters_adam = [
+                if not dist.is_initialized():
+                    dist.init_process_group(
+                        backend="gloo",
+                        init_method="tcp://127.0.0.1:29500",
+                        rank=0,
+                        world_size=1,
+                    )
+
+                parameters_muon = [
                     p
                     for n, p in self.model.named_parameters()
                     if (p.ndim >= 2) and ("embed" not in n) and ("head" not in n)
                 ]
-                parameters_muon = [
+                parameters_muon_index = [
+                    i
+                    for i, n in enumerate(self.model.named_parameters())
+                    if (n[1].ndim >= 2)
+                    and ("embed" not in n[0])
+                    and ("head" not in n[0])
+                ]
+                parameters_adam = [
                     p
                     for n, p in self.model.named_parameters()
                     if (p.ndim < 2) or ("embed" in n) or ("head" in n)
                 ]
+                parameters_adam_index = [
+                    i
+                    for i, n in enumerate(self.model.named_parameters())
+                    if (n[1].ndim < 2) or ("embed" in n[0]) or ("head" in n[0])
+                ]
+                parameters_list = parameters_muon_index + parameters_adam_index
                 param_groups = [
                     dict(
                         params=parameters_muon,
@@ -214,7 +230,7 @@ def load_model_optimizer_gradient_averager(
                         weight_decay=0.01,
                     ),
                 ]
-                self.inner_optimizer = MuonWithAuxAdam(param_groups)
+                self.inner_optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
                 self.logger.info(f"Loaded Inner Optimizer")
 
                 self.scheduler = get_cosine_schedule_with_warmup(
@@ -223,29 +239,29 @@ def load_model_optimizer_gradient_averager(
                     num_training_steps=88000,
                 )
 
-                optimizer_state = torch.load(
-                    hf_hub_download(
-                        repo_id=model_name,
-                        filename="inner_optimizer.pt",
-                        revision=revision,
-                    ),
-                    weights_only=True,
-                    map_location="cpu",
-                )
+                # optimizer_state = torch.load(
+                #     hf_hub_download(
+                #         repo_id=model_name,
+                #         filename="inner_optimizer.pt",
+                #         revision=revision,
+                #     ),
+                #     weights_only=True,
+                #     map_location="cpu",
+                # )
 
-                # Load optimizer state if available
-                if "optimizer_state_dict" in optimizer_state:
-                    self.inner_optimizer.load_state_dict(
-                        optimizer_state["optimizer_state_dict"]
-                    )
-                if "learning_rate" in optimizer_state:
-                    for group in self.inner_optimizer.param_groups:
-                        group["lr"] = optimizer_state["learning_rate"]
-                if "scheduler_state" in optimizer_state:
-                    self.scheduler.load_state_dict(optimizer_state["scheduler_state"])
-                self.logger.info(
-                    f"Successfully Loaded Inner Optimizer State From {model_name} For Revision {revision}"
-                )
+                # # Load optimizer state if available
+                # if "optimizer_state_dict" in optimizer_state:
+                #     self.inner_optimizer.load_state_dict(
+                #         optimizer_state["optimizer_state_dict"]
+                #     )
+                # if "learning_rate" in optimizer_state:
+                #     for group in self.inner_optimizer.param_groups:
+                #         group["lr"] = optimizer_state["learning_rate"]
+                # if "scheduler_state" in optimizer_state:
+                #     self.scheduler.load_state_dict(optimizer_state["scheduler_state"])
+                # self.logger.info(
+                #     f"Successfully Loaded Inner Optimizer State From {model_name} For Revision {revision}"
+                # )
 
                 break
 
@@ -293,6 +309,9 @@ def load_model_optimizer_gradient_averager(
         dht=self.dht,
         main_parameters=self.state_averager.main_parameters,
         offloaded_optimizer=self.state_averager.optimizer,
+        compression=hivemind.compression.quantization.TwoBitUniformEF(
+            range_in_sigmas=3.0, block_size=0, stochastic=True, center_by_mean=True
+        ),
         prefix=f"{self.config.neuron.run_id}_grad_averager",
         min_group_size=self.config.neuron.min_group_size,
         min_matchmaking_time=30.0,
@@ -353,6 +372,7 @@ def load_model_optimizer_gradient_averager(
         self.config.neuron.local_batch_size_train_effective,
         self.tokenizer,
         self.device,
+        parameters_list,
     )
 
     self.scaler = torch.amp.GradScaler(enabled=True)
