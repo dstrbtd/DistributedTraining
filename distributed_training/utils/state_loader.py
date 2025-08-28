@@ -239,29 +239,29 @@ def load_model_optimizer_gradient_averager(
                     num_training_steps=88000,
                 )
 
-                # optimizer_state = torch.load(
-                #     hf_hub_download(
-                #         repo_id=model_name,
-                #         filename="inner_optimizer.pt",
-                #         revision=revision,
-                #     ),
-                #     weights_only=True,
-                #     map_location="cpu",
-                # )
+                optimizer_state = torch.load(
+                    hf_hub_download(
+                        repo_id=model_name,
+                        filename="inner_optimizer.pt",
+                        revision=revision,
+                    ),
+                    weights_only=True,
+                    map_location="cpu",
+                )
 
-                # # Load optimizer state if available
-                # if "optimizer_state_dict" in optimizer_state:
-                #     self.inner_optimizer.load_state_dict(
-                #         optimizer_state["optimizer_state_dict"]
-                #     )
-                # if "learning_rate" in optimizer_state:
-                #     for group in self.inner_optimizer.param_groups:
-                #         group["lr"] = optimizer_state["learning_rate"]
-                # if "scheduler_state" in optimizer_state:
-                #     self.scheduler.load_state_dict(optimizer_state["scheduler_state"])
-                # self.logger.info(
-                #     f"Successfully Loaded Inner Optimizer State From {model_name} For Revision {revision}"
-                # )
+                # Load optimizer state if available
+                if "optimizer_state_dict" in optimizer_state:
+                    self.inner_optimizer.load_state_dict(
+                        optimizer_state["optimizer_state_dict"]
+                    )
+                if "learning_rate" in optimizer_state:
+                    for group in self.inner_optimizer.param_groups:
+                        group["lr"] = optimizer_state["learning_rate"]
+                if "scheduler_state" in optimizer_state:
+                    self.scheduler.load_state_dict(optimizer_state["scheduler_state"])
+                self.logger.info(
+                    f"Successfully Loaded Inner Optimizer State From {model_name} For Revision {revision}"
+                )
 
                 break
 
