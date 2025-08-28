@@ -15,7 +15,17 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-# Adapted from NousResearch (https://github.com/bloc97/DeMo) and Templar (https://github.com/tplr-ai/templar)
+# Adapted from NousResearch (https://github.com/bloc97/DeMo), Templar (https://github.com/tplr-ai/templar) and Hivemind (https://github.com/learning-at-home/hivemind)
+
+# 2 Bit Quantizer with Error Feedback for Hivemind
+from __future__ import annotations
+import numpy as np
+import torch
+
+from hivemind.compression.base import CompressionBase, CompressionInfo
+from hivemind.proto import runtime_pb2
+
+from typing import Optional
 
 import math
 from typing import Generic, Literal, TypeAlias, TypeVar, cast, overload
@@ -517,3 +527,341 @@ def _get_smaller_split(n, close_to):
                 return val
             return all_divisors[ix - 1]
     return n
+
+
+"""
+Two-bit quantizer with Error Feedback (EF) for Hivemind.
+
+- Uniform, symmetric, mid-rise 2-bit quantization (4 levels) with optional stochastic rounding.
+- Per-tensor statistics (mean-centering optional) with configurable sigma-range.
+- Packs 4 x 2-bit indices per uint8 to actually transmit 2 bits / value.
+- Includes an Error-Feedback mechanism that keeps a residual per-parameter tensor.
+- Designed to plug into Hivemind's `CompressionBase` (not the `Quantization` helper class),
+  because the latter assumes `indices_dtype` width for `n_bits`.
+
+Drop-in usage example
+---------------------
+
+from hivemind.compression.base import CompressionInfo
+from two_bit_quant import TwoBitUniformEF
+
+q = TwoBitUniformEF(range_in_sigmas=3.0, stochastic=True, center_by_mean=True)
+
+# Sender
+msg = q.compress(tensor, info)  # returns runtime_pb2.Tensor
+
+# Receiver
+x_hat = q.extract(msg)  # dequantized torch.Tensor
+
+Notes
+-----
+* If your `runtime_pb2` doesn't have a compression type for 2-bit, define one (e.g., `UNIFORM_2BIT`).
+  This module will fall back to `UNIFORM_8BIT` if `UNIFORM_2BIT` is missing, but you should add a proper enum.
+* Error feedback can be clipped by global-norm (`clip_residual_norm`) to avoid unbounded residual growth.
+* You may switch to block-wise stats by setting `block_size>0` (per contiguous block of that many elements).
+"""
+
+
+def _levels_centers(step: torch.Tensor, num_levels: int = 4) -> torch.Tensor:
+    """Return mid-rise centers for symmetric uniform quantization with `num_levels`.
+    Centers are: (-1.5, -0.5, 0.5, 1.5) * step for 2-bit.
+    """
+    assert num_levels == 4, "This implementation is for 2-bit (4 levels)."
+    centers = torch.tensor([-1.5, -0.5, 0.5, 1.5], dtype=step.dtype, device=step.device)
+    return centers * step
+
+
+# def _pack_2bit(indices_uint8: torch.Tensor) -> np.ndarray:
+#     """Pack 2-bit values (0..3) into bytes (4 values per byte).
+#     Returns a numpy uint8 array of length ceil(N/4).
+#     """
+#     flat = indices_uint8.view(-1)
+#     n = flat.numel()
+#     pad = (4 - (n % 4)) % 4
+#     if pad:
+#         flat = torch.cat([flat, torch.zeros(pad, dtype=flat.dtype, device=flat.device)])
+#     flat = flat.to(torch.uint8)
+#     flat = flat.view(-1, 4)
+#     # byte = i0 | (i1<<2) | (i2<<4) | (i3<<6)
+#     packed = (flat[:, 0] | (flat[:, 1] << 2) | (flat[:, 2] << 4) | (flat[:, 3] << 6)).contiguous()
+#     return np.asarray(packed.cpu(), dtype=np.uint8)
+
+
+def _pack_2bit(indices: torch.Tensor) -> np.ndarray:
+    n = len(indices)
+    padded_len = ((n + 3) // 4) * 4  # <--- pad to multiple of 4
+    padded = torch.zeros(padded_len, dtype=torch.uint8, device=indices.device)
+    padded[:n] = indices
+    packed = (
+        (padded[0::4] << 6) | (padded[1::4] << 4) | (padded[2::4] << 2) | padded[3::4]
+    )
+    return packed.cpu().numpy().astype(np.uint8)
+
+
+def _unpack_2bit(
+    packed: np.ndarray, total_values: int, device: torch.device
+) -> torch.Tensor:
+    """Unpack bytes -> 2-bit values (0..3). Returns torch.uint8 of length total_values."""
+    packed_t = torch.as_tensor(packed, dtype=torch.uint8, device=device)
+    bytes_view = packed_t.view(-1)
+    # extract 2-bit fields
+    i0 = bytes_view & 0b11
+    i1 = (bytes_view >> 2) & 0b11
+    i2 = (bytes_view >> 4) & 0b11
+    i3 = (bytes_view >> 6) & 0b11
+    out = torch.stack([i0, i1, i2, i3], dim=1).reshape(-1)
+    return out[:total_values]
+
+
+class TwoBitUniformEF(CompressionBase):
+    """Uniform 2-bit quantizer with error-feedback.
+
+    Args:
+        range_in_sigmas: Half-range = `range_in_sigmas * std`. (Default 3.0)
+        stochastic: Use stochastic rounding (recommended). If False, uses nearest rounding.
+        center_by_mean: Subtract per-tensor mean before quantization.
+        block_size: If > 0, compute stats per block of this many contiguous elements (reduces clipping).
+        clip_residual_norm: If set, clip EF residual global-norm to this value per tensor per round.
+    """
+
+    def __init__(
+        self,
+        range_in_sigmas: float = 3.0,
+        stochastic: bool = True,
+        center_by_mean: bool = True,
+        block_size: int = 0,
+        clip_residual_norm: Optional[float] = None,
+    ):
+        self.range_in_sigmas = float(range_in_sigmas)
+        self.stochastic = bool(stochastic)
+        self.center_by_mean = bool(center_by_mean)
+        self.block_size = int(block_size)
+        self.clip_residual_norm = clip_residual_norm
+
+        # Provide a reasonable compression type; update your proto to include UNIFORM_2BIT.
+        # self.compression_type = getattr(runtime_pb2, "UNIFORM_2BIT", getattr(runtime_pb2, "UNIFORM_8BIT", 0))
+        self.compression_type = runtime_pb2.UNIFORM_2BIT
+
+        # Keyed by parameter identity
+        self._residuals = {}
+
+    # -------------- Helpers --------------
+    @staticmethod
+    def _key(info: CompressionInfo, tensor: torch.Tensor) -> str:
+        name = getattr(info.descriptor, "name", None)
+        if name:
+            return name
+        # Fallback: include device + shape + data_ptr (may be unstable across runs)
+        return f"{tensor.device}-{tuple(tensor.shape)}-{tensor.data_ptr()}"
+
+    @staticmethod
+    def _std_unbiased(x: torch.Tensor) -> torch.Tensor:
+        # Numerically stable unbiased std via norm
+        n = x.numel()
+        if n <= 1:
+            return torch.zeros((), dtype=x.dtype, device=x.device)
+        return x.norm() / math.sqrt(max(n - 1, 1))
+
+    def _quantize_block(
+        self, x: torch.Tensor, shift: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Quantize a 1D block x (float32) → indices uint8 (0..3) and centers (for dequant) as float32 tensor.
+        Returns (indices_uint8, centers_values) where dequant = shift + centers[indices].
+        """
+        x_centered = x - (shift if self.center_by_mean else 0.0)
+        std = self._std_unbiased(x_centered)
+        # Half-range and step (mid-rise with 4 levels)
+        half_range = self.range_in_sigmas * std
+        step = (2 * half_range) / 4.0 + 1e-12  # avoid div-by-zero
+        # Map x_centered to quantization coordinate y in [0..3] (before rounding)
+        y = (x_centered + half_range) / step - 0.5
+        if self.stochastic:
+            y_floor = torch.floor(y)
+            p = (y - y_floor).clamp_(0, 1)
+            y_round = (y_floor + torch.bernoulli(p)).clamp_(0, 3)
+        else:
+            y_round = torch.round(y).clamp_(0, 3)
+        indices = y_round.to(torch.uint8)
+        centers = _levels_centers(step, 4)  # [-1.5,-0.5,0.5,1.5]*step
+        return indices, centers
+
+    def _maybe_clip_residual(self, r: torch.Tensor) -> torch.Tensor:
+        if self.clip_residual_norm is None:
+            return r
+        n = r.norm()
+        if torch.isfinite(n) and n > self.clip_residual_norm:
+            r = r * (self.clip_residual_norm / (n + 1e-12))
+        return r
+
+    # -------------- Public API --------------
+    def compress(
+        self, tensor: torch.Tensor, info: CompressionInfo, allow_inplace: bool = False
+    ) -> runtime_pb2.Tensor:
+        # raise ValueError("TwoBitUniformEF only supports floating tensors.")
+        if not torch.is_floating_point(tensor):
+            raise ValueError("TwoBitUniformEF only supports floating tensors.")
+        # Apply EF: add residual
+        key = self._key(info, tensor)
+        if (
+            key not in self._residuals
+            or self._residuals[key].shape != tensor.shape
+            or self._residuals[key].dtype != tensor.dtype
+            or self._residuals[key].device != tensor.device
+        ):
+            self._residuals[key] = torch.zeros_like(tensor)
+        to_send = tensor.detach() + self._residuals[key]
+
+        # Flatten and quantize (optionally blockwise)
+        x = to_send.to(torch.float32).view(-1)
+        device = x.device
+        total = x.numel()
+
+        if self.block_size and self.block_size > 0:
+            blocks = torch.split(x, self.block_size)
+        else:
+            blocks = (x,)
+
+        indices_list = []
+        centers_list = []
+        shifts_list = []
+        offset = 0
+
+        for blk in blocks:
+            shift = (
+                blk.mean()
+                if self.center_by_mean
+                else torch.zeros((), dtype=blk.dtype, device=blk.device)
+            )
+            idx, centers = self._quantize_block(blk, shift)
+            indices_list.append(idx)
+            centers_list.append(centers)
+            shifts_list.append(shift)
+            offset += blk.numel()
+
+        indices_all = torch.cat(indices_list)
+        packed = _pack_2bit(indices_all)
+
+        # --- sanity check ---
+        assert len(packed) * 4 >= total, "Packed buffer too small for total elements"
+
+        # Serialize: [int64 nblocks][for each block: int64 shift (float32), int64 step/centers] + packed bytes
+        # To keep it simple & robust across devices/dtypes, we store:
+        # - int64: number of elements (total)
+        # - int64: number of blocks (B)
+        # - For each block b: [float32 shift_b, float32 step_b]
+        #   (step is derivable from centers, but we store step directly for compactness)
+        #   step_b can be recovered because centers = [-1.5,-0.5,0.5,1.5]*step
+        # - Then the packed indices (uint8)
+        #
+        # NOTE: we compute step per block from centers[0] (abs / 1.5).
+        B = len(blocks)
+        header = []
+        header.append(np.int64(total).tobytes())
+        header.append(np.int64(B).tobytes())
+        for b in range(B):
+            shift_b = (
+                shifts_list[b]
+                .detach()
+                .float()
+                .cpu()
+                .numpy()
+                .astype(np.float32)
+                .tobytes()
+            )
+            step_b = (
+                (centers_list[b][3] - centers_list[b][2])
+                .detach()
+                .float()
+                .cpu()
+                .numpy()
+                .astype(np.float32)
+                .tobytes()
+            )
+            header.append(shift_b)
+            header.append(step_b)
+        header_bytes = b"".join(header)
+
+        buf = header_bytes + packed.tobytes()
+
+        msg = runtime_pb2.Tensor(
+            compression=self.compression_type,
+            buffer=buf,
+            size=tensor.shape,
+            dtype=(
+                tensor.data.numpy().dtype.name
+                if tensor.dtype != torch.bfloat16
+                else "bfloat16"
+            ),
+            requires_grad=tensor.requires_grad,
+        )
+
+        # Locally dequantize to compute new residual
+        deq = self.extract(msg).to(device).to(to_send.dtype)
+        new_residual = to_send - deq
+        new_residual = self._maybe_clip_residual(new_residual)
+        self._residuals[key] = new_residual
+        return msg
+
+    def extract(self, serialized_tensor: runtime_pb2.Tensor) -> torch.Tensor:
+        # Parse header
+        buf = serialized_tensor.buffer
+        offset = 0
+        total = int(np.frombuffer(buf, dtype=np.int64, count=1, offset=offset)[0])
+        offset += 8
+        B = int(np.frombuffer(buf, dtype=np.int64, count=1, offset=offset)[0])
+        offset += 8
+        shifts = []
+        steps = []
+        for _ in range(B):
+            shift = np.frombuffer(buf, dtype=np.float32, count=1, offset=offset)[0]
+            offset += 4
+            step = np.frombuffer(buf, dtype=np.float32, count=1, offset=offset)[0]
+            offset += 4
+            shifts.append(shift)
+            steps.append(step)
+        packed = np.frombuffer(buf, dtype=np.uint8, offset=offset)
+
+        # Unpack indices
+        device = torch.device(
+            "cpu"
+        )  # extraction happens CPU-side; move later if needed
+        indices_full = _unpack_2bit(packed, total, device).long()
+        indices = indices_full[:total]  # <--- ensure only total elements
+
+        # Dequantize per block
+        if B == 1:
+            centers = (
+                torch.tensor([-1.5, -0.5, 0.5, 1.5], dtype=torch.float32, device=device)
+                * steps[0]
+            )
+            # breakpoint()
+            x_hat = centers[indices] + shifts[0]
+        else:
+            # Split indices into blocks of the sizes used during compression
+            # We do not store exact block sizes; they are all `block_size` except possibly the final remainder.
+            # Reconstruct sizes heuristically.
+            block_size = self.block_size if self.block_size > 0 else total
+            sizes = [block_size] * (total // block_size)
+            if sum(sizes) < total:
+                sizes.append(total - sum(sizes))
+            parts = torch.split(indices, sizes)
+            outs = []
+            for i, part in enumerate(parts):
+                centers = (
+                    torch.tensor(
+                        [-1.5, -0.5, 0.5, 1.5], dtype=torch.float32, device=device
+                    )
+                    * steps[i]
+                )
+                outs.append(centers[part] + shifts[i])
+            x_hat = torch.cat(outs, dim=0)
+
+        x_hat = x_hat.view(tuple(serialized_tensor.size))
+        # Cast to original dtype
+        tgt_dtype = getattr(torch, serialized_tensor.dtype)
+        return x_hat.to(dtype=tgt_dtype).requires_grad_(serialized_tensor.requires_grad)
+
+    def estimate_compression_ratio(self, info: CompressionInfo) -> float:
+        # True 2-bit per value (ignoring small header) over original dtype width
+        bits_per_val = 2.0
+        return bits_per_val / float(torch.finfo(info.descriptor.dtype).bits)
