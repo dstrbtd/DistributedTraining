@@ -225,9 +225,9 @@ def load_model_optimizer_gradient_averager(
                     dict(
                         params=parameters_adam,
                         use_muon=False,
-                        lr=3e-4,
+                        lr=self.learning_rate_maximum,
                         betas=(0.9, 0.95),
-                        weight_decay=0.01,
+                        weight_decay=0.1,
                     ),
                 ]
                 self.inner_optimizer = SingleDeviceMuonWithAuxAdam(param_groups)

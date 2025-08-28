@@ -505,10 +505,12 @@ class DTAverager(hivemind.DecentralizedAverager):
 
 
 class DTGradAverager(DTAverager):
-    """ "
+    """
     DTGradAverager is meant to be used in pair with DTStateAverager. Specifically it takes as input the offloaded optimizer of DTStateAverager, and
     use the grad buffer of the offloaded param as averaged_tensors for the DecentralizedAverager. In other words the DTGradAverager makes sure that the grad of the offloaded optimizer
     are kept in sync between peers.
+
+    DTGradAverager is inspired by: https://github.com/PrimeIntellect-ai/OpenDiloco
     """
 
     def __init__(
