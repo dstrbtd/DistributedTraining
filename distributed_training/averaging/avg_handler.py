@@ -467,7 +467,6 @@ class AveragingHandler:
             for group in self.inner_optimizer.param_groups
             for param in group["params"]
         ]
-        # breakpoint()
         for main_param, opt_param in zip(
             tuple(self.state_averager.main_parameters[i] for i in self.parameters_list),
             opt_parameters,
