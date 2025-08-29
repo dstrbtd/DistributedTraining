@@ -184,14 +184,6 @@ def load_model_optimizer_gradient_averager(
                     torch.cuda.empty_cache()
                     self.logger.info("Deleted Inner Optimizer")
 
-                # if not dist.is_initialized():
-                #     dist.init_process_group(
-                #         backend="gloo",
-                #         init_method="tcp://127.0.0.1:29500",
-                #         rank=0,
-                #         world_size=1,
-                #     )
-
                 parameters_muon = [
                     p
                     for n, p in self.model.named_parameters()
