@@ -33,6 +33,7 @@ class AveragingHandler:
         local_batch_size_train_effective,
         tokenizer,
         device,
+        parameters_list,
     ):
         self.model = model
         self.inner_optimizer = optimizer
@@ -49,6 +50,7 @@ class AveragingHandler:
         self.number_of_local_steps = (
             self.local_batch_size_train_effective // self.local_batch_size_train
         )
+        self.parameters_list = parameters_list
 
     def _get_weights_sample(self) -> List[float]:
         """Get a sample of model weights for validation."""
@@ -417,6 +419,10 @@ class AveragingHandler:
                 initial_weights = self._get_weights_sample()
                 bt.logging.info(f"Initial Weights Sample: {initial_weights}")
 
+                bt.logging.info(
+                    f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
+                )
+
                 # Perform offloaded outer optimization steps
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 bt.logging.info("Performing Outer Optimizer Step")
@@ -431,6 +437,10 @@ class AveragingHandler:
 
                 # Validate weight updates
                 await self._validate_weight_update(initial_weights, block)
+
+                bt.logging.info(
+                    f"Final Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
+                )
                 synapse.completion = True
             else:
                 synapse.completion = False
@@ -458,6 +468,7 @@ class AveragingHandler:
             for param in group["params"]
         ]
         for main_param, opt_param in zip(
-            self.state_averager.main_parameters, opt_parameters
+            tuple(self.state_averager.main_parameters[i] for i in self.parameters_list),
+            opt_parameters,
         ):
             main_param.data.copy_(opt_param.data, non_blocking=True)

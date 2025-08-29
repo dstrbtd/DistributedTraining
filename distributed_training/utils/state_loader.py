@@ -12,7 +12,10 @@ from typing import Optional
 
 import psutil
 import torch
+import torch.distributed as dist
 from datetime import datetime
+from muon import MuonWithAuxAdam, SingleDeviceMuonWithAuxAdam
+import hivemind
 
 from hivemind.utils import get_logger
 from huggingface_hub import (
@@ -181,12 +184,45 @@ def load_model_optimizer_gradient_averager(
                     torch.cuda.empty_cache()
                     self.logger.info("Deleted Inner Optimizer")
 
-                self.inner_optimizer = torch.optim.AdamW(
-                    self.model.parameters(),
-                    lr=self.learning_rate_maximum,
-                    betas=(0.9, 0.95),
-                    weight_decay=0.1,
-                )
+                parameters_muon = [
+                    p
+                    for n, p in self.model.named_parameters()
+                    if (p.ndim >= 2) and ("embed" not in n) and ("head" not in n)
+                ]
+                parameters_muon_index = [
+                    i
+                    for i, n in enumerate(self.model.named_parameters())
+                    if (n[1].ndim >= 2)
+                    and ("embed" not in n[0])
+                    and ("head" not in n[0])
+                ]
+                parameters_adam = [
+                    p
+                    for n, p in self.model.named_parameters()
+                    if (p.ndim < 2) or ("embed" in n) or ("head" in n)
+                ]
+                parameters_adam_index = [
+                    i
+                    for i, n in enumerate(self.model.named_parameters())
+                    if (n[1].ndim < 2) or ("embed" in n[0]) or ("head" in n[0])
+                ]
+                parameters_list = parameters_muon_index + parameters_adam_index
+                param_groups = [
+                    dict(
+                        params=parameters_muon,
+                        use_muon=True,
+                        lr=0.02,
+                        weight_decay=0.01,
+                    ),
+                    dict(
+                        params=parameters_adam,
+                        use_muon=False,
+                        lr=self.learning_rate_maximum,
+                        betas=(0.9, 0.95),
+                        weight_decay=0.1,
+                    ),
+                ]
+                self.inner_optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
                 self.logger.info(f"Loaded Inner Optimizer")
 
                 self.scheduler = get_cosine_schedule_with_warmup(
@@ -265,6 +301,7 @@ def load_model_optimizer_gradient_averager(
         dht=self.dht,
         main_parameters=self.state_averager.main_parameters,
         offloaded_optimizer=self.state_averager.optimizer,
+        compression=hivemind.NoCompression(),
         prefix=f"{self.config.neuron.run_id}_grad_averager",
         min_group_size=self.config.neuron.min_group_size,
         min_matchmaking_time=30.0,
@@ -325,6 +362,7 @@ def load_model_optimizer_gradient_averager(
         self.config.neuron.local_batch_size_train_effective,
         self.tokenizer,
         self.device,
+        parameters_list,
     )
 
     self.scaler = torch.amp.GradScaler(enabled=True)
