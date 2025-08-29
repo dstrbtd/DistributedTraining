@@ -143,9 +143,10 @@ def add_args(cls, parser, prefix=None):
         nargs="+",
         help="The addresses for the DHT",
         default=[
-            "/ip4/161.97.156.125/tcp/8000/p2p/12D3KooWBcqjBjr7jHMHtrKtDtduPxuv7KKankS7qXif253N8k4y",
+            "/ip4/161.97.156.125/tcp/8000/p2p/12D3KooWSTrMgbyS6Wb6vtUcrwLWXEQpkxBBWHDSNMgo6TfjfAU9",
         ],
     )
+
     parser.add_argument(
         "--neuron.blocks_per_allreduce",
         type=int,
