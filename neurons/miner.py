@@ -49,6 +49,16 @@ from queue import Queue
 import bittensor as bt
 import psutil
 import torch
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    # StateDictType,
+    # FullStateDictConfig,
+)
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    StateDictOptions,
+    get_optimizer_state_dict,
+)
 from hivemind.averaging.averager import compute_schema_hash
 from huggingface_hub import (
     create_repo,
@@ -85,15 +95,294 @@ from distributed_training.utils.state_loader import (
     load_state_from_peer,
 )
 from distributed_training.utils.compression import TransformDCT, CompressDCT
+import torch.distributed as dist
+from threading import Thread
+from threading import Event
+import distributed_training
+
+from torch.distributed import is_initialized, get_rank, barrier
+from torch.distributed.fsdp import FullStateDictConfig
+from torch.distributed.checkpoint.state_dict import (
+    get_state_dict,
+    set_state_dict,
+    set_model_state_dict,
+)
+from contextlib import nullcontext
+import torch
+
+
+@torch.no_grad()
+def apply_optimizer_parameters_2(self):
+    opts = StateDictOptions(
+        full_state_dict=True,  # gather a full (HF-style) state dict
+        cpu_offload=True,  # offload to host RAM (no GPU OOM)
+        broadcast_from_rank0=True,  # rank0_only behavior
+    )
+    self.logger.info("get_model_state_dict")
+    full_state = get_model_state_dict(self.model, options=opts)
+    self.logger.info("get_model_state_dict done")
+
+    # cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+
+    # # 🔸 All ranks must enter these collectives; non-rank0 will just get {} and return immediately.
+    # full_state = get_state_dict(self.model, state_dict_config=cfg)       # empty dict on non-rank0
+    if self.master:
+        # Flatten optimizer params in the same order every time
+        offloaded_parameters = [
+            p for g in self.outer_optimizer.param_groups for p in g["params"]
+        ]
+        assert len(offloaded_parameters) == len(
+            full_state
+        ), f"mismatch: {len(offloaded_parameters)} vs {len(full_state)}"
+        # full_state values are plain CPU tensors here (no DTensor)
+        for (name, tensor), off_t in zip(full_state.items(), offloaded_parameters):
+            assert isinstance(tensor, torch.Tensor) and tensor.device.type == "cpu"
+            tensor.copy_(off_t, non_blocking=True)
+
+    dist.barrier(device_ids=[self.local_rank])
+    # Push back into the model (reshard). All ranks must enter.
+    set_model_state_dict(model=self.model, model_state_dict=full_state, options=opts)
 
 
 class Miner(BaseMinerNeuron):
     def __init__(self, config=None):
+        self.world_size = int(os.getenv("WORLD_SIZE", 1))
+        self.local_rank = int(os.getenv("LOCAL_RANK", 0))
+        torch.cuda.set_device(self.local_rank)
+        self.master = self.local_rank == 0
         super(Miner, self).__init__(config=config)
+
         self._update_wandb_project()
         self._init_basic_components()
         self._init_model_components()
         self._init_network_components()
+        self.block
+        self.reload_state_checker_thread = Thread(
+            target=self.reload_state_watcher, daemon=True
+        )
+        self.reload_state_checker_thread.start()
+
+    def reload_state_watcher(self):
+        """Background thread on every rank; only sets a local flag on rank 0."""
+        self.reload_state_event = threading.Event()
+        while not self.stop_event.is_set():
+            if self.local_rank == 0 and (
+                (
+                    self.local_progress.epoch == 0
+                    and self.local_progress.inner_step > 203
+                )
+                or (
+                    self.local_progress.epoch != 0
+                    and self.local_progress.inner_step > 2
+                )
+            ):
+                # if self.local_rank == 0:
+                self.reload_state_event.set()
+            # if not self.all_reduce_success_status:
+            #     wait_time = (
+            #         self.allreduce_timeout
+            #         + self.upload_state_duration
+            #         - time.perf_counter()
+            #         + self.all_reduce_start_time
+            #     )
+            #     self.logger.info(
+            #         f"Waiting {int(wait_time)} seconds until validator complete the all_reduce"
+            #     )
+            #     # Wait for the master validator to upload new global model
+            #     time.sleep(wait_time)
+            #     # Check if master validator has failed to all_reduce
+            #     self.global_progress.epoch = get_global_epoch(self)
+            #     self.reload_state_event.set()
+            #     # if self.local_progress.epoch > self.global_progress.epoch:
+            #     #     self.logger.info(
+            #     #         f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
+            #     #     )
+            #     #     load_state_from_peer(
+            #     #         self,
+            #     #         epoch=self.global_progress.epoch,
+            #     #     )
+            #     # else:
+            #     #     load_state_from_peer(
+            #     #         self,
+            #     #         repo_id=self.config.neuron.local_model_name,
+            #     #         epoch=self.global_progress.epoch,
+            #     #     )
+            #     # self.model.config.block_list = []
+            #     # self.resume_training()
+            #     # self.all_reduce_success_status = True
+            # else:
+            #     # TODO convert 2nd if statement to listener
+            #     self.sync()
+            #     # self.logger.info(self.current_block)
+            #     # self.logger.info(self.current_block - self.starting_block)
+            #     if (self.last_allreduce_block is not None) and (
+            #         (time.perf_counter() - self.all_reduce_start_time)
+            #         > (self.allreduce_timeout + self.upload_state_duration)
+            #     ):
+            #     #     self.load_state(reset_last_allreduce_block=True)
+            #         self.reload_state_event.set()
+            #     elif (self.last_allreduce_block is None) and (
+            #         self.current_block - self.starting_block > 5
+            #     ):
+            #         self.starting_block = self.current_block
+            #         # self.logger.info("Set reload state events")
+            #     #     self.load_state(reset_last_allreduce_block=False)
+            #         self.reload_state_event.set()
+            time.sleep(0.5)
+
+    def maybe_sync_and_reload(self):
+        if not hasattr(self, "gloo_group"):
+            return
+
+        # This runs on the training/FSDP thread only.
+        torch.cuda.set_device(self.local_rank)
+
+        # Rank 0 publishes intent; others send 0.
+        want = 1 if (self.local_rank == 0 and self.reload_state_event.is_set()) else 0
+        intent = torch.tensor([want], device="cpu")
+        self.logger.info(f"Broadcast begin intent {intent}")
+        dist.broadcast(intent, src=0, group=self.gloo_group)
+        self.logger.info(f"Broadcast end intent {intent}")
+
+        if intent.item() == 0:
+            return  # nothing to do
+
+        # Clear rank-0 flag so we don’t loop.
+        if self.local_rank == 0:
+            self.reload_state_event.clear()
+
+        # Ensure everyone reaches the same point (no graph in flight).
+        dist.barrier(device_ids=[self.local_rank])
+
+        # Reload on ALL ranks (simplest + avoids param rebroadcast complexities).
+        # (If you truly want only rank 0 to load, you must then broadcast params,
+        # which is more invasive.)
+        self.logger.info("Sync reload begin")
+        # self.load_state(reset_last_allreduce_block=False)
+        self.loop.run_until_complete(
+            self.all_reduce(
+                distributed_training.protocol.AllReduce(
+                    min_group_size=self.config.neuron.min_group_size, timeout=420
+                )
+            )
+        )
+        torch.cuda.empty_cache()
+
+        dist.barrier(device_ids=[self.local_rank])
+        self.logger.info("Sync reload end")
+
+    def pause_training(self):
+        """Pauses the continuous training loop"""
+        self.logger.info("Dist barrier post model")
+        # dist.barrier(device_ids=[self.local_rank])
+        self.training_active.clear()
+        time.sleep(1)
+        self.training_status = TrainingStatus.PAUSED
+        self.logger.info(":warning:  Pausing continuous training.")
+
+    def resume_training(self):
+        """Resumes the continuous training loop"""
+        self.training_active.set()
+        self.training_status = TrainingStatus.RUNNING
+        # dist.barrier(device_ids=[self.local_rank])
+        self.logger.info(":white_heavy_check_mark: Resuming continuous training.")
+
+    async def fetch_training_data(self):
+        """Async function to fetch training data"""
+        attempt = 0
+        while attempt < self.retry_limit:
+            try:
+                pages = await DatasetLoader.next_pages(
+                    offset=self.current_block,
+                    n_pages=35,
+                    seed=self.uid,
+                )
+                random.seed(self.uid)
+                random.shuffle(pages)
+
+                dataset = await DatasetLoader.create(
+                    batch_size=self.config.neuron.local_batch_size_train,
+                    sequence_length=1024,
+                    pages_info=pages,
+                    tokenizer=self.tokenizer,
+                )
+
+                return dataset
+            except Exception as e:
+                self.logger.error(f"Error fetching training data: {str(e)}")
+                attempt += 1
+                self.logger.warning(
+                    f"Failed to fetch data, retrying. Attempt {attempt}/{self.retry_limit}"
+                )
+                if attempt < self.retry_limit:
+                    time.sleep(self.retry_delay * attempt)  # Wait before the next retry
+                else:
+                    self.logger.error(
+                        "Maximum retry limit reached. Unable to fetch data."
+                    )
+                    raise
+
+    def _process_training_batch(self, dataset):
+        """Process a single training batch"""
+
+        for i, batch in enumerate(dataset):
+            inputs, _ = batch
+            # if self.reload_state_event.is_set():
+            #     self.pause_training()
+            # self.logger.info(self.training_active.is_set())
+
+            # TODO why is this set for Rank 1?
+            # if not self.training_active.is_set():
+            #     break
+
+            # self.logger.info(len(inputs))
+            # Move to device
+            inputs = inputs.to(self.local_rank)
+
+            # self.logger.info(i)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                outputs = self.model(input_ids=inputs, labels=inputs)
+                loss = outputs.loss / self.number_of_local_steps
+
+            # self.logger.info("loss computed")
+            loss.backward()
+            # self.logger.info("loss backpropped")
+            self.running_loss += loss.item() * self.number_of_local_steps
+            self.batch_count += 1
+            self.local_progress.loss = self.running_loss / self.batch_count
+
+            self.local_progress.samples_accumulated += self.local_batch_size_train
+            self.logger.info(
+                f"LOCAL SAMPLES ACCUMILATED: {self.local_progress.samples_accumulated}"
+            )
+            if (
+                self.local_progress.samples_accumulated
+                >= self.local_batch_size_train_effective
+            ):
+                self.logger.info(
+                    f":training:  Outer Step: {self.local_progress.epoch} | "
+                    f"Inner Step: {self.local_progress.inner_step} | "
+                    f"Learning Rate: {self.inner_optimizer.param_groups[0]['lr']:.8f} | "
+                    f"Average Loss: {self.local_progress.loss:.2f}"
+                )
+
+                # TODO if we keep this here we need to skip opt.step()
+                self.maybe_sync_and_reload()
+
+                self.event.update(
+                    {
+                        "train/outer_step": self.local_progress.epoch,
+                        "train/inner_step": self.local_progress.inner_step,
+                        "train/loss": self.local_progress.loss,
+                        "train/learning_rate": self.inner_optimizer.param_groups[0][
+                            "lr"
+                        ],
+                        "train/total_step": self.scheduler._step_count,
+                    }
+                )
+
+                # Run inner optimizer step
+                self.inner_optimizer_step()
 
     def _update_wandb_project(self):
         suffix = "_miners" if self.neuron_type == "MinerNeuron" else "_validators"
@@ -106,13 +395,14 @@ class Miner(BaseMinerNeuron):
         # Core setup
         self.device = self.config.neuron.device
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
-        init_dht(self)
+        if self.master:
+            init_dht(self)
 
         # Progress tracking
         self._init_progress_tracking()
 
         # Wandb setup
-        if not self.config.neuron.dont_wandb_log:
+        if (not self.config.neuron.dont_wandb_log) and self.master:
             self.wandb = load_wandb(
                 self, self.config, self.wallet, "miner", str(self.dht.peer_id)
             )
@@ -263,7 +553,7 @@ class Miner(BaseMinerNeuron):
 
     def _init_progress_tracking(self):
         self.local_progress = LocalTrainingProgress(
-            peer_id=self.dht.peer_id.to_bytes(),
+            peer_id=self.dht.peer_id.to_bytes() if self.master else b"",
             epoch=0,
             samples_accumulated=0,
             samples_per_second=0.0,
@@ -273,7 +563,8 @@ class Miner(BaseMinerNeuron):
             loss=0.0,
         )
         self.global_progress = GlobalTrainingProgress(epoch=0, samples_accumulated=0)
-        self.global_progress.epoch = get_global_epoch(self)
+        # self.global_progress.epoch = get_global_epoch(self)
+        self.global_progress.epoch = 0
         self.local_progress.epoch = self.global_progress.epoch
         self.local_progress.inner_step = get_local_inner_step(self)
 
@@ -336,7 +627,7 @@ class Miner(BaseMinerNeuron):
         self._setup_model_params()
         self._load_model()
         self._setup_training_params()
-        self._load_gradient_compressors()
+        # self._load_gradient_compressors()
 
     def _init_tokenizer(self):
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -369,9 +660,9 @@ class Miner(BaseMinerNeuron):
         )
         self.current_upload_future = None
         self.upload_process = None
-
         # Sync and initialize handlers
-        self._sync_with_global_model()
+        # TODO move to load_state_from_peers on first init only
+        # self._sync_with_global_model()
 
     def _setup_training_params(self):
         self.local_batch_size_train = self.config.neuron.local_batch_size_train
@@ -454,6 +745,34 @@ class Miner(BaseMinerNeuron):
             del global_model
             gc.collect()
             torch.cuda.empty_cache()
+
+    @torch.no_grad()
+    def compute_and_load_pseudo_grad_into_averager(self):
+        """
+        Rank 0 only:
+        - Requests shards via RPC from other ranks one at a time.
+        - Reconstructs parameter shard by shard on CPU.
+        - Computes pseudo-gradients and loads into averager.
+        """
+        # assert self.local_rank == 0, "Only rank 0 should call this function!"
+
+        opts = StateDictOptions(
+            full_state_dict=True, cpu_offload=True
+        )  # gather to CPU on rank 0
+        full_state = get_model_state_dict(self.model, options=opts)
+        if self.master:
+            opt_parameters = [
+                p for g in self.outer_optimizer.param_groups for p in g["params"]
+            ]
+            with self.grad_averager.get_tensors() as averaged_grads:
+                for idx, (opt_param, averaged_grad, named_main_param) in enumerate(
+                    zip(opt_parameters, averaged_grads, full_state.items())
+                ):
+                    _, submod = named_main_param
+                    # opt_param is the param that will be all_reduce, it is suppose to be on cpu
+                    # main_param is the param that has been updated by the inner optimizer, it is suppose to be on gpu
+                    grad = opt_param.data - submod.detach().to(opt_param.device)
+                    averaged_grad.copy_(grad, non_blocking=True)
 
     def create_pseudo_gradients(self):
         """compute pseudo gradient by subtracting the offloaded optimizer parameters with the main parameters and load them in the averager"""
@@ -599,107 +918,164 @@ class Miner(BaseMinerNeuron):
             try:
                 if not os.path.exists(self.output_dir):
                     os.makedirs(self.output_dir)
+                dist.barrier(device_ids=[self.local_rank])
                 self.logger.info(
                     f":memory: Saving model state locally for epoch {epoch}"
                 )
                 self.model.config.inner_step = self.local_progress.inner_step
-                self.model.save_pretrained(os.path.join(self.output_dir))
+                # self.model.save_pretrained(os.path.join(self.output_dir))
+                # cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+                # with FSDP.summon_full_params(self.model,  StateDictType.FULL_STATE_DICT, cfg, writeback=False):
+                #     with open(os.path.join(self.output_dir, "pytorch_model.bin"), "wb") as f:
+                #         if self.master:
+                #             for k, v in self.model.state_dict().items():
+                #                 self.logger.info(f"Saving parameter: {k} with shape {v.shape} and device {v.device}")
+                #                 torch.save({k: v.cpu()}, f)
+                #         dist.barrier(device_ids=[self.local_rank])
+                # with FSDP.state_dict_type(self.model, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)):
+                #     full_state = self.model.state_dict()
+                opts = StateDictOptions(
+                    full_state_dict=True,  # gather a full (HF-style) state dict
+                    cpu_offload=True,  # offload to host RAM (no GPU OOM)
+                    # broadcast_from_rank0=True # rank0_only behavior
+                )
+                full_state = get_model_state_dict(self.model, options=opts)
+                # torch.cuda.synchronize(); dist.barrier()
+                # optim_sd = get_optimizer_state_dict(self.model, self.inner_optimizer, options=opts)
+                # ensure no kernels pending
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+
+                if dist.is_initialized():
+                    dist.barrier()
+
+                # self.logger.info(f"full_optim_state_dict")
+                # full_optim_sd = FSDP.full_optim_state_dict(self.model, self.inner_optimizer, rank0_only=True)
+                # torch.cuda.synchronize(); dist.barrier()
+                if self.master:
+                    self.logger.info(
+                        f"Saving model state dict with {len(full_state)} keys"
+                    )
+                    torch.save(
+                        full_state, os.path.join(self.output_dir, "pytorch_model.bin")
+                    )
+                    self.model.config.save_pretrained(self.output_dir)
+                    self.logger.info(f"Done saving model")
+                    # base = FSDP.unwrap(self.model)            # or:
+                    # base = self.model
+                    # while isinstance(base, FSDP):
+                    #     base = base.module
+                    # base.load_state_dict(full_state, strict=True)
+                    # base.save_pretrained(self.output_dir)
+                dist.barrier(device_ids=[self.local_rank])
 
                 # Reset model blocklist & keep local copy in case upload fails
                 block_list = self.model.config.block_list
                 self.model.config.block_list = []
 
-                # Save optimizer state
-                optimizer_state = {
-                    "optimizer_state_dict": self.inner_optimizer.state_dict(),
-                    "learning_rate": self.inner_optimizer.param_groups[0]["lr"],
-                    "scheduler_state": self.scheduler.state_dict(),
-                    "epoch": epoch,
-                }
-                torch.save(
-                    optimizer_state,
-                    os.path.join(
-                        self.output_dir,
-                        "inner_optimizer.pt",
-                    ),
+                self.logger.info(f"get_optimizer_state_dict")
+                optim_sd = get_optimizer_state_dict(
+                    self.model, self.inner_optimizer, options=opts
                 )
+                self.logger.info(f"get_optimizer_state_dict")
 
-                # Create and save pseudo gradient state
-                gradient_state, _, _ = self.prepare_gradient_dict(quantize=False)
-                torch.save(
-                    gradient_state,
-                    os.path.join(
-                        self.output_dir,
-                        "gradients.pt",
-                    ),
-                )
-
-                self.logger.info(
-                    f":upload: Uploading model and optimizer states to repo: {self.config.neuron.local_model_name}"
-                )
-                commit_message = f"Run {__run__}. Outer Step {epoch}. Inner Step {self.local_progress.inner_step}."
-                self.upload_process = subprocess.Popen(
-                    [
-                        "python",
-                        os.path.abspath(__file__).replace(
-                            "neurons/miner.py",
-                            "distributed_training/utils/upload_worker.py",
+                if self.master:
+                    self.logger.info(f"saving optimizer")
+                    # Save optimizer state
+                    optimizer_state = {
+                        "optimizer_state_dict": optim_sd,
+                        "learning_rate": self.inner_optimizer.param_groups[0]["lr"],
+                        "scheduler_state": self.scheduler.state_dict(),
+                        "epoch": epoch,
+                    }
+                    torch.save(
+                        optimizer_state,
+                        os.path.join(
+                            self.output_dir,
+                            "inner_optimizer.pt",
                         ),
-                        self.config.neuron.local_model_name,
-                        self.output_dir,
-                        commit_message,
-                    ]
-                )
-                while self.upload_process.poll() is None:
-                    if not self.training_active.is_set():
-                        self.upload_process.kill()
-                        self.logger.info(
-                            "Cancelling Ongoing Model Upload For AllReduce Operation"
-                        )
-                        self.model.config.block_list = (
-                            block_list + self.model.config.block_list
-                        )
-                        return False
-                    else:
-                        time.sleep(5)
+                    )
+                    self.logger.info(f"Done saving optimizer")
 
-                refs = list_repo_refs(
-                    self.config.neuron.local_model_name, repo_type="model"
-                )
-                for tag in refs.tags:
-                    if (tag.name == "None") or (
-                        tag.name == f"{__run__}.{epoch}.{self.model.config.inner_step}"
-                    ):
-                        # Update tag for this version
-                        delete_tag(
+                # # Create and save pseudo gradient state
+                # gradient_state, _, _ = self.prepare_gradient_dict(quantize=False)
+                # torch.save(
+                #     gradient_state,
+                #     os.path.join(
+                #         self.output_dir,
+                #         "gradients.pt",
+                #     ),
+                # )
+
+                if self.master:
+                    self.logger.info(
+                        f":upload: Uploading model and optimizer states to repo: {self.config.neuron.local_model_name}"
+                    )
+                    commit_message = f"Run {__run__}. Outer Step {epoch}. Inner Step {self.local_progress.inner_step}."
+                    self.upload_process = subprocess.Popen(
+                        [
+                            "python",
+                            os.path.abspath(__file__).replace(
+                                "neurons/miner.py",
+                                "distributed_training/utils/upload_worker.py",
+                            ),
                             self.config.neuron.local_model_name,
-                            repo_type="model",
-                            tag=tag.name,
-                        )
-                        time.sleep(30)
-                    elif (
-                        (len(tag.name.split(".")) == 3)
-                        and (tag.name.split(".")[0] == __run__)
-                        and (int(tag.name.split(".")[1]) > epoch)
-                    ):
-                        self.tag_deletion_queue.put(tag.name)
-                # Create new tag for this version
-                create_tag(
-                    self.config.neuron.local_model_name,
-                    repo_type="model",
-                    tag=f"{__run__}.{epoch}.{self.model.config.inner_step}",
-                    tag_message=commit_message,
-                )
-                # Cleanup old cache
-                cleanup_old_cache(
-                    self,
-                    repo_id=self.config.neuron.local_model_name,
-                    current_revision=None,
-                )
+                            self.output_dir,
+                            commit_message,
+                        ]
+                    )
+                    while self.upload_process.poll() is None:
+                        if not self.training_active.is_set():
+                            self.upload_process.kill()
+                            self.logger.info(
+                                "Cancelling Ongoing Model Upload For AllReduce Operation"
+                            )
+                            self.model.config.block_list = (
+                                block_list + self.model.config.block_list
+                            )
+                            return False
+                        else:
+                            time.sleep(5)
 
-                self.logger.info(
-                    f"Successfully pushed new model state with tag {__run__}.{epoch}.{self.model.config.inner_step} to repo: {self.config.neuron.local_model_name}"
-                )
+                    refs = list_repo_refs(
+                        self.config.neuron.local_model_name, repo_type="model"
+                    )
+                    for tag in refs.tags:
+                        if (tag.name == "None") or (
+                            tag.name
+                            == f"{__run__}.{epoch}.{self.model.config.inner_step}"
+                        ):
+                            # Update tag for this version
+                            delete_tag(
+                                self.config.neuron.local_model_name,
+                                repo_type="model",
+                                tag=tag.name,
+                            )
+                            time.sleep(30)
+                        elif (
+                            (len(tag.name.split(".")) == 3)
+                            and (tag.name.split(".")[0] == __run__)
+                            and (int(tag.name.split(".")[1]) > epoch)
+                        ):
+                            self.tag_deletion_queue.put(tag.name)
+                    # Create new tag for this version
+                    create_tag(
+                        self.config.neuron.local_model_name,
+                        repo_type="model",
+                        tag=f"{__run__}.{epoch}.{self.model.config.inner_step}",
+                        tag_message=commit_message,
+                    )
+                    # Cleanup old cache
+                    cleanup_old_cache(
+                        self,
+                        repo_id=self.config.neuron.local_model_name,
+                        current_revision=None,
+                    )
+
+                    self.logger.info(
+                        f"Successfully pushed new model state with tag {__run__}.{epoch}.{self.model.config.inner_step} to repo: {self.config.neuron.local_model_name}"
+                    )
+                dist.barrier(device_ids=[self.local_rank])
 
                 return True
 
@@ -763,6 +1139,7 @@ class Miner(BaseMinerNeuron):
 
     def start_continuous_training(self):
         """Starts continuous training using the ThreadPoolExecutor"""
+        dist.barrier(device_ids=[self.local_rank])
         if self.training_status != TrainingStatus.RUNNING:
             self.training_status = TrainingStatus.RUNNING
             self.training_error = None
@@ -770,54 +1147,6 @@ class Miner(BaseMinerNeuron):
             self.logger.info(
                 ":white_heavy_check_mark: Starting continuous training worker"
             )
-
-    def pause_training(self):
-        """Pauses the continuous training loop"""
-        self.training_active.clear()
-        time.sleep(1)
-        self.training_status = TrainingStatus.PAUSED
-        self.logger.info(":warning:  Pausing continuous training.")
-
-    def resume_training(self):
-        """Resumes the continuous training loop"""
-        self.training_active.set()
-        self.training_status = TrainingStatus.RUNNING
-        self.logger.info(":white_heavy_check_mark: Resuming continuous training.")
-
-    async def fetch_training_data(self):
-        """Async function to fetch training data"""
-        attempt = 0
-        while attempt < self.retry_limit:
-            try:
-                pages = await DatasetLoader.next_pages(
-                    offset=self.current_block,
-                    n_pages=35,
-                    seed=self.uid,
-                )
-                random.seed(self.uid)
-                random.shuffle(pages)
-
-                dataset = await DatasetLoader.create(
-                    batch_size=self.config.neuron.local_batch_size_train,
-                    sequence_length=1024,
-                    pages_info=pages,
-                    tokenizer=self.tokenizer,
-                )
-
-                return dataset
-            except Exception as e:
-                self.logger.error(f"Error fetching training data: {str(e)}")
-                attempt += 1
-                self.logger.warning(
-                    f"Failed to fetch data, retrying. Attempt {attempt}/{self.retry_limit}"
-                )
-                if attempt < self.retry_limit:
-                    time.sleep(self.retry_delay * attempt)  # Wait before the next retry
-                else:
-                    self.logger.error(
-                        "Maximum retry limit reached. Unable to fetch data."
-                    )
-                    raise
 
     def _training_worker(self):
         """Worker function that runs in the ThreadPoolExecutor"""
@@ -856,54 +1185,6 @@ class Miner(BaseMinerNeuron):
 
         self.training_status = TrainingStatus.STOPPED
 
-    def _process_training_batch(self, dataset):
-        """Process a single training batch"""
-
-        for inputs, labels in dataset:
-            if not self.training_active.is_set():
-                break
-
-            # Move to device
-            inputs = inputs.to(self.device)
-
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                outputs = self.model(input_ids=inputs, labels=inputs)
-                loss = outputs.loss / self.number_of_local_steps
-
-            loss.backward()
-
-            self.running_loss += loss.item() * self.number_of_local_steps
-            self.batch_count += 1
-            self.local_progress.loss = self.running_loss / self.batch_count
-
-            self.local_progress.samples_accumulated += self.local_batch_size_train
-
-            if (
-                self.local_progress.samples_accumulated
-                >= self.local_batch_size_train_effective
-            ):
-                self.logger.info(
-                    f":training:  Outer Step: {self.local_progress.epoch} | "
-                    f"Inner Step: {self.local_progress.inner_step} | "
-                    f"Learning Rate: {self.inner_optimizer.param_groups[0]['lr']:.8f} | "
-                    f"Average Loss: {self.local_progress.loss:.2f}"
-                )
-
-                self.event.update(
-                    {
-                        "train/outer_step": self.local_progress.epoch,
-                        "train/inner_step": self.local_progress.inner_step,
-                        "train/loss": self.local_progress.loss,
-                        "train/learning_rate": self.inner_optimizer.param_groups[0][
-                            "lr"
-                        ],
-                        "train/total_step": self.scheduler._step_count,
-                    }
-                )
-
-                # Run inner optimizer step
-                self.inner_optimizer_step()
-
     def inner_optimizer_step(self):
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.inner_optimizer.step()
@@ -911,7 +1192,6 @@ class Miner(BaseMinerNeuron):
         self.scheduler.step()
 
         self.inner_optimizer.zero_grad()
-
         self.local_progress.inner_step += 1
 
         self.running_loss = 0.0
@@ -940,59 +1220,98 @@ class Miner(BaseMinerNeuron):
                 # Run inner optimizer step
                 self.inner_optimizer_step()
 
-                # Update gradient averager params to latest synapse values
-                if synapse.min_group_size is not None:
-                    self.grad_averager.matchmaking_kwargs[
-                        "min_group_size"
-                    ] = synapse.min_group_size
-                if synapse.request_timeout is not None:
-                    self.grad_averager.matchmaking_kwargs[
-                        "request_timeout"
-                    ] = synapse.request_timeout
-                if synapse.allreduce_timeout is not None:
-                    self.grad_averager._allreduce_timeout = (
-                        synapse.synapse.allreduce_timeout
-                    )
-                if synapse.next_chunk_timeout is not None:
-                    self.grad_averager.next_chunk_timeout = synapse.next_chunk_timeout
-                if synapse.min_matchmaking_time is not None:
-                    self.grad_averager.matchmaking_kwargs[
-                        "min_matchmaking_time"
-                    ] = synapse.min_matchmaking_time
+                # # TODO move this to be for all ranks
+                # if self.master:
+                #     initial_weights = self.avg._get_weights_sample()
+                #     bt.logging.info(f"Initial Weights Sample: {initial_weights}")
+                # dist.barrier(device_ids=[self.local_rank])
 
-                try:
-                    # Run allreduce with proper timeout
-                    synapse = await self.avg_handler.run_miner_allreduce(
-                        synapse,
-                        self.local_progress,
-                        self.all_reduce_start_time,
-                        self.current_block,
-                        # bandwidth
-                    )
-                    if not synapse.completion:
-                        raise Exception("AllReduce Failed, Loading Latest State")
-                except Exception as e:
-                    self.logger.info(f"All Reduce Failed with error: {e}")
-                    synapse.completion = False
+                bt.logging.info(":wait: Starting Compute Pseudo Gradients")
+                self.compute_and_load_pseudo_grad_into_averager()
+                bt.logging.info(":wait: Finished Compute Pseudo Gradients")
+                # with self.grad_averager.get_tensors() as averaged_grads: print(averaged_grads)
+
+                if self.master:
+                    # Update gradient averager params to latest synapse values
+                    if synapse.min_group_size is not None:
+                        self.grad_averager.matchmaking_kwargs[
+                            "min_group_size"
+                        ] = synapse.min_group_size
+                    if synapse.request_timeout is not None:
+                        self.grad_averager.matchmaking_kwargs[
+                            "request_timeout"
+                        ] = synapse.request_timeout
+                    if synapse.allreduce_timeout is not None:
+                        self.grad_averager._allreduce_timeout = (
+                            synapse.synapse.allreduce_timeout
+                        )
+                    if synapse.next_chunk_timeout is not None:
+                        self.grad_averager.next_chunk_timeout = (
+                            synapse.next_chunk_timeout
+                        )
+                    if synapse.min_matchmaking_time is not None:
+                        self.grad_averager.matchmaking_kwargs[
+                            "min_matchmaking_time"
+                        ] = synapse.min_matchmaking_time
+
+                    try:
+                        # Run allreduce with proper timeout
+                        (
+                            synapse,
+                            initial_weights,
+                        ) = await self.avg_handler.run_miner_allreduce(
+                            synapse,
+                            self.local_progress,
+                            self.all_reduce_start_time,
+                            self.current_block,
+                            # bandwidth
+                        )
+                        if not synapse.completion:
+                            raise Exception("AllReduce Failed, Loading Latest State")
+                    except Exception as e:
+                        self.logger.info(f"All Reduce Failed with error: {e}")
+                        synapse.completion = False
+                else:
+                    time.sleep(10)
+                dist.barrier(device_ids=[self.local_rank])
+                self.logger.info("Finished Barrier")
 
         except Exception as e:
             synapse.completion = False
             raise Exception(f"Unexpected error during AllReduce: {str(e)}") from e
 
         finally:
+            # TODO make sure rank 0 and 1 are alligned
             # Update epoch if all_reduce was succsefull
-            if synapse.completion is True:
+            if (self.master and synapse.completion is True) or (not self.master):
+                self.logger.info(f"Apply opt params")
+                apply_optimizer_parameters_2(self)
+
+                bt.logging.info(
+                    ":white_heavy_check_mark: Finished Outer Optimizer Step."
+                )
+
+                if self.master:
+                    # Validate weight updates
+                    await self.avg_handler._validate_weight_update(
+                        initial_weights, self.current_block
+                    )
+                    # self.avg_handler.update_main_param_after_outer_step()
+                dist.barrier(device_ids=[self.local_rank])
+
                 # Reset inner_step and update epoch
                 self.local_progress.samples_accumulated = 0
                 self.local_progress.inner_step = 0
                 self.local_progress.epoch += 1
                 self.last_allreduce_block = self.current_block
                 self.logger.info("AllReduce Operation Finished Succesfully")
-                self.start_background_upload(
-                    epoch=self.local_progress.epoch,
-                )
+                # TODO Debug why this fails
+                # self.start_background_upload(
+                #     epoch=self.local_progress.epoch,
+                # )
                 # Resume training when done
                 self.resume_training()
+
             else:
                 self.all_reduce_success_status = False
 

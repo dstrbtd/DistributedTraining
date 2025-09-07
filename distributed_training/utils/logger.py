@@ -106,6 +106,17 @@ def hive_log_filter(record):
     }
 
 
+class RankFilter(logging.Filter):
+    def __init__(self, rank):
+        super().__init__()
+        self.rank = rank
+
+    def filter(self, record):
+        # Add ANSI escape code for bold: \033[1m … \033[0m
+        record.rank = f"\033[1mRank {self.rank}\033[0m"
+        return True
+
+
 def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
     """
     Configure and start logging for the distributed training miner.
@@ -163,6 +174,19 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)  # Capture all levels
 
+    # Attach rank filter to all loggers
+    rank_filter = RankFilter(self.local_rank)
+    root_logger.addFilter(rank_filter)
+    bt_logger.addFilter(rank_filter)
+
+    # Create rank-aware formatter
+    terminal_formatter = logging.Formatter(
+        "      %(rank)s       | %(message)s",
+    )
+    for handler in bt_logger.handlers:
+        handler.addFilter(rank_filter)
+        handler.setFormatter(terminal_formatter)
+
     # Loki handler with extra labels
     loki_handler = LokiHandler(
         url="https://logs-prod-006.grafana.net/loki/api/v1/push",
@@ -195,8 +219,12 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
     file_handler = logging.FileHandler(local_logfile)
     file_handler.setLevel(logging.DEBUG)
     file_handler.addFilter(hive_log_filter)
+    file_handler.addFilter(RankFilter(self.local_rank))
+    loki_handler.addFilter(RankFilter(self.local_rank))
     file_handler.setFormatter(
-        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        logging.Formatter(
+            "%(asctime)s - rank %(rank)s - %(name)s - %(levelname)s - %(message)s"
+        )
     )
 
     # Setup queue logging
