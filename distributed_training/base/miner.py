@@ -19,6 +19,7 @@ import asyncio
 import threading
 import time
 import traceback
+import torch.distributed as dist
 
 import bittensor as bt
 
@@ -115,14 +116,9 @@ class BaseMinerNeuron(BaseNeuron):
             KeyboardInterrupt: If the miner is stopped by a manual interruption.
             Exception: For unforeseen errors during the miner's operation, which are logged for diagnosis.
         """
-        # print("WORLD SIZE AND RANK")
-        # print(world_size)
-        # print(rank)
-        # Check that miner is registered on the network.
-        # self.sync()
         self.logger.info("Synced metagraph")
 
-        if self.master and False:
+        if self.master:
             # Serve passes the axon information to the network + netuid we are hosting on.
             # This will auto-update if the axon port of external ip have changed.
             self.logger.info(
@@ -133,9 +129,6 @@ class BaseMinerNeuron(BaseNeuron):
             # Start  starts the miner's axon, making it active on the network.
             self.axon.start()
             self.logger.info(f"Miner starting at block: {self.block}")
-
-        # Starting training thread
-        # self.start_continuous_training()
 
         # This loop maintains the miner's operations until intentionally stopped.
         try:
@@ -159,73 +152,15 @@ class BaseMinerNeuron(BaseNeuron):
                             self.wandb.log(self.event)
                         self.event = {}
 
-                # # time.sleep(120)
-                # if self.local_progress.inner_step > 2:
-                #     # self.logger.info(self.current_block)
-                #     self.logger.info("Load State")
-                #     # import torch.distributed as dist
-                #     # dist.barrier(device_ids=[self.local_rank])
-                #     # self.logger.info("Dist Barrier Complete")
-                #     self.load_state(reset_last_allreduce_block=False)
+                # Wait before checking again.
+                time.sleep(1)
 
-                # if not self.all_reduce_success_status:
-                #     wait_time = (
-                #         self.allreduce_timeout
-                #         + self.upload_state_duration
-                #         - time.perf_counter()
-                #         + self.all_reduce_start_time
-                #     )
-                #     self.logger.info(
-                #         f"Waiting {int(wait_time)} seconds until validator complete the all_reduce"
-                #     )
-                #     # Wait for the master validator to upload new global model
-                #     time.sleep(wait_time)
-                #     # Check if master validator has failed to all_reduce
-                #     self.global_progress.epoch = get_global_epoch(self)
-                #     if self.local_progress.epoch > self.global_progress.epoch:
-                #         self.logger.info(
-                #             f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
-                #         )
-                #         load_state_from_peer(
-                #             self,
-                #             epoch=self.global_progress.epoch,
-                #         )
-                #     else:
-                #         load_state_from_peer(
-                #             self,
-                #             repo_id=self.config.neuron.local_model_name,
-                #             epoch=self.global_progress.epoch,
-                #         )
-                #     self.model.config.block_list = []
-                #     self.resume_training()
-                #     self.all_reduce_success_status = True
-                # else:
-                #     if (self.last_allreduce_block is not None) and (
-                #         (time.perf_counter() - self.all_reduce_start_time)
-                #         > (self.allreduce_timeout + self.upload_state_duration)
-                #     ):
-                #         self.load_state(reset_last_allreduce_block=True)
-                #     elif (self.last_allreduce_block is None) and (
-                #         self.current_block % 25 == 0
-                #     ):
-                #         self.load_state(reset_last_allreduce_block=False)
+                # Check if we should exit.
+                if self.should_exit:
+                    break
 
-                # # Wait before checking again.
-                # time.sleep(1)
-
-                # # Check if we should exit.
-                # if self.should_exit:
-                #     break
-
-            import torch.distributed as dist
-
-            self.logger.info(f"Rank {self.local_rank} entering barrier...")
             dist.barrier(device_ids=[self.local_rank])
-            self.logger.info(f"Rank {self.local_rank} finished barrier")
             while not self.should_exit:
-                # TODO remove stop_event
-                # self.logger.info(self.reload_state_event.is_set())
-                # self.logger.info(self.stop_event.is_set())
                 while not self.stop_event.is_set() and (
                     not self.reload_state_event.is_set()
                 ):
@@ -236,33 +171,17 @@ class BaseMinerNeuron(BaseNeuron):
 
                         # self.maybe_sync_and_reload()
 
-                        # # Periodic model upload
-                        # if (
-                        #     len(self.model.config.block_list)
-                        #     >= self.config.neuron.target_n_blocks
-                        # ):
-                        #     self.start_background_upload(
-                        #         epoch=self.local_progress.epoch,
-                        #     )
-
                         self.logger.debug(":pages: Fetching fineweb-edu pages")
                         dataset = self.training_loop.run_until_complete(
                             self.fetch_training_data()
                         )
 
-                        if self.reload_state_event.is_set():
-                            self.pause_training()
-
                         # Wait if training is paused
-                        self.training_active.wait()
-
                         self.maybe_sync_and_reload()
+                        self.training_active.wait()
 
                         self.model.config.block_list.append(self.current_block)
                         self._process_training_batch(dataset)
-
-                        # self.logger.info(f"BLOCK {self.block}")
-                        # self.sync()
 
                     except Exception as e:
                         self.logger.warning(f"Training Loop Failed with error: {e}")
@@ -282,7 +201,6 @@ class BaseMinerNeuron(BaseNeuron):
             self.logger.success(
                 ":white_heavy_check_mark: Miner killed by keyboard interrupt."
             )
-            rpc.shutdown()
             exit()
 
         # In case of unforeseen errors, the miner will log the error and continue operations.

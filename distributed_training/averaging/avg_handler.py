@@ -23,9 +23,12 @@ from torch.distributed.fsdp import (
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     StateDictOptions,
-    get_optimizer_state_dict,
 )
-from torch.distributed._tensor import distribute_tensor, Replicate
+from torch.distributed.checkpoint.state_dict import (
+    set_model_state_dict,
+)
+import torch.distributed as dist
+from transformers import AutoModelForCausalLM
 
 
 class AveragingHandler:
@@ -37,7 +40,6 @@ class AveragingHandler:
         optimizer,
         outer_optimizer,
         grad_averager,
-        state_averager,
         retry_limit,
         retry_delay,
         uid,
@@ -50,7 +52,6 @@ class AveragingHandler:
         self.inner_optimizer = optimizer
         self.outer_optimizer = outer_optimizer
         self.grad_averager = grad_averager
-        self.state_averager = state_averager
         self.test_loss_loop = asyncio.new_event_loop()
         self.retry_limit = retry_limit
         self.retry_delay = retry_delay
@@ -450,18 +451,6 @@ class AveragingHandler:
                             f"group {i} param {p.shape} grad mean={p.grad.float().mean().item()} p mean={p.float().mean().item()}"
                         )
                         break
-                # self._apply_optimizer_parameters_()
-                # self.state_averager.step(
-                #     increment_epoch=True, optimizer_step=True, zero_grad=False
-                # )
-                # self.update_main_param_after_outer_step()
-
-                # bt.logging.info(
-                #     ":white_heavy_check_mark: Finished Outer Optimizer Step."
-                # )
-
-                # # Validate weight updates
-                # await self._validate_weight_update(initial_weights, block)
                 synapse.completion = True
             else:
                 synapse.completion = False
@@ -481,65 +470,7 @@ class AveragingHandler:
                 bt.logging.success("Averaging Round Finished Succesfully")
             return synapse, initial_weights
 
-    @torch.no_grad()
-    def _apply_optimizer_parameters_(self):
-        """Copy parameters from offloaded optimizer to the main model"""
-        # assert self.offload_optimizer, "Applying offloaded optimizer updates requires offloaded optimizer"
-        offloaded_parameters = [
-            param
-            for group in self.outer_optimizer.param_groups
-            for param in group["params"]
-        ]
-        # with FSDP.summon_full_params(self.model, writeback=False, rank0_only=True, offload_to_cpu=True):
-        #     fsdp_params = list(self.model.parameters())
-        #     assert len(offloaded_parameters) == len(fsdp_params), "Optimizer parameters changed during training"
-        #     for main_param, offloaded_param in zip(fsdp_params, offloaded_parameters):
-        #         if isinstance(main_param, torch.distributed._tensor.DTensor):
-        #             local_param = main_param.to_local()
-        #         else:
-        #             local_param = main_paramlocal_param.size()
-        #         local_param.copy_(offloaded_param, non_blocking=True)
-        # 1. Get a full param state dict on CPU
-        # opts = StateDictOptions(full_state_dict=True, cpu_offload=True)  # gather to CPU on rank 0
-        # full_state = get_model_state_dict(self.model, options=opts)
-
-        with FSDP.state_dict_type(
-            self.model,
-            StateDictType.FULL_STATE_DICT,
-            FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
-        ):
-            # full_state = self.model.state_dict()
-            # assert len(offloaded_parameters) == len(full_state), "Optimizer parameters changed during training"
-            # # 2. Overwrite tensors in the state dict with offloaded optimizer params
-            # for (_ , tensor), offloaded_param in zip(full_state.items(), offloaded_parameters):
-            #     # tensor.to_local().size()
-            #     mesh = tensor.device_mesh
-            #     placements = tensor.placements
-            #     bt.logging.info(_)
-            #     tensor.copy_(distribute_tensor(offloaded_param, mesh, placements), non_blocking=True)
-            {
-                name: distribute_tensor(
-                    offloaded_param, tensor.device_mesh, tensor.placements
-                )
-                for (name, tensor), offloaded_param in zip(
-                    self.model.named_parameters(), offloaded_parameters
-                )
-            }
-            # 3. Load back into model (reshards automatically)
-            self.model.load_state_dict(
-                {
-                    name: distribute_tensor(
-                        offloaded_param, tensor.device_mesh, tensor.placements
-                    )
-                    for (name, tensor), offloaded_param in zip(
-                        self.model.named_parameters(), offloaded_parameters
-                    )
-                }
-            )
-        # 2. Broadcast updated params from rank 0 to all other ranks
-        FSDP.broadcast_full_params(self.model, rank0_only=True)
-
-    # TODO make this FSDP compliant
+    # TODO decide if this is necissary and if it is make this FSDP compliant
     def update_main_param_after_outer_step(self):
         """Update the main parameters with the inner optimizer step"""
         opt_parameters = [
@@ -551,3 +482,21 @@ class AveragingHandler:
             self.state_averager.main_parameters, opt_parameters
         ):
             main_param.data.copy_(opt_param.data, non_blocking=True)
+
+    def reset_main_parameters(self, model_name, revision):
+        """Reset the optimizer parameteres to the parameters at the start of the epoch"""
+        try:
+            main_parameters = AutoModelForCausalLM.from_pretrained(
+                model_name, revision=revision, trust_remote_code=True
+            )
+            opt_parameters = [
+                param
+                for group in self.outer_optimizer.param_groups
+                for param in group["params"]
+            ]
+            for main_param, opt_param in zip(
+                tuple(main_parameters.parameters()), opt_parameters
+            ):
+                opt_param.data.copy_(main_param.data, non_blocking=True)
+        except Exception as e:
+            bt.logging.info(f"Failed to reset optimizer parameters with error: {e}")

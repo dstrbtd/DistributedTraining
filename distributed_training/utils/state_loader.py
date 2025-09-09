@@ -47,17 +47,19 @@ from distributed_training.utils.progress_tracker import (
 from distributed_training.averaging.avg_handler import AveragingHandler
 from huggingface_hub import list_repo_commits
 
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+from torch.distributed._tensor import DeviceMesh
+from torch.distributed._composable.fsdp import (
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 import torch.distributed as dist
-
-from torch.distributed.fsdp import MixedPrecision
-
-import torch.distributed.rpc as rpc
-import distributed_training
-
-import time, traceback
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    StateDictOptions,
+    get_optimizer_state_dict,
+    set_optimizer_state_dict,
+)
+import time
 
 hivemind_logger = get_logger(__name__)
 
@@ -329,7 +331,7 @@ def load_model_optimizer_gradient_averager(
         revision = f"{__run__}.{epoch}.0"
 
     # Delete Gradient and State Averagers
-    if hasattr(self, "state_averager"):
+    if hasattr(self, "grad_averager"):
         self.grad_averager.shutdown()
         while self.grad_averager.is_alive():
             time.sleep(1)
@@ -340,20 +342,6 @@ def load_model_optimizer_gradient_averager(
         del self.grad_averager
         gc.collect()
         torch.cuda.empty_cache()
-
-        self.state_averager.shutdown()
-        while self.state_averager.is_alive():
-            time.sleep(1)
-
-        del self.state_averager.optimizer.param_groups
-        del self.state_averager.optimizer
-        del self.state_averager.main_parameters
-        del self.state_averager._averaged_tensors
-        del self.state_averager
-
-        gc.collect()
-        torch.cuda.empty_cache()
-        self.logger.info("Deleted State Averager and Gradient Averager")
 
     # Delete existing averag handler
     if hasattr(self, "avg_handler"):
@@ -415,84 +403,25 @@ def load_model_optimizer_gradient_averager(
                 trust_remote_code=False,
             )
             self.logger.info("Dist barrier post model")
-            # if self.master:
-            #     breakpoint()
-            # dist.barrier(device_ids=[self.local_rank])
-            # mp_policy = MixedPrecision(param_dtype=torch.float16, reduce_dtype=torch.float16, buffer_dtype=torch.float16)
-            # # [x for x in self.model.parameters()]
-            # self.model = FSDP(self.model, use_orig_params=True, device_id=self.local_rank, mixed_precision=mp_policy)
 
-            from torch.distributed._tensor import DeviceMesh
-            from torch.distributed._composable.fsdp import (
-                fully_shard,
-                MixedPrecisionPolicy,
-            )
-
-            # , MixedPrecision# composable FSDP2
-
-            mp_policy = MixedPrecision(
-                param_dtype=torch.float16,
-                reduce_dtype=torch.float16,
-                buffer_dtype=torch.float16,
-            )
             mp_policy = MixedPrecisionPolicy(
                 param_dtype=torch.bfloat16,  # match your autocast compute dtype
                 reduce_dtype=torch.bfloat16,
-                # buffer_dtype=torch.bfloat16,
                 output_dtype=torch.bfloat16,  # required by FSDP2 policy
             )
 
-            # build a 1D device mesh over your ranks
+            # Build a 1D device mesh over all ranks
             mesh = DeviceMesh("cuda", list(range(dist.get_world_size())))
 
-            # IMPORTANT: do NOT wrap with FSDP(...). Keep a plain HF module and enable FSDP2 on it:
+            # Keep a plain HF module and enable FSDP2 on it:
             fully_shard(self.model, mesh=mesh, mp_policy=mp_policy)
 
-            # if self.master:
-            #     breakpoint()
-            # from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
-            # opts = StateDictOptions(full_state_dict=False, cpu_offload=False)
-            # local_sd = get_model_state_dict(self.model, options=opts)  # {FQN: tensor-or-empty}
-            # owned_sd = {k: v for k, v in local_sd.items() if isinstance(v, torch.Tensor) and v.numel() > 0}
-            # owned_keys = sorted(owned_sd.keys())  # stable per-rank order
-            # dist.barrier(device_ids=[self.local_rank])
-            # self.logger.info(f"[Rank {dist.get_rank()}] {self.model.sharding_strategy}")
-            # for i, p in enumerate(self.model.parameters()):
-            #     print(f"[Rank {dist.get_rank()}] Param {i} shape: {tuple(p.shape)}, numel={p.numel()}")
-            # breakpoint()
             self.logger.info(
                 f"Successfully Loaded Model From {model_name} With Revision {revision}"
             )
             self.logger.info(self.model.device)
 
-            # self.logger.info([p for p in self.model.parameters()][0])
-            # srd.init_shard_provider([p.detach().cpu() for p in self.model.parameters()])
-            srd2.init_shard_provider(self.model)
-            self.logger.info(
-                f"[Rank {dist.get_rank()}] global_shard_provider params: {len(srd2.global_shard_provider._owned)}"
-            )
-
-            options = rpc.TensorPipeRpcBackendOptions(
-                init_method="env://", rpc_timeout=300
-            )
-
-            if not rpc.api._is_current_rpc_agent_set():
-                rpc.init_rpc(
-                    name=f"worker{self.local_rank}",
-                    rank=self.local_rank,
-                    world_size=self.world_size,
-                    rpc_backend_options=options,
-                )
-            self.logger.info(rpc._is_current_rpc_agent_set())
-            # rpc.init_rpc(
-            #     name=f"worker{self.local_rank}",
-            #     rank=self.local_rank,
-            #     world_size=self.world_size,
-            #     rpc_backend_options=options,
-            # )
-            # breakpoint()
             # Move model to device
-            # self.model = self.model.to(self.local_rank)
             self.model.config.block_list = []
             self.local_progress.inner_step = (
                 self.model.config.inner_step
@@ -535,59 +464,39 @@ def load_model_optimizer_gradient_averager(
                     num_training_steps=88000,
                 )
 
-                from torch.distributed.checkpoint.state_dict import (
-                    get_model_state_dict,
-                    StateDictOptions,
-                    get_optimizer_state_dict,
-                )
-
-                self.logger.info(
-                    f"RANK={dist.get_rank()} LOCAL_RANK={self.local_rank} "
-                    f"device={torch.cuda.current_device()} "
-                    f"name={torch.cuda.get_device_name(torch.cuda.current_device())}"
-                )
-
                 opts = StateDictOptions(
                     full_state_dict=True,  # gather a full (HF-style) state dict
                     cpu_offload=True,  # offload to host RAM (no GPU OOM)
-                    # broadcast_from_rank0=False # rank0_only behavior
                 )
-                self.logger.info(f"Save Model State Start")
-                # from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
                 full_state = get_model_state_dict(self.model, options=opts)
-                self.logger.info(f"Save Model State")
-                # torch.cuda.synchronize(); dist.barrier()
                 optim_sd = get_optimizer_state_dict(
                     self.model, self.inner_optimizer, options=opts
                 )
 
-                # if self.master:
-                #     breakpoint()
-                # dist.barrier(device_ids=[self.local_rank])
+                optimizer_state = torch.load(
+                    hf_hub_download(
+                        repo_id=model_name,
+                        filename="inner_optimizer.pt",
+                        revision=revision,
+                    ),
+                    weights_only=True,
+                    map_location="cpu",
+                )
 
-                # optimizer_state = torch.load(
-                #     hf_hub_download(
-                #         repo_id=model_name,
-                #         filename="inner_optimizer.pt",
-                #         revision=revision,
-                #     ),
-                #     weights_only=True,
-                #     map_location="cpu",
-                # )
-
-                # # Load optimizer state if available
-                # if "optimizer_state_dict" in optimizer_state:
-                #     self.inner_optimizer.load_state_dict(
-                #         optimizer_state["optimizer_state_dict"]
-                #     )
-                # if "learning_rate" in optimizer_state:
-                #     for group in self.inner_optimizer.param_groups:
-                #         group["lr"] = optimizer_state["learning_rate"]
-                # if "scheduler_state" in optimizer_state:
-                #     self.scheduler.load_state_dict(optimizer_state["scheduler_state"])
-                # self.logger.info(
-                #     f"Successfully Loaded Inner Optimizer State From {model_name} For Revision {revision}"
-                # )
+                # Load optimizer state if available
+                if "optimizer_state_dict" in optimizer_state:
+                    # `optim_sd` is the dict you loaded from HF
+                    set_optimizer_state_dict(
+                        model=self.model,  # your FSDP2-wrapped model
+                        optimizers=self.inner_optimizer,  # your optimizer (created from the wrapped params)
+                        optim_state_dict=optimizer_state["optimizer_state_dict"],
+                        options=opts,
+                    )
+                if "scheduler_state" in optimizer_state:
+                    self.scheduler.load_state_dict(optimizer_state["scheduler_state"])
+                self.logger.info(
+                    f"Successfully Loaded Inner Optimizer State From {model_name} For Revision {revision}"
+                )
 
                 break
 
@@ -613,51 +522,8 @@ def load_model_optimizer_gradient_averager(
     # from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
     # self.model = checkpoint_wrapper(self.model)
 
-    local_keys = srd2.owned_keys()  # your shard server's method
-
-    # Gather lists from all ranks
-    gathered = [None for _ in range(self.world_size)]
-    dist.all_gather_object(gathered, local_keys)
-
-    # Union → sort → assign
-    all_keys = {k for sub in gathered for k in sub}
-    self.ordered_fqns = sorted(all_keys)
-
-    if self.local_rank == 0:
-        self.logger.info(f"Built ordered_fqns with {len(self.ordered_fqns)} entries")
-
     if self.master:
         # Set outer optimizer
-        self.outer_optimizer = partial(
-            torch.optim.SGD, lr=1, momentum=0.9, nesterov=True
-        )
-        # breakpoint()
-        # Load a new state averager
-
-        self.state_averager = DTStateAverager(
-            dht=self.dht,
-            prefix=f"{self.config.neuron.run_id}_state_averager",
-            optimizer=self.outer_optimizer,
-            params=self.model.parameters(),
-            initialize_optimizer=True,
-            offload_optimizer=self.offload_optimizer,
-            custom_gradients=self.offload_optimizer,
-            min_group_size=self.config.neuron.min_group_size,
-            min_matchmaking_time=30.0,
-            request_timeout=10.0,
-            next_chunk_timeout=45.0,
-            allreduce_timeout=self.allreduce_timeout - 30.0 - 15.0,
-            world_size=self.world_size,
-            local_rank=self.local_rank,
-            ordered_fqns=self.ordered_fqns,
-            start=True,
-        )
-        self.logger.info("Successfully Loaded State Averager")
-        # breakpoint()
-
-        self.outer_optimizer = torch.optim.SGD(
-            self.model.parameters(), lr=1, momentum=0.9, nesterov=True
-        )
         optimizer = partial(torch.optim.SGD, lr=1, momentum=0.9, nesterov=True)
 
         # param_groups, main_parameters, parameter_names = check_params(optimizer, self.model.parameters(), None)
@@ -673,10 +539,9 @@ def load_model_optimizer_gradient_averager(
         self._old_tensors: Optional[Sequence[torch.Tensor]] = None  # for delta rule
         scheduler = None
         initialize_optimizer = True
-        # breakpoint()
+
         self.main_parameters, self.parameter_names = main_parameters, parameter_names
-        # self._averaged_parameters = self._make_averaged_parameters(main_parameters)
-        # breakpoint()
+
         self.outer_optimizer, _ = init_components(
             self,
             main_parameters,
@@ -685,21 +550,6 @@ def load_model_optimizer_gradient_averager(
             scheduler,
             initialize_optimizer,
         )
-
-        # if self.local_rank == 0:
-        #     for r in range(self.world_size):
-        #         name = f"worker{r}"  # adjust if you use a different naming scheme
-        #         try:
-        #             print(f"--> RPC ping to {name}")
-        #             res = rpc.rpc_sync(name, srd2.ping, args=(), timeout=30)  # sync for immediate error
-        #             print("  ping result:", res)
-        #         except Exception as e:
-        #             print("  ping error:", repr(e))
-        #             traceback.print_exc()
-        #             # stop testing if ping fails for a worker
-        # else:
-        #     # non-0 ranks: just sleep a bit so logs show up; they should print from ping if called
-        #     time.sleep(5)
 
         # Load a new gradient averager
         self.grad_averager = DTGradAverager(
@@ -716,55 +566,51 @@ def load_model_optimizer_gradient_averager(
             world_size=self.world_size,
             start=True,
         )
-        # breakpoint()
         self.logger.info("Successfully Loaded Gradient Averager")
 
-        # dist.barrier(device_ids=[self.local_rank])
+        if reload_outer_optimizer:
+            optimizer_state = None
+            try:
+                optimizer_state = torch.load(
+                    hf_hub_download(
+                        repo_id=global_model_name,
+                        filename="outer_optimizer.pt",
+                        revision=".".join(revision.split(".")[:-1] + ["0"]),
+                    ),
+                    weights_only=True,
+                    map_location="cpu",
+                )
 
-        # if reload_outer_optimizer:
-        #     optimizer_state = None
-        #     try:
-        #         optimizer_state = torch.load(
-        #             hf_hub_download(
-        #                 repo_id=global_model_name,
-        #                 filename="outer_optimizer.pt",
-        #                 revision=".".join(revision.split(".")[:-1] + ["0"]),
-        #             ),
-        #             weights_only=True,
-        #             map_location="cpu",
-        #         )
+                # Load optimizer state if available
+                if "optimizer_state_dict" in optimizer_state:
+                    self.outer_optimizer.load_state_dict(
+                        optimizer_state["optimizer_state_dict"]
+                    )
 
-        #         # Load optimizer state if available
-        #         if "optimizer_state_dict" in optimizer_state:
-        #             self.state_averager.optimizer.load_state_dict(
-        #                 optimizer_state["optimizer_state_dict"]
-        #             )
+                self.logger.info(
+                    f"Successfully Loaded Outer Optimizer State From {global_model_name} For Revision {'.'.join(revision.split('.')[:-1] + ['0'])}"
+                )
 
-        #         self.logger.info(
-        #             f"Successfully Loaded Outer Optimizer State From {global_model_name} For Revision {'.'.join(revision.split('.')[:-1] + ['0'])}"
-        #         )
+            except Exception as e:
+                self.logger.warning(
+                    f"No optimizer state found or failed to load: {str(e)}. Initializing fresh optimizer."
+                )
 
-        #     except Exception as e:
-        #         self.logger.warning(
-        #             f"No optimizer state found or failed to load: {str(e)}. Initializing fresh optimizer."
-        #         )
-
-        #     finally:
-        #         if isinstance(optimizer_state, dict):
-        #             keys = list(optimizer_state.keys())
-        #             for k in keys:
-        #                 del optimizer_state[k]
-        #                 gc.collect()
-        #         del optimizer_state
-        #         gc.collect()
-        #         torch.cuda.empty_cache()
+            finally:
+                if isinstance(optimizer_state, dict):
+                    keys = list(optimizer_state.keys())
+                    for k in keys:
+                        del optimizer_state[k]
+                        gc.collect()
+                del optimizer_state
+                gc.collect()
+                torch.cuda.empty_cache()
 
         self.avg_handler = AveragingHandler(
             self.model,
             self.inner_optimizer,
             self.outer_optimizer,
             self.grad_averager,
-            self.state_averager,
             self.retry_limit,
             self.retry_delay,
             self.uid,
@@ -774,8 +620,12 @@ def load_model_optimizer_gradient_averager(
             self.device,
         )
 
-        if (self.local_progress.inner_step != 0) and ("." in revision):
-            self.state_averager.reset_main_parameters(
+        if (
+            (self.master)
+            and (self.local_progress.inner_step != 0)
+            and ("." in revision)
+        ):
+            self.avg_handler.reset_main_parameters(
                 model_name,
                 revision=".".join(
                     revision.split(".")[:-1]
@@ -1038,17 +888,15 @@ def save_and_upload_state(self, epoch: int, results: dict, block: int = None):
 
                 # Save outer optimizer state
                 outer_optimizer_state = {
-                    "optimizer_state_dict": self.state_averager.optimizer.state_dict(),
-                    "learning_rate": self.state_averager.optimizer.param_groups[0][
-                        "lr"
-                    ],
+                    "optimizer_state_dict": self.outer_optimizer.state_dict(),
+                    "learning_rate": self.outer_optimizer.param_groups[0]["lr"],
                     "epoch": epoch,
                 }
                 torch.save(
                     outer_optimizer_state,
                     os.path.join(tmp_folder, "outer_optimizer.pt"),
                 )
-
+                # TODO Save non sharded inner optimizer
                 # Save outer optimizer state
                 inner_optimizer_state = {
                     "optimizer_state_dict": self.inner_optimizer.state_dict(),

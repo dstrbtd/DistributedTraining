@@ -197,10 +197,10 @@ def add_args(cls, parser, prefix=None):
     )
 
     parser.add_argument(
-        "--neuron.target_n_blocks",
+        "--neuron.upload_steps",
         type=int,
-        help="The hivemind global target_batch_size",
-        default=2,
+        help="The frequency of uploads per inner step",
+        default=5,
     )
 
     parser.add_argument(

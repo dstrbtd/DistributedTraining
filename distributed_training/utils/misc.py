@@ -180,29 +180,29 @@ def init_dht(self):
     api = wandb.Api()
     initial_peers_list = self.config.neuron.initial_peers
 
-    validator_runs = api.runs(
-        f"{self.config.neuron.wandb_entity}/{self.config.neuron.wandb_project.replace('_validators','').replace('_miners','')}_validators"
-    )
-    for ru in validator_runs:
-        if ru.state == "running":
-            if "dht_addresses" not in ru.config["neuron"].keys():
-                continue
-            else:
-                for peer in ru.config["neuron"]["dht_addresses"]:
-                    if peer not in initial_peers_list:
-                        initial_peers_list.append(peer)
+    # validator_runs = api.runs(
+    #     f"{self.config.neuron.wandb_entity}/{self.config.neuron.wandb_project.replace('_validators','').replace('_miners','')}_validators"
+    # )
+    # for ru in validator_runs:
+    #     if ru.state == "running":
+    #         if "dht_addresses" not in ru.config["neuron"].keys():
+    #             continue
+    #         else:
+    #             for peer in ru.config["neuron"]["dht_addresses"]:
+    #                 if peer not in initial_peers_list:
+    #                     initial_peers_list.append(peer)
 
-    miner_runs = api.runs(
-        f"{self.config.neuron.wandb_entity}/{self.config.neuron.wandb_project.replace('_validators','').replace('_miners','')}_miners"
-    )
-    for ru in miner_runs:
-        if ru.state == "running":
-            if "dht_addresses" not in ru.config["neuron"].keys():
-                continue
-            else:
-                for peer in ru.config["neuron"]["dht_addresses"]:
-                    if peer not in initial_peers_list:
-                        initial_peers_list.append(peer)
+    # miner_runs = api.runs(
+    #     f"{self.config.neuron.wandb_entity}/{self.config.neuron.wandb_project.replace('_validators','').replace('_miners','')}_miners"
+    # )
+    # for ru in miner_runs:
+    #     if ru.state == "running":
+    #         if "dht_addresses" not in ru.config["neuron"].keys():
+    #             continue
+    #         else:
+    #             for peer in ru.config["neuron"]["dht_addresses"]:
+    #                 if peer not in initial_peers_list:
+    #                     initial_peers_list.append(peer)
 
     # Init DHT
     retries = 0
@@ -221,7 +221,7 @@ def init_dht(self):
                             f"/ip4/0.0.0.0/tcp/{self.config.dht.port}",
                             f"/ip4/0.0.0.0/udp/{self.config.dht.port}/quic",
                         ],
-                        initial_peers=[initial_peer],
+                        # initial_peers=[initial_peer],
                         announce_maddrs=announce_maddrs,
                         start=True,
                     )

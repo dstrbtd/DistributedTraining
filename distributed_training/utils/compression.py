@@ -49,9 +49,9 @@ class TransformDCT:
 
         # Get all variants of model tensor sizes
         # Generate all possible valid DCT sizes for model tensors
-        for _, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
+        for _, p in model.items():
+            # if not p.requires_grad:
+            #     continue
             for s in p.shape:
                 # Get the closest smallest divisor to the targeted DCT size
                 sc = _get_smaller_split(s, self.target_chunk)
