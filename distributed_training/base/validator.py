@@ -385,6 +385,9 @@ class BaseValidatorNeuron(BaseNeuron):
                 self.uid_tracker[uid] = UidTracker(
                     uid=uid
                 )  # reset uid_tracker for this uid
+                self.openskill_ratings[uid] = self.openskill_model.rating(
+                    name=str(uid),
+                )
 
         # Check to see if the metagraph has changed size.
         # If so, we need to add new hotkeys and moving averages.
@@ -397,11 +400,14 @@ class BaseValidatorNeuron(BaseNeuron):
             self.uid_tracker[uid] = UidTracker(
                 uid=uid
             )  # reset uid_tracker for this uid
+            self.openskill_ratings[uid] = self.openskill_model.rating(
+                name=str(uid),
+            )
 
         # Update the hotkeys.
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
 
-    def update_scores(self):
+    def update_scores(self, uids: List[int]):
         """Performs exponential moving average on the scores based on the rewards received from the miners."""
 
         #  Make sure uid_tracker is sorted by uids

@@ -88,10 +88,11 @@ async def forward(self):
             # Master validator coordinates AllReduce and queries miners
             sample_size = int(self.metagraph.n)
 
+            min_sample_size = self.config.neuron.min_group_size * 2
             # Get active miners
-            while len(self.miner_uids) < (50 - 1):
+            while len(self.miner_uids) < min_sample_size:
                 self.logger.info(
-                    f"Found {len(self.miner_uids)} UIDs. Attempting to find {50 - len(self.miner_uids) - 1} more UIDs."
+                    f"Found {len(self.miner_uids)} UIDs. Attempting to find {min_sample_size - len(self.miner_uids) - 1} more UIDs."
                 )
                 self.miner_uids = await get_random_uids(
                     self,
@@ -99,6 +100,8 @@ async def forward(self):
                     k=sample_size,
                     epoch=self.local_progress.epoch,
                 )
+                if min_sample_size > 16:
+                    min_sample_size = min_sample_size - 1
 
         else:
             # For non-master validators
@@ -126,7 +129,7 @@ async def forward(self):
             )
         )
         alive_uids = self.miner_uids
-        self.miner_uids = self.miner_uids[: self.config.neuron.min_group_size * 2]
+        self.miner_uids = self.miner_uids[:min_sample_size]
         self.event.update({"UIDs": self.miner_uids})
         self.logger.info(f"UIDs:  {self.miner_uids}")
 
@@ -223,6 +226,7 @@ async def forward(self):
                         success_rate=success_rate,
                         duration=results["duration"],
                         participating_miners_count=len(results["participating_peers"]),
+                        failed_miners_count=len(results["failed_peers"]),
                         bandwidth=avg_bandwidth,
                     )
                     # -------
@@ -286,7 +290,7 @@ async def forward(self):
     )
 
     # Update scores
-    self.update_scores()
+    self.update_scores(self.miner_uids)
 
     self.event.update(self.get_validator_info())
 

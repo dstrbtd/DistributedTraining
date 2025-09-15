@@ -94,6 +94,7 @@ class Validator(BaseValidatorNeuron):
         success_rate,
         duration,
         participating_miners_count,
+        failed_miners_count,
         bandwidth=None,
     ):
         """Report AllReduce operation metrics to InfluxDB"""
@@ -111,6 +112,7 @@ class Validator(BaseValidatorNeuron):
                     "learning_rate", float(self.inner_optimizer.param_groups[0]["lr"])
                 )
                 .field("participating_miners", int(participating_miners_count))
+                .field("failed_miners", int(failed_miners_count))
             )
 
             if bandwidth is not None:
@@ -153,6 +155,8 @@ class Validator(BaseValidatorNeuron):
                             point = point.field(k, v)
                         else:
                             point = point.field(k, float(v))
+                    elif (k == "all_reduce.peer_id") or (k == "train.model_id"):
+                        point = point.field(k, v)
 
                 points.append(point)
 
@@ -434,6 +438,23 @@ class Validator(BaseValidatorNeuron):
             ):
                 idxs = idxs.to(self.device)
                 vals = vals.to(self.device)
+
+                # after building x and (optionally) flattening (h,w) -> (h*w)
+                if len(self.xshapes[n]) > 2:
+                    D = int(self.xshapes[n][-1] * self.xshapes[n][-2])  # h*w
+                else:
+                    D = int(self.xshapes[n][-1])  # in_features
+
+                idx64 = idxs.long().contiguous().view(-1).cpu()
+                imin, imax = int(idx64.min()), int(idx64.max())
+                if imin < 0 or imax >= D:
+                    self.logger.info(
+                        f"UID {uid:03d}: index min: {imin} / index max: {imax} vs size {D} on {n}"
+                    )
+                    raise ValueError(
+                        f"UID {uid:03d}: index min: {imin} / index max: {imax} vs size {D} on {n}"
+                    )
+
                 grad = self.transformer.decode(
                     self.compressor.decompress(
                         p.to(self.device),

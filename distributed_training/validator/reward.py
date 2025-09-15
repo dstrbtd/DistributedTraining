@@ -150,10 +150,8 @@ async def evaluate_model(
                         continue
 
                     inputs = inputs.to(device)
-
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                         outputs = model(input_ids=inputs, labels=inputs)
-
                     total_loss += outputs.loss.item()
                     n_batches_sampled += 1
                     del inputs, labels, outputs
@@ -306,7 +304,9 @@ async def score_uids(self, uids: list):
     Args:
         uids (list): UIDs of miners to be evaluated.
     """
-    if self.blocks_since_allreduce < (self.config.neuron.blocks_per_allreduce / 2):
+    if (
+        self.blocks_since_allreduce < (self.config.neuron.blocks_per_allreduce / 2)
+    ) and (self.global_progress.epoch != 0):
         epoch = self.global_progress.epoch - 1
     else:
         epoch = self.global_progress.epoch
