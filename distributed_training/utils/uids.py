@@ -59,7 +59,6 @@ async def check_uid_availability(
         bool: True if uid is available, False otherwise
     """
     # Filter non serving axons.
-
     if not metagraph.axons[uid].is_serving:
         return False
 
@@ -326,7 +325,6 @@ def map_uid_to_peerid(self):
                             self.uid_tracker[uid].all_reduce.peer_id = None
 
             self.logger.debug(f"Retrieved commitment for UID {uid}: {metadata}")
-
         except Exception as e:
             self.logger.debug(f"Failed to decode commitment for UID {uid}: {e}")
             continue
