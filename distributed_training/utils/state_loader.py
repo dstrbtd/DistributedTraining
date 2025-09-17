@@ -301,7 +301,7 @@ def load_model_optimizer_gradient_averager(
         dht=self.dht,
         main_parameters=self.state_averager.main_parameters,
         offloaded_optimizer=self.state_averager.optimizer,
-        compression=hivemind.BlockwiseQuantization(),
+        compression=hivemind.Quantile8BitQuantization(),
         prefix=f"{self.config.neuron.run_id}_grad_averager",
         min_group_size=self.config.neuron.min_group_size,
         min_matchmaking_time=30.0,
