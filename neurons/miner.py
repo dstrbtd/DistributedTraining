@@ -51,7 +51,9 @@ import psutil
 import torch
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
-    # StateDictType,
+    LocalOptimStateDictConfig,
+    StateDictType,
+    LocalStateDictConfig,
     # FullStateDictConfig,
 )
 from torch.distributed.checkpoint.state_dict import (
@@ -108,6 +110,16 @@ import torch
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
 
+import torch.distributed as dist
+
+
+def cuda_mem(logger, tag):
+    torch.cuda.synchronize()
+    logger.info(
+        f"[{tag}] alloc={torch.cuda.memory_allocated()/1e9:.3f} GB | "
+        f"reserved={torch.cuda.memory_reserved()/1e9:.3f} GB"
+    )
+
 
 class Miner(BaseMinerNeuron):
     def __init__(self, config=None):
@@ -121,19 +133,33 @@ class Miner(BaseMinerNeuron):
         self._init_basic_components()
         self._init_model_components()
         self._init_network_components()
-        self.starting_block = self.block
+        if self.master:
+            self.starting_block = self.block
+        else:
+            self.starting_block = None
+        self.block
+        self.starting_block = self.current_block
+        if self.should_sync_model:
+            self.start_background_upload(
+                epoch=self.global_progress.epoch,
+            )
         self.reload_state_checker_thread = Thread(
             target=self.reload_state_watcher, daemon=True
         )
-        self.reload_state_checker_thread.start()
         dist.barrier()
-        self.local_progress.epoch = 1
+        self.reload_state_checker_thread.start()
         self.loop = asyncio.new_event_loop()
+        if self.master:
+            cuda_mem(self.logger, f"Load 0")
 
     def reload_state_watcher(self):
         """Background thread on every rank; only sets a local flag on rank 0."""
         self.reload_state_event = threading.Event()
         while not self.stop_event.is_set():
+            # if True:
+            #     time.sleep(10)
+            #     continue
+            # elif not self.all_reduce_success_status:
             if not self.all_reduce_success_status:
                 wait_time = (
                     self.allreduce_timeout
@@ -149,6 +175,12 @@ class Miner(BaseMinerNeuron):
                 # Check if master validator has failed to all_reduce
                 self.global_progress.epoch = get_global_epoch(self)
                 self.reload_state_event.set()
+            # elif (
+            #     self.local_progress.epoch == 0 and self.local_progress.inner_step > 410
+            # ) or (
+            #     self.local_progress.epoch != 0 and self.local_progress.inner_step > 10
+            # ):
+            #     self.reload_state_event.set()
             else:
                 # TODO convert 2nd if statement to listener
                 self.sync()
@@ -158,9 +190,8 @@ class Miner(BaseMinerNeuron):
                 ):
                     self.reload_state_event.set()
                 elif (self.last_allreduce_block is None) and (
-                    self.current_block - self.starting_block > 5
+                    self.current_block - self.starting_block > 25
                 ):
-                    self.starting_block = self.current_block
                     self.reload_state_event.set()
             time.sleep(1)
 
@@ -190,7 +221,8 @@ class Miner(BaseMinerNeuron):
         # Reload on ALL ranks (simplest + avoids param rebroadcast complexities).
         # (If you truly want only rank 0 to load, you must then broadcast params,
         # which is more invasive.)
-        # self.logger.info("Sync reload begin")
+        self.logger.info("Sync reload begin")
+
         if not self.all_reduce_success_status:
             if self.local_progress.epoch > self.global_progress.epoch:
                 self.logger.info(
@@ -216,32 +248,33 @@ class Miner(BaseMinerNeuron):
             ):
                 self.load_state(reset_last_allreduce_block=True)
             elif (self.last_allreduce_block is None) and (
-                self.current_block - self.starting_block > 5
+                self.current_block - self.starting_block > 25
             ):
                 self.starting_block = self.current_block
                 self.load_state(reset_last_allreduce_block=False)
 
-        # self.logger.info("Sync reload begin")
-        # # self.load_state(reset_last_allreduce_block=False)
-        # self.loop.run_until_complete(
-        #     self.all_reduce(
-        #         distributed_training.protocol.AllReduce(
-        #             min_group_size=self.config.neuron.min_group_size, timeout=420
-        #         )
-        #     )
-        # )
+        # self.load_state(reset_last_allreduce_block=False)
+        if (
+            self.local_progress.epoch == 0 and self.local_progress.inner_step > 410
+        ) or (self.local_progress.epoch != 0 and self.local_progress.inner_step > 10):
+            self.loop.run_until_complete(
+                self.all_reduce(
+                    distributed_training.protocol.AllReduce(
+                        min_group_size=self.config.neuron.min_group_size, timeout=420
+                    )
+                )
+            )
         torch.cuda.empty_cache()
-        dist.barrier(group=self.gloo_group)
-        # self.logger.info("Sync reload end")
 
     def _process_training_batch(self, dataset):
         """Process a single training batch"""
-
         for i, batch in enumerate(dataset):
+            self.logger.info(i)
             inputs, _ = batch
-            # TODO why is this set for Rank 1?
+            # TODO Can this be re-inrtoduced without hanging Rank1
             # if not self.training_active.is_set():
             #     break
+            self.maybe_sync_and_reload()
 
             # Move to device
             inputs = inputs.to(self.local_rank)
@@ -267,9 +300,6 @@ class Miner(BaseMinerNeuron):
                     f"Average Loss: {self.local_progress.loss:.2f}"
                 )
 
-                # TODO if we keep this here we need to skip opt.step()
-                self.maybe_sync_and_reload()
-
                 self.event.update(
                     {
                         "train/outer_step": self.local_progress.epoch,
@@ -287,10 +317,31 @@ class Miner(BaseMinerNeuron):
 
                 if (
                     self.local_progress.inner_step % self.config.neuron.upload_steps
+                    # self.local_progress.inner_step % 1
                     == 0
                 ):
-                    # Upload model every x steps
+                    # # Upload model every x steps
                     self.start_background_upload(epoch=self.global_progress.epoch)
+                    self.logger.info("start_background_upload compeleted")
+
+    def inner_optimizer_step(self):
+        # self.logger.info("INNER OPT START")
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        self.logger.info("CLIPPING")
+        self.inner_optimizer.step()
+        # self.logger.info("OPT STEP")
+
+        # self.inner_optimizer.zero_grad(set_to_none = True)
+
+        self.scheduler.step()
+        # self.logger.info("SCHEDULER STEP")
+
+        self.local_progress.inner_step += 1
+
+        self.running_loss = 0.0
+        self.batch_count = 0
+
+        self.local_progress.samples_accumulated = 0
 
     def upload_model(
         self,
@@ -335,23 +386,6 @@ class Miner(BaseMinerNeuron):
                     self.logger.info(f"Model Saved")
                     del full_state
 
-                    # Save optimizer state
-                    optimizer_state = {
-                        "optimizer_state_dict": optim_sd,
-                        "learning_rate": inner_optimizer_lr,
-                        "scheduler_state": scheduler_state_dict,
-                        "epoch": epoch,
-                    }
-                    torch.save(
-                        optimizer_state,
-                        os.path.join(
-                            self.output_dir,
-                            "inner_optimizer.pt",
-                        ),
-                    )
-                    self.logger.info(f"Optimizer Saved")
-                    del optimizer_state
-
                     # Save pseudo gradient state
                     torch.save(
                         gradient_state,
@@ -361,6 +395,23 @@ class Miner(BaseMinerNeuron):
                         ),
                     )
                     del gradient_state
+
+                # Save optimizer state
+                optimizer_state = {
+                    "optimizer_state_dict": optim_sd,
+                    "learning_rate": inner_optimizer_lr,
+                    "scheduler_state": scheduler_state_dict,
+                    "epoch": epoch,
+                }
+                torch.save(
+                    optimizer_state,
+                    os.path.join(
+                        self.output_dir,
+                        f"inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
+                    ),
+                )
+                self.logger.info(f"Optimizer Saved")
+                del optimizer_state
 
                 # # Reset model blocklist & keep local copy in case upload fails
                 # block_list = self.model.config.block_list
@@ -424,12 +475,12 @@ class Miner(BaseMinerNeuron):
                         tag=f"{__run__}.{epoch}.{self.model.config.inner_step}",
                         tag_message=commit_message,
                     )
-                    # Cleanup old cache
-                    cleanup_old_cache(
-                        self,
-                        repo_id=self.config.neuron.local_model_name,
-                        current_revision=None,
-                    )
+                    # # Cleanup old cache
+                    # cleanup_old_cache(
+                    #     self,
+                    #     repo_id=self.config.neuron.local_model_name,
+                    #     current_revision=None,
+                    # )
 
                     self.logger.info(
                         f"Successfully pushed new model state with tag {__run__}.{epoch}.{self.model.config.inner_step} to repo: {self.config.neuron.local_model_name}"
@@ -468,9 +519,11 @@ class Miner(BaseMinerNeuron):
             else 0
         )
         is_uploading = torch.tensor([uploading], device="cpu")
+        self.logger.info("is_uploading before", is_uploading)
         dist.barrier(group=self.gloo_group)
         dist.broadcast(is_uploading, src=0, group=self.gloo_group)
         dist.barrier(group=self.gloo_group)
+        self.logger.info("is_uploading after", is_uploading)
 
         if is_uploading.item() == 1:
             self.logger.info("Previous upload still in progress, skipping new upload")
@@ -484,9 +537,17 @@ class Miner(BaseMinerNeuron):
             cpu_offload=True,  # offload to host RAM (no GPU OOM)
         )
         full_state = get_model_state_dict(self.model, options=opts)
+        self.logger.info("Full State")
 
+        # with FSDP.state_dict_type(
+        #     self.model,
+        #     StateDictType.LOCAL_STATE_DICT,                 # local/sharded per rank
+        #     state_dict_config=LocalStateDictConfig(offload_to_cpu=True),
+        #     optim_state_dict_config=LocalOptimStateDictConfig(offload_to_cpu=True),
+        # ):
+        o_opts = StateDictOptions(full_state_dict=False, cpu_offload=True)
         optim_sd = get_optimizer_state_dict(
-            self.model, self.inner_optimizer, options=opts
+            self.model, self.inner_optimizer, options=o_opts
         )
         self.logger.info(f"Extracted Optimizer & Model State Dict")
 
@@ -498,7 +559,8 @@ class Miner(BaseMinerNeuron):
         if dist.is_initialized():
             dist.barrier()
 
-        if self.master:
+        # if self.master:
+        if True:
             # Start new upload
             self.current_upload_future = self.upload_executor.submit(
                 self.upload_model,
@@ -524,7 +586,7 @@ class Miner(BaseMinerNeuron):
 
             self.current_upload_future.add_done_callback(upload_completed)
 
-        dist.barrier(device_ids=[self.local_rank])
+        dist.barrier()
         del full_state, optim_sd, gradient_state
 
     def pause_training(self):
@@ -545,13 +607,20 @@ class Miner(BaseMinerNeuron):
         attempt = 0
         while attempt < self.retry_limit:
             try:
+                sync = torch.tensor([self.current_block], device="cpu")
+                dist.broadcast(sync, src=0, group=self.gloo_group)
+                self.current_block = sync[0].item()
+                self.logger.info(self.current_block)
+
                 pages = await DatasetLoader.next_pages(
                     offset=self.current_block,
                     n_pages=35,
                     seed=self.uid,
                 )
-                random.seed(self.uid)
-                random.shuffle(pages)
+                rng = np.random.default_rng(hash(self.uid) & 0xFFFFFFFF)
+                rng.shuffle(pages)
+
+                self.logger.info(pages)
 
                 dataset = await DatasetLoader.create(
                     batch_size=self.config.neuron.local_batch_size_train,
@@ -585,7 +654,6 @@ class Miner(BaseMinerNeuron):
 
         # Core setup
         self.device = self.config.neuron.device
-        self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         if self.master:
             init_dht(self)
 
@@ -842,8 +910,11 @@ class Miner(BaseMinerNeuron):
         load_model_optimizer_gradient_averager(
             self, self.config.neuron.local_model_name, self.local_progress.epoch
         )
+        # load_model_optimizer_gradient_averager(
+        #     self, self.config.neuron.global_model_name, self.local_progress.epoch
+        # )
         self.model.config.block_list = []
-        cleanup_old_cache(self, repo_id=self.config.neuron.local_model_name)
+        # cleanup_old_cache(self, repo_id=self.config.neuron.local_model_name)
 
         # Setup upload executor
         self.upload_executor = ThreadPoolExecutor(
@@ -872,10 +943,12 @@ class Miner(BaseMinerNeuron):
 
     def _load_gradient_compressors(self):
         self.logger.info("Load Start")
+        dist.barrier(device_ids=[self.local_rank])
         opts = StateDictOptions(
             full_state_dict=True, cpu_offload=True
         )  # gather to CPU on rank 0
         full_state = get_model_state_dict(self.model, options=opts)
+        self.logger.info("Full state")
         if self.master:
             # Init compression
             self.transformer = TransformDCT(
@@ -922,7 +995,7 @@ class Miner(BaseMinerNeuron):
             )
 
         self.model.to("cpu")
-        should_sync_model = (
+        self.should_sync_model = (
             (self.local_progress.epoch is None)
             or (self.local_progress.epoch != self.global_progress.epoch)
             # or (
@@ -932,14 +1005,11 @@ class Miner(BaseMinerNeuron):
         )
         self.model.to(self.device)
 
-        if should_sync_model:
+        if self.should_sync_model:
             del global_model
             gc.collect()
             torch.cuda.empty_cache()
             load_state_from_peer(self, epoch=self.global_progress.epoch)
-            self.start_background_upload(
-                epoch=self.global_progress.epoch,
-            )
         else:
             del global_model
             gc.collect()
@@ -975,15 +1045,16 @@ class Miner(BaseMinerNeuron):
 
     @torch.no_grad()
     def apply_optimizer_parameters(self):
-        opts = StateDictOptions(
-            full_state_dict=True,  # gather a full (HF-style) state dict
-            cpu_offload=True,  # offload to host RAM (no GPU OOM)
-            broadcast_from_rank0=True,  # rank0_only behavior
+        dist.barrier(group=self.gloo_group)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        opts_get = StateDictOptions(
+            full_state_dict=True,
+            cpu_offload=True,
         )
-        full_state = get_model_state_dict(self.model, options=opts)
+        full_state = get_model_state_dict(self.model, options=opts_get)
+        self.logger.info("Full state")
 
-        # # 🔸 All ranks must enter these collectives; non-rank0 will just get {} and return immediately.
-        # full_state = get_state_dict(self.model, state_dict_config=cfg)       # empty dict on non-rank0
         if self.master:
             # Flatten optimizer params in the same order every time
             offloaded_parameters = [
@@ -997,11 +1068,19 @@ class Miner(BaseMinerNeuron):
                 assert isinstance(tensor, torch.Tensor) and tensor.device.type == "cpu"
                 tensor.copy_(off_t, non_blocking=True)
 
-        dist.barrier(device_ids=[self.local_rank])
+        opts_set = StateDictOptions(
+            full_state_dict=True,
+            cpu_offload=True,
+            broadcast_from_rank0=True,
+        )
         # Push back into the model (reshard). All ranks must enter.
         set_model_state_dict(
-            model=self.model, model_state_dict=full_state, options=opts
+            model=self.model, model_state_dict=full_state, options=opts_set
         )
+
+        del full_state
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def create_pseudo_gradients(self):
         """compute pseudo gradient by subtracting the offloaded optimizer parameters with the main parameters and load them in the averager"""
@@ -1191,20 +1270,6 @@ class Miner(BaseMinerNeuron):
 
         self.training_status = TrainingStatus.STOPPED
 
-    def inner_optimizer_step(self):
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-        self.inner_optimizer.step()
-
-        self.scheduler.step()
-
-        self.inner_optimizer.zero_grad()
-        self.local_progress.inner_step += 1
-
-        self.running_loss = 0.0
-        self.batch_count = 0
-
-        self.local_progress.samples_accumulated = 0
-
     async def all_reduce(
         self, synapse: distributed_training.protocol.AllReduce
     ) -> distributed_training.protocol.AllReduce:
@@ -1256,6 +1321,7 @@ class Miner(BaseMinerNeuron):
                         ] = synapse.min_matchmaking_time
 
                     try:
+                        self.logger.info("All Reduce Start")
                         # Run allreduce with proper timeout
                         (
                             synapse,
@@ -1267,15 +1333,12 @@ class Miner(BaseMinerNeuron):
                             self.current_block,
                             # bandwidth
                         )
+                        self.logger.info("All Reduce Finish")
                         if not synapse.completion:
                             raise Exception("AllReduce Failed, Loading Latest State")
                     except Exception as e:
                         self.logger.info(f"All Reduce Failed with error: {e}")
                         synapse.completion = False
-                else:
-                    time.sleep(10)
-                dist.barrier(device_ids=[self.local_rank])
-                self.logger.info("Finished Barrier")
 
         except Exception as e:
             synapse.completion = False
@@ -1284,6 +1347,10 @@ class Miner(BaseMinerNeuron):
         finally:
             # TODO make sure rank 0 and 1 are alligned
             # Update epoch if all_reduce was succsefull
+            self.logger.info("Started Barrier")
+            # dist.barrier()
+            dist.barrier(group=self.gloo_group)
+            self.logger.info("Finished Barrier")
             if (self.master and synapse.completion is True) or (not self.master):
                 self.logger.info(f"Apply opt params")
                 self.apply_optimizer_parameters()
@@ -1297,8 +1364,12 @@ class Miner(BaseMinerNeuron):
                     await self.avg_handler._validate_weight_update(
                         initial_weights, self.current_block
                     )
+
+                    self.logger.info(
+                        f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
+                    )
                     # self.avg_handler.update_main_param_after_outer_step()
-                dist.barrier(device_ids=[self.local_rank])
+                dist.barrier(group=self.gloo_group)
 
                 # Reset inner_step and update epoch
                 self.local_progress.samples_accumulated = 0

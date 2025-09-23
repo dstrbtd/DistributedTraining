@@ -118,58 +118,43 @@ class BaseMinerNeuron(BaseNeuron):
         """
         self.logger.info("Synced metagraph")
 
-        if self.master:
-            # Serve passes the axon information to the network + netuid we are hosting on.
-            # This will auto-update if the axon port of external ip have changed.
-            self.logger.info(
-                f"Serving miner axon {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid} and port: {self.axon.port}"
-            )
-            self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
-
-            # Start  starts the miner's axon, making it active on the network.
-            self.axon.start()
-            self.logger.info(f"Miner starting at block: {self.block}")
-
         # This loop maintains the miner's operations until intentionally stopped.
         try:
-            # while (
-            #     self.block - self.metagraph.last_update[self.uid]
-            #     < self.config.neuron.epoch_length
-            # ) and self.master:
-            if self.master:
-                if self.peer_id_logged_to_chain is False:
-                    log_peerid_to_chain(self)
+            self.logger.info("start run barrier start")
+            dist.barrier()
+            self.resume_training()
+            self.logger.info("start run barrier end")
 
-                if not self.config.neuron.dont_wandb_log:
-                    if self.event != {}:
-                        self.event.update(self.get_miner_info())
-                        try:
-                            self.bandwidth = get_bandwidth()
-                            self.event.update(self.bandwidth)
-                        except Exception:
-                            self.logger.debug("Error getting bandwidth metrics")
-                        if self.master:
-                            self.wandb.log(self.event)
-                        self.event = {}
-
-                # Wait before checking again.
-                time.sleep(1)
-
-                # Check if we should exit.
-                if self.should_exit:
-                    break
-
-            dist.barrier(device_ids=[self.local_rank])
             while not self.should_exit:
                 while not self.stop_event.is_set() and (
                     not self.reload_state_event.is_set()
                 ):
                     try:
-                        self.logger.info(self.training_active.wait())
+                        if self.master:
+                            if self.peer_id_logged_to_chain is False:
+                                log_peerid_to_chain(self)
+
+                            if not self.config.neuron.dont_wandb_log:
+                                if self.event != {}:
+                                    self.event.update(self.get_miner_info())
+                                    try:
+                                        self.bandwidth = get_bandwidth()
+                                        self.event.update(self.bandwidth)
+                                    except Exception:
+                                        self.logger.debug(
+                                            "Error getting bandwidth metrics"
+                                        )
+                                    if self.master:
+                                        self.wandb.log(self.event)
+                                    self.event = {}
+
+                        self.logger.info(
+                            "self.training_active.set()",
+                            self.training_active.is_set(),
+                            "pre dataset",
+                        )
                         # Wait if training is paused
                         self.training_active.wait()
-
-                        # self.maybe_sync_and_reload()
 
                         self.logger.debug(":pages: Fetching fineweb-edu pages")
                         dataset = self.training_loop.run_until_complete(
@@ -177,7 +162,11 @@ class BaseMinerNeuron(BaseNeuron):
                         )
 
                         # Wait if training is paused
-                        self.maybe_sync_and_reload()
+                        self.logger.info(
+                            "self.training_active.wait()",
+                            self.training_active.is_set(),
+                            "post dataset",
+                        )
                         self.training_active.wait()
 
                         self.model.config.block_list.append(self.current_block)

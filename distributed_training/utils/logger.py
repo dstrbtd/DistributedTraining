@@ -181,7 +181,7 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
 
     # Create rank-aware formatter
     terminal_formatter = logging.Formatter(
-        "      %(rank)s       | %(message)s",
+        "   %(rank)s    | %(message)s",
     )
     for handler in bt_logger.handlers:
         handler.addFilter(rank_filter)
@@ -233,10 +233,18 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
     root_logger.addHandler(queue_handler)
 
     listener = QueueListener(log_queue, loki_handler, file_handler)
+    listener = QueueListener(log_queue, loki_handler)
     listener.start()
 
     # Disable noisy hivemind default logging
     use_hivemind_log_handler("nowhere")
+
+    for name in logging.root.manager.loggerDict:
+        if name.startswith("hivemind"):
+            logger = logging.getLogger(name)
+            logger.addHandler(file_handler)
+            logger.propagate = False
+            logger.setLevel(logging.DEBUG)
 
     # Disable propagation for other loggers
     for name, logger in logging.root.manager.loggerDict.items():

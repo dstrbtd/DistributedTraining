@@ -13,6 +13,7 @@ from typing import Optional
 import psutil
 import torch
 from datetime import datetime
+import datetime as dt
 
 from hivemind.utils import get_logger
 from huggingface_hub import (
@@ -36,9 +37,6 @@ from transformers import (
 from distributed_training import __run__
 from distributed_training.averaging.averagers import DTGradAverager, DTStateAverager
 
-# from distributed_training.utils.shard_rpc import init_shard_provider, ping
-import distributed_training.utils.shard_rpc as srd
-import distributed_training.utils.shard_rpc_2 as srd2
 from distributed_training.utils.progress_tracker import (
     get_global_epoch,
     get_local_inner_step,
@@ -58,6 +56,7 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_optimizer_state_dict,
     set_optimizer_state_dict,
+    set_model_state_dict,
 )
 import time
 
@@ -85,6 +84,23 @@ from hivemind.utils import (
 import bittensor as bt
 from packaging.version import Version
 import logging
+
+import pickle, hashlib, torch, torch.distributed as dist
+from muon import MuonWithAuxAdam, SingleDeviceMuonWithAuxAdam
+
+from torch.distributed.tensor._dtensor_spec import (
+    DTensorSpec,
+    TensorMeta,
+)
+from torch.distributed.tensor import DTensor
+from torch.distributed.device_mesh import DeviceMesh as DM
+from torch.distributed.tensor.placement_types import Shard
+
+torch.serialization.add_safe_globals([DTensorSpec])
+torch.serialization.add_safe_globals([DTensor])
+torch.serialization.add_safe_globals([DM])
+torch.serialization.add_safe_globals([Shard])
+torch.serialization.add_safe_globals([TensorMeta])
 
 Parameters = Iterable[torch.Tensor]
 ParamGroups = Iterable[Dict[str, Any]]
@@ -196,7 +212,7 @@ def init_components(
         raise ValueError(
             "Using offload_optimizer requires creating optimizer inside hivemind"
         )
-
+    # self.logger.info("Before make_averaged_parameters")
     averaged_parameters = make_averaged_parameters(self, main_parameters)
 
     # create optimizer
@@ -296,7 +312,78 @@ def check_model_exists(self, repo_id: str, revision: Optional[str] = None) -> bo
         return False
 
 
-# @profile
+def _bytes(x):
+    return x.numel() * x.element_size()
+
+
+def summarize_optimizer_state(opt, logger, tag):
+    by_dtype = {}
+    total = 0
+    for st in opt.state.values():
+        for k, v in st.items():
+            if isinstance(v, torch.Tensor):
+                nb = _bytes(v)
+                total += nb
+                key = (str(v.device), str(v.dtype))
+                by_dtype[key] = by_dtype.get(key, 0) + nb
+    logger.info(f"[{tag}] OPT-state total = {total/1e9:.3f} GB")
+    for (dev, dt), nb in sorted(by_dtype.items(), key=lambda x: -x[1])[:12]:
+        logger.info(f"[{tag}]  {dev} | {dt} : {nb/1e9:.3f} GB")
+
+
+def summarize_moments_only(opt, logger, tag):
+    by_dtype = {}
+    total = 0
+    for st in opt.state.values():
+        for name in ("exp_avg", "exp_avg_sq"):
+            t = st.get(name, None)
+            if isinstance(t, torch.Tensor):
+                nb = _bytes(t)
+                total += nb
+                key = (str(t.device), str(t.dtype))
+                by_dtype[key] = by_dtype.get(key, 0) + nb
+    logger.info(f"[{tag}] MOMENTS total = {total/1e9:.3f} GB")
+    for (dev, dt), nb in sorted(by_dtype.items(), key=lambda x: -x[1]):
+        logger.info(f"[{tag}]  {dev} | {dt} : {nb/1e9:.3f} GB")
+
+
+def summarize_grads(model, logger, tag):
+    by_dtype = {}
+    total = 0
+    for p in model.parameters():
+        g = p.grad
+        if isinstance(g, torch.Tensor):
+            nb = _bytes(g)
+            total += nb
+            key = (str(g.device), str(g.dtype))
+            by_dtype[key] = by_dtype.get(key, 0) + nb
+    logger.info(f"[{tag}] GRADS total = {total/1e9:.3f} GB")
+    for (dev, dt), nb in sorted(by_dtype.items(), key=lambda x: -x[1]):
+        logger.info(f"[{tag}]  {dev} | {dt} : {nb/1e9:.3f} GB")
+
+
+def summarize_params(model, logger, tag):
+    by_dtype = {}
+    total = 0
+    for p in model.parameters():
+        t = p
+        nb = _bytes(t)
+        total += nb
+        key = (str(t.device), str(t.dtype))
+        by_dtype[key] = by_dtype.get(key, 0) + nb
+    logger.info(f"[{tag}] PARAMS total = {total/1e9:.3f} GB")
+    for (dev, dt), nb in sorted(by_dtype.items(), key=lambda x: -x[1]):
+        logger.info(f"[{tag}]  {dev} | {dt} : {nb/1e9:.3f} GB")
+
+
+def cuda_mem(logger, tag):
+    torch.cuda.synchronize()
+    logger.info(
+        f"[{tag}] alloc={torch.cuda.memory_allocated()/1e9:.3f} GB | "
+        f"reserved={torch.cuda.memory_reserved()/1e9:.3f} GB"
+    )
+
+
 def load_model_optimizer_gradient_averager(
     self,
     local_model_name,
@@ -330,29 +417,30 @@ def load_model_optimizer_gradient_averager(
     elif (revision is None) and (local_model_name == global_model_name):
         revision = f"{__run__}.{epoch}.0"
 
-    # Delete Gradient and State Averagers
-    if hasattr(self, "grad_averager"):
-        self.grad_averager.shutdown()
-        while self.grad_averager.is_alive():
-            time.sleep(1)
+    # # Delete Gradient and State Averagers
+    # if hasattr(self, "grad_averager"):
+    #     self.grad_averager.shutdown()
+    #     while self.grad_averager.is_alive():
+    #         time.sleep(1)
 
-        del self.grad_averager.main_parameters
-        del self.grad_averager.offloaded_optimizer
-        del self.grad_averager._averaged_tensors
-        del self.grad_averager
-        gc.collect()
-        torch.cuda.empty_cache()
+    #     del self.grad_averager.main_parameters
+    #     del self.grad_averager.offloaded_optimizer
+    #     del self.grad_averager._averaged_tensors
+    #     del self.grad_averager
+    #     gc.collect()
+    #     torch.cuda.synchronize()
+    #     torch.cuda.empty_cache()
 
-    # Delete existing averag handler
-    if hasattr(self, "avg_handler"):
-        del self.avg_handler.model
-        del self.avg_handler.inner_optimizer
-        del self.avg_handler.grad_averager
-        del self.avg_handler.state_averager
-        del self.avg_handler
-        gc.collect()
-        torch.cuda.empty_cache()
-        self.logger.info("Deleted Average Handler")
+    # # Delete existing averag handler
+    # if hasattr(self, "avg_handler"):
+    #     del self.avg_handler.model
+    #     del self.avg_handler.inner_optimizer
+    #     del self.avg_handler.grad_averager
+    #     del self.avg_handler
+    #     gc.collect()
+    #     torch.cuda.synchronize()
+    #     torch.cuda.empty_cache()
+    #     self.logger.info("Deleted Average Handler")
 
     if hasattr(self, "inner_optimizer"):
         for group in self.inner_optimizer.param_groups:
@@ -360,23 +448,27 @@ def load_model_optimizer_gradient_averager(
         self.inner_optimizer.state.clear()
         del self.inner_optimizer
         gc.collect()
+        torch.cuda.synchronize()
         torch.cuda.empty_cache()
 
-    if hasattr(self, "model"):
-        try:
-            self.model._reset_lazy_init()  # tells FSDP to free params if possible
-        except Exception:
-            pass
-        del self.model
-        gc.collect()
-        torch.cuda.empty_cache()
+    # if hasattr(self, "model"):
+    #     try:
+    #         self.model._reset_lazy_init()  # tells FSDP to free params if possible
+    #     except Exception:
+    #         pass
+    #     del self.model
+    #     gc.collect()
+    #     torch.cuda.synchronize()
+    #     torch.cuda.empty_cache()
 
+    loading_success = 0
     for model_name in model_name_list:
         optimizer_state = None
         # Load Model & Inner Optimizer
         try:
             if model_name == global_model_name:
                 revision = ".".join(revision.split(".")[:-1] + ["0"])
+
             if not check_model_exists(
                 self,
                 model_name,
@@ -384,42 +476,67 @@ def load_model_optimizer_gradient_averager(
             ):
                 continue
 
-            if not dist.is_initialized():
-                dist.init_process_group(
-                    backend="nccl",
-                    init_method="tcp://127.0.0.1:29500",
-                    rank=self.local_rank,
-                    world_size=self.world_size,
+            if not hasattr(self, "model"):
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    revision=revision,
+                    trust_remote_code=False,
                 )
 
-                self.gloo_group = dist.new_group(
-                    backend="gloo",
+                need_full_state = self.master and not hasattr(self, "outer_optimizer")
+                if need_full_state:
+                    full_state = {
+                        k: v.cpu() for k, v in self.model.state_dict().items()
+                    }
+
+                mp_policy = MixedPrecisionPolicy(
+                    param_dtype=torch.bfloat16,  # match your autocast compute dtype
+                    reduce_dtype=torch.bfloat16,
+                    output_dtype=torch.bfloat16,  # required by FSDP2 policy
                 )
 
-            self.logger.info("Init Group")
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                revision=revision,
-                trust_remote_code=False,
-            )
-            self.logger.info("Dist barrier post model")
+                # Build a 1D device mesh over all ranks
+                self.mesh = DeviceMesh("cuda", list(range(dist.get_world_size())))
 
-            mp_policy = MixedPrecisionPolicy(
-                param_dtype=torch.bfloat16,  # match your autocast compute dtype
-                reduce_dtype=torch.bfloat16,
-                output_dtype=torch.bfloat16,  # required by FSDP2 policy
-            )
+                # Keep a plain HF module and enable FSDP2 on it
+                fully_shard(self.model, mesh=self.mesh, mp_policy=mp_policy)
+            else:
+                if self.master:
+                    model_state = torch.load(
+                        hf_hub_download(
+                            repo_id=model_name,
+                            filename="pytorch_model.bin",
+                            revision=revision,
+                        ),
+                        weights_only=True,
+                        map_location="cpu",
+                    )
+                else:
+                    model_state = None
 
-            # Build a 1D device mesh over all ranks
-            mesh = DeviceMesh("cuda", list(range(dist.get_world_size())))
+                objs = [model_state]
+                dist.broadcast_object_list(objs, src=0, group=self.gloo_group)
+                m_blob = objs[0]
+                self.logger.info("Downloaded Model State")
+                opts = StateDictOptions(
+                    full_state_dict=True, cpu_offload=True, broadcast_from_rank0=False
+                )
+                dist.barrier()
+                set_model_state_dict(self.model, m_blob, options=opts)
 
-            # Keep a plain HF module and enable FSDP2 on it:
-            fully_shard(self.model, mesh=mesh, mp_policy=mp_policy)
+                need_full_state = not hasattr(self, "outer_optimizer")
+                self.logger.info("Full state start")
+                if need_full_state:
+                    opts = StateDictOptions(
+                        full_state_dict=True,  # gather a full (HF-style) state dict
+                        cpu_offload=True,  # offload to host RAM (no GPU OOM)
+                    )
+                    full_state = m_blob
+                del objs, model_state, m_blob
 
             self.logger.info(
                 f"Successfully Loaded Model From {model_name} With Revision {revision}"
             )
-            self.logger.info(self.model.device)
 
             # Move model to device
             self.model.config.block_list = []
@@ -436,71 +553,62 @@ def load_model_optimizer_gradient_averager(
                     if "all_reduce_scores" in self.model.config.__dict__
                     else {}
                 )
-
+            # if reload_inner_optimizer and not hasattr(self, "inner_optimizer"):
             if reload_inner_optimizer:
-                # Delete existing inner optimizer
-                if hasattr(self, "inner_optimizer"):
-                    for i in self.inner_optimizer.param_groups[0]["params"]:
-                        del i
-                        gc.collect()
-                        torch.cuda.empty_cache()
-                    del self.inner_optimizer
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    self.logger.info("Deleted Inner Optimizer")
+                if not hasattr(self, "inner_optimizer"):
+                    self.inner_optimizer = torch.optim.AdamW(
+                        self.model.parameters(),
+                        lr=self.learning_rate_maximum,
+                        betas=(0.9, 0.95),
+                        weight_decay=0.1,
+                    )
 
-                self.inner_optimizer = torch.optim.AdamW(
-                    self.model.parameters(),
-                    lr=self.learning_rate_maximum,
-                    betas=(0.9, 0.95),
-                    weight_decay=0.1,
-                )
+                    self.logger.info(f"Loaded Inner Optimizer")
 
-                self.logger.info(f"Loaded Inner Optimizer")
-
-                self.scheduler = get_cosine_schedule_with_warmup(
-                    self.inner_optimizer,
-                    num_warmup_steps=1000,
-                    num_training_steps=88000,
-                )
-
-                opts = StateDictOptions(
-                    full_state_dict=True,  # gather a full (HF-style) state dict
-                    cpu_offload=True,  # offload to host RAM (no GPU OOM)
-                )
-                full_state = get_model_state_dict(self.model, options=opts)
-                optim_sd = get_optimizer_state_dict(
-                    self.model, self.inner_optimizer, options=opts
-                )
+                    self.scheduler = get_cosine_schedule_with_warmup(
+                        self.inner_optimizer,
+                        num_warmup_steps=1000,
+                        num_training_steps=88000,
+                    )
 
                 optimizer_state = torch.load(
                     hf_hub_download(
                         repo_id=model_name,
-                        filename="inner_optimizer.pt",
+                        filename=f"inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
                         revision=revision,
                     ),
                     weights_only=True,
                     map_location="cpu",
                 )
 
-                # Load optimizer state if available
-                if "optimizer_state_dict" in optimizer_state:
-                    # `optim_sd` is the dict you loaded from HF
-                    set_optimizer_state_dict(
-                        model=self.model,  # your FSDP2-wrapped model
-                        optimizers=self.inner_optimizer,  # your optimizer (created from the wrapped params)
-                        optim_state_dict=optimizer_state["optimizer_state_dict"],
-                        options=opts,
-                    )
+                opts = StateDictOptions(full_state_dict=False, cpu_offload=True)
+
+                # `optim_sd` is the dict loaded from HF
+                self.logger.info(
+                    f"[r{dist.get_rank()}] before set_optimizer_state_dict (NCCL) {opts}"
+                )
+                set_optimizer_state_dict(
+                    model=self.model,
+                    optimizers=self.inner_optimizer,
+                    optim_state_dict=optimizer_state["optimizer_state_dict"],
+                    options=opts,
+                )
+                self.logger.info(
+                    f"[r{dist.get_rank()}] after set_optimizer_state_dict (NCCL)"
+                )
+
                 if "scheduler_state" in optimizer_state:
                     self.scheduler.load_state_dict(optimizer_state["scheduler_state"])
+
                 self.logger.info(
                     f"Successfully Loaded Inner Optimizer State From {model_name} For Revision {revision}"
                 )
+                loading_success = 1
 
                 break
 
         except Exception as e:
+            loading_success = 0
             if model_name == model_name_list[-1]:
                 raise Exception(f"Failed to load model despite repo existing: {str(e)}")
             else:
@@ -509,6 +617,38 @@ def load_model_optimizer_gradient_averager(
                 )
 
         finally:
+            loading_sync = torch.tensor([loading_success], device="cpu")
+            self.logger.info("before", loading_sync[0].item())
+            dist.all_reduce(loading_sync, group=self.gloo_group)
+            self.logger.info("after", loading_sync[0].item())
+            self.logger.info("after type", type(loading_sync[0].item()))
+            self.logger.info("world_size", self.world_size)
+            self.logger.info("world_size_type", type(self.world_size))
+            if loading_sync[0].item() != self.world_size:
+                self.logger.info(
+                    f"Failed to load model despite repo existing. Cleaning up failed model load"
+                )
+                if hasattr(self, "model"):
+                    try:
+                        self.model._reset_lazy_init()
+                    except Exception:
+                        pass
+                    del self.model
+
+                # if hasattr(self, "inner_optimizer"):
+                #     for group in self.inner_optimizer.param_groups:
+                #         group["params"].clear()
+                #     self.inner_optimizer.state.clear()
+                #     del self.inner_optimizer
+                #     gc.collect()
+                #     torch.cuda.synchronize()
+                #     torch.cuda.empty_cache()
+
+                gc.collect()
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                continue
+
             if isinstance(optimizer_state, dict):
                 keys = list(optimizer_state.keys())
                 for k in keys:
@@ -518,11 +658,7 @@ def load_model_optimizer_gradient_averager(
             gc.collect()
             torch.cuda.empty_cache()
 
-    # # Add activation checkpointing
-    # from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
-    # self.model = checkpoint_wrapper(self.model)
-
-    if self.master:
+    if self.master and not hasattr(self, "outer_optimizer"):
         # Set outer optimizer
         optimizer = partial(torch.optim.SGD, lr=1, momentum=0.9, nesterov=True)
 
@@ -530,6 +666,12 @@ def load_model_optimizer_gradient_averager(
         param_groups, main_parameters, parameter_names = check_params(
             optimizer, full_state.values(), None
         )
+        self.logger.info("Check Params")
+
+        del full_state
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
         self.status_loglevel = logging.DEBUG
         self.offload_optimizer = True
@@ -550,6 +692,7 @@ def load_model_optimizer_gradient_averager(
             scheduler,
             initialize_optimizer,
         )
+        self.logger.info("Init Components")
 
         # Load a new gradient averager
         self.grad_averager = DTGradAverager(
@@ -618,6 +761,7 @@ def load_model_optimizer_gradient_averager(
             self.config.neuron.local_batch_size_train_effective,
             self.tokenizer,
             self.device,
+            # parameters_list,
         )
 
         if (
@@ -632,8 +776,6 @@ def load_model_optimizer_gradient_averager(
                     + [str(get_min_local_inner_Step(self, model_name, epoch=epoch))]
                 ),
             )
-
-    self.scaler = torch.amp.GradScaler(enabled=True)
 
     self.logger.info(
         f"CPU Memory After Loading State {psutil.virtual_memory().available / 10**9} GB"
@@ -697,9 +839,10 @@ def load_state_from_peer(
                         raise Exception(
                             f"Failed to load model after {MAX_ATTEMPTS} attempts: {str(e)}"
                         )
-                    self.logger.warning(
+                    self.logger.info(
                         f"Failed to load model, retrying. Attempt {attempt}/{MAX_ATTEMPTS}. Error {str(e)}"
                     )
+                    self.logger.info(e)
 
             state_loaded = True
 
@@ -713,21 +856,21 @@ def load_state_from_peer(
             self.local_progress.samples_accumulated = 0
             self.logger.info(f"New Model Tag: {self.global_progress.epoch}")
 
-            # Clean up old cache
-            try:
-                cleanup_old_cache(self, repo_id, revision)
-            except Exception as e:
-                self.logger.warning(f"Failed to cleanup cache: {str(e)}")
+            # # Clean up old cache
+            # try:
+            #     cleanup_old_cache(self, repo_id, revision)
+            # except Exception as e:
+            #     self.logger.warning(f"Failed to cleanup cache: {str(e)}")
 
-            if repo_id != self.config.neuron.global_model_name:
-                try:
-                    cleanup_old_cache(
-                        self,
-                        self.config.neuron.global_model_name,
-                        current_revision=None,
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Failed to cleanup cache: {str(e)}")
+            # if repo_id != self.config.neuron.global_model_name:
+            #     try:
+            #         cleanup_old_cache(
+            #             self,
+            #             self.config.neuron.global_model_name,
+            #             current_revision=None,
+            #         )
+            #     except Exception as e:
+            #         self.logger.warning(f"Failed to cleanup cache: {str(e)}")
 
         else:
             self.logger.debug(f"Model With Tag: {epoch} Does Not Exist")

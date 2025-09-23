@@ -227,17 +227,20 @@ class DatasetLoader(SubsetLoader):
         offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100
     ):
         configs_data = await DatasetLoader.fetch_dataset_configs()
+        keys = sorted(configs_data.keys())
         rng = np.random.default_rng(
             hash(seed) & 0xFFFFFFFF
         )  # Create a generator with a seed
         rng.bit_generator.advance(offset)  # Efficiently skip ahead `n` steps
         result = []
         for _ in range(n_pages):
+            idx = rng.integers(0, len(keys))
+            cfg = keys[idx]
             config = rng.choice(list(configs_data.keys()))
             choice = rng.integers(
-                0, configs_data[config]["num_rows"] - 1 - num_rows_per_page
+                0, configs_data[cfg]["num_rows"] - 1 - num_rows_per_page
             )
-            result.append((str(config), int(choice), configs_data[config]["split"]))
+            result.append((cfg, int(choice), configs_data[cfg]["split"]))
         return result
 
     def __init__(
@@ -383,12 +386,12 @@ class DatasetLoader(SubsetLoader):
                 # Handle HTTP client errors with a retry mechanism
                 attempt += 1
                 if attempt < retry_limit:
-                    self.logger.info(
-                        f"Retrying page {page} due to error: {e}. Attempt {attempt} of {retry_limit}"
-                    )
-                    self.logger.info(
-                        f"Waiting {self.retry_delay * attempt} seconds before retrying..."
-                    )
+                    # self.logger.info(
+                    #     f"Retrying page {page} due to error: {e}. Attempt {attempt} of {retry_limit}"
+                    # )
+                    # self.logger.info(
+                    #     f"Waiting {self.retry_delay * attempt} seconds before retrying..."
+                    # )
                     await asyncio.sleep(
                         self.retry_delay * attempt
                     )  # Wait before retrying

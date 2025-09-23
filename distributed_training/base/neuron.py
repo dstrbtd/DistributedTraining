@@ -16,7 +16,6 @@
 # DEALINGS IN THE SOFTWARE.
 
 import copy
-import typing
 from abc import ABC, abstractmethod
 
 import bittensor as bt
@@ -26,6 +25,9 @@ from distributed_training import __spec_version__ as spec_version
 # Sync calls set weights and also resyncs the metagraph.
 from distributed_training.utils.config import add_args, check_config, config
 from distributed_training.utils.misc import ttl_get_block
+
+import torch, torch.distributed as dist
+import datetime as dt
 
 
 class BaseNeuron(ABC):
@@ -79,26 +81,54 @@ class BaseNeuron(ABC):
         # These are core Bittensor classes to interact with the network.
         self.logger.info("Setting up bittensor objects.")
 
-        # The wallet holds the cryptographic key pairs for the miner.
-        self.wallet = bt.wallet(config=self.config)
-        self.logger.info(f"Wallet: {self.wallet}")
+        if True:
+            # if self.master:
+            # The wallet holds the cryptographic key pairs for the miner.
+            self.wallet = bt.wallet(config=self.config)
+            self.logger.info(f"Wallet: {self.wallet}")
 
-        # The subtensor is our connection to the Bittensor blockchain.
-        self.subtensor = bt.subtensor(config=self.config)
-        self.logger.info(f"Subtensor: {self.subtensor}")
+        if not dist.is_initialized():
+            if not dist.is_initialized():
+                dist.init_process_group(
+                    backend="nccl",
+                    init_method="tcp://127.0.0.1:29500",
+                    rank=self.local_rank,
+                    world_size=self.world_size,
+                    timeout=dt.timedelta(seconds=120),
+                )
+            if not hasattr(self, "gloo_group"):
+                self.gloo_group = dist.new_group(
+                    backend="gloo",
+                )
 
-        # The metagraph holds the state of the network, letting us know about other validators and miners.
-        self.metagraph = self.subtensor.metagraph(self.config.netuid)
-        self.logger.info(f"Metagraph: {self.metagraph}")
+        if True:
+            # if self.master:
+            # The subtensor is our connection to the Bittensor blockchain.
+            self.subtensor = bt.subtensor(config=self.config)
+            self.logger.info(f"Subtensor: {self.subtensor}")
 
-        # Check if the miner is registered on the Bittensor network before proceeding further.
-        self.check_registered()
+            # The metagraph holds the state of the network, letting us know about other validators and miners.
+            self.metagraph = self.subtensor.metagraph(self.config.netuid)
+            self.logger.info(f"Metagraph: {self.metagraph}")
 
-        # Each miner gets a unique identity (UID) in the network for differentiation.
-        self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
-        self.logger.info(
-            f"Running neuron on subnet: {self.config.netuid} with uid {self.uid} using network: {self.subtensor.chain_endpoint}"
-        )
+            # Check if the miner is registered on the Bittensor network before proceeding further.
+            self.check_registered()
+
+            # Each miner gets a unique identity (UID) in the network for differentiation.
+            self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+            self.uid = 2
+            self.logger.info(
+                f"Running neuron on subnet: {self.config.netuid} with uid {self.uid} using network: {self.subtensor.chain_endpoint}"
+            )
+        else:
+            self.uid = 0
+
+        sync = torch.tensor([self.uid], device="cpu")
+        dist.barrier(group=self.gloo_group)
+        dist.broadcast(sync, src=0, group=self.gloo_group)
+        dist.barrier(group=self.gloo_group)
+        self.uid = sync[0].item()
+
         self.step = 0
 
         # Initialize the all_reduce, download and upload variables.
@@ -121,21 +151,23 @@ class BaseNeuron(ABC):
         """
         Wrapper for synchronizing the state of the network for the given miner or validator.
         """
-        # Ensure miner or validator hotkey is still registered on the network.
-        self.check_registered()
+        if True:
+            # if self.master:
+            # Ensure miner or validator hotkey is still registered on the network.
+            # self.check_registered()
 
-        if self.should_sync_metagraph():
-            self.resync_metagraph()
+            if self.should_sync_metagraph():
+                self.resync_metagraph()
 
-        if self.should_set_weights():
-            self.logger.info("Should Set Weights")
-            self.set_weights()
+            if self.should_set_weights():
+                self.logger.info("Should Set Weights")
+                self.set_weights()
 
-        if self.should_sync_metagraph():
-            self.metagraph.last_update[self.uid] = self.block
+            if self.should_sync_metagraph():
+                self.metagraph.last_update[self.uid] = self.block
 
-        if (self.step != 0) and (self.neuron_type != "MinerNeuron"):
-            self.save_state()
+            if (self.step != 0) and (self.neuron_type != "MinerNeuron"):
+                self.save_state()
 
     def check_registered(self):
         # --- Check for registration.

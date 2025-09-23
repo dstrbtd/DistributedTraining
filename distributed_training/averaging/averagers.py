@@ -46,9 +46,6 @@ import torch.distributed.rpc as rpc
 
 # global_model = self.model  # define at module level
 
-# from distributed_training.utils.shard_rpc import get_param_shard
-import distributed_training.utils.shard_rpc as srd
-import distributed_training.utils.shard_rpc_2 as srd2
 from typing import (
     Any,
     Callable,
