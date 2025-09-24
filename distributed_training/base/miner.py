@@ -126,61 +126,55 @@ class BaseMinerNeuron(BaseNeuron):
             self.logger.info("start run barrier end")
 
             while not self.should_exit:
-                while not self.stop_event.is_set() and (
-                    not self.reload_state_event.is_set()
-                ):
-                    try:
-                        if self.master:
-                            if self.peer_id_logged_to_chain is False:
-                                log_peerid_to_chain(self)
+                try:
+                    if self.master:
+                        if self.peer_id_logged_to_chain is False:
+                            log_peerid_to_chain(self)
 
-                            if not self.config.neuron.dont_wandb_log:
-                                if self.event != {}:
-                                    self.event.update(self.get_miner_info())
-                                    try:
-                                        self.bandwidth = get_bandwidth()
-                                        self.event.update(self.bandwidth)
-                                    except Exception:
-                                        self.logger.debug(
-                                            "Error getting bandwidth metrics"
-                                        )
-                                    if self.master:
-                                        self.wandb.log(self.event)
-                                    self.event = {}
+                        if not self.config.neuron.dont_wandb_log:
+                            if self.event != {}:
+                                self.event.update(self.get_miner_info())
+                                try:
+                                    self.bandwidth = get_bandwidth()
+                                    self.event.update(self.bandwidth)
+                                except Exception:
+                                    self.logger.debug("Error getting bandwidth metrics")
+                                if self.master:
+                                    self.wandb.log(self.event)
+                                self.event = {}
 
-                        self.logger.info(
-                            "self.training_active.set()",
-                            self.training_active.is_set(),
-                            "pre dataset",
-                        )
-                        # Wait if training is paused
-                        self.training_active.wait()
+                    self.logger.info(
+                        "self.training_active.set()",
+                        self.training_active.is_set(),
+                        "pre dataset",
+                    )
+                    # Wait if training is paused
+                    self.training_active.wait()
 
-                        self.logger.debug(":pages: Fetching fineweb-edu pages")
-                        dataset = self.training_loop.run_until_complete(
-                            self.fetch_training_data()
-                        )
+                    self.logger.debug(":pages: Fetching fineweb-edu pages")
+                    dataset = self.training_loop.run_until_complete(
+                        self.fetch_training_data()
+                    )
 
-                        # Wait if training is paused
-                        self.logger.info(
-                            "self.training_active.wait()",
-                            self.training_active.is_set(),
-                            "post dataset",
-                        )
-                        self.training_active.wait()
+                    # Wait if training is paused
+                    self.logger.info(
+                        "self.training_active.wait()",
+                        self.training_active.is_set(),
+                        "post dataset",
+                    )
+                    self.training_active.wait()
 
-                        self.model.config.block_list.append(self.current_block)
-                        self._process_training_batch(dataset)
+                    self.model.config.block_list.append(self.current_block)
+                    self._process_training_batch(dataset)
 
-                    except Exception as e:
-                        self.logger.warning(f"Training Loop Failed with error: {e}")
-                        self.training_status = TrainingStatus.ERROR
-                        self.training_error = str(e)
-                        break
-
-                self.training_status = TrainingStatus.STOPPED
+                except Exception as e:
+                    self.logger.warning(f"Training Loop Failed with error: {e}")
+                    self.training_status = TrainingStatus.ERROR
+                    self.training_error = str(e)
+                    break
 
             # Await the training task to ensure it completes before exiting
+            self.training_status = TrainingStatus.STOPPED
 
         # If someone intentionally stops the miner, it'll safely terminate operations.
         except KeyboardInterrupt:

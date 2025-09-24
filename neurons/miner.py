@@ -112,6 +112,16 @@ from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_di
 
 import torch.distributed as dist
 
+import faulthandler, signal
+
+faulthandler.register(signal.SIGUSR1)
+import datetime
+import os
+
+# os.environ['NCCL_ASYNC_ERROR_HANDLING']="1"
+# os.environ['NCCL_DEBUG']="INFO"
+# os.environ['TORCH_DISTRIBUTED_DEBUG']="INFO"
+
 
 def cuda_mem(logger, tag):
     torch.cuda.synchronize()
@@ -156,10 +166,6 @@ class Miner(BaseMinerNeuron):
         """Background thread on every rank; only sets a local flag on rank 0."""
         self.reload_state_event = threading.Event()
         while not self.stop_event.is_set():
-            # if True:
-            #     time.sleep(10)
-            #     continue
-            # elif not self.all_reduce_success_status:
             if not self.all_reduce_success_status:
                 wait_time = (
                     self.allreduce_timeout
@@ -213,9 +219,7 @@ class Miner(BaseMinerNeuron):
 
         if sync.item() == 0:
             return  # nothing to do
-
-        # Clear rank-0 flag so we don’t loop.
-        if self.local_rank == 0:
+        else:
             self.reload_state_event.clear()
 
         # Reload on ALL ranks (simplest + avoids param rebroadcast complexities).
@@ -254,9 +258,9 @@ class Miner(BaseMinerNeuron):
                 self.load_state(reset_last_allreduce_block=False)
 
         # self.load_state(reset_last_allreduce_block=False)
-        if (
-            self.local_progress.epoch == 0 and self.local_progress.inner_step > 410
-        ) or (self.local_progress.epoch != 0 and self.local_progress.inner_step > 10):
+        if (self.local_progress.epoch == 0 and self.local_progress.inner_step > 12) or (
+            self.local_progress.epoch != 0 and self.local_progress.inner_step > 10
+        ):
             self.loop.run_until_complete(
                 self.all_reduce(
                     distributed_training.protocol.AllReduce(
@@ -269,7 +273,6 @@ class Miner(BaseMinerNeuron):
     def _process_training_batch(self, dataset):
         """Process a single training batch"""
         for i, batch in enumerate(dataset):
-            self.logger.info(i)
             inputs, _ = batch
             # TODO Can this be re-inrtoduced without hanging Rank1
             # if not self.training_active.is_set():
@@ -325,16 +328,13 @@ class Miner(BaseMinerNeuron):
                     self.logger.info("start_background_upload compeleted")
 
     def inner_optimizer_step(self):
-        # self.logger.info("INNER OPT START")
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-        self.logger.info("CLIPPING")
-        self.inner_optimizer.step()
-        # self.logger.info("OPT STEP")
 
-        # self.inner_optimizer.zero_grad(set_to_none = True)
+        self.inner_optimizer.step()
+
+        self.inner_optimizer.zero_grad(set_to_none=True)
 
         self.scheduler.step()
-        # self.logger.info("SCHEDULER STEP")
 
         self.local_progress.inner_step += 1
 
@@ -519,11 +519,9 @@ class Miner(BaseMinerNeuron):
             else 0
         )
         is_uploading = torch.tensor([uploading], device="cpu")
-        self.logger.info("is_uploading before", is_uploading)
         dist.barrier(group=self.gloo_group)
         dist.broadcast(is_uploading, src=0, group=self.gloo_group)
         dist.barrier(group=self.gloo_group)
-        self.logger.info("is_uploading after", is_uploading)
 
         if is_uploading.item() == 1:
             self.logger.info("Previous upload still in progress, skipping new upload")
@@ -907,12 +905,9 @@ class Miner(BaseMinerNeuron):
 
     def _load_model(self):
         # Load model and components
-        load_model_optimizer_gradient_averager(
+        load_state_from_peer(
             self, self.config.neuron.local_model_name, self.local_progress.epoch
         )
-        # load_model_optimizer_gradient_averager(
-        #     self, self.config.neuron.global_model_name, self.local_progress.epoch
-        # )
         self.model.config.block_list = []
         # cleanup_old_cache(self, repo_id=self.config.neuron.local_model_name)
 
@@ -1365,10 +1360,10 @@ class Miner(BaseMinerNeuron):
                         initial_weights, self.current_block
                     )
 
-                    self.logger.info(
-                        f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
-                    )
-                    # self.avg_handler.update_main_param_after_outer_step()
+                self.logger.info(
+                    f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
+                )
+                # self.avg_handler.update_main_param_after_outer_step()
                 dist.barrier(group=self.gloo_group)
 
                 # Reset inner_step and update epoch

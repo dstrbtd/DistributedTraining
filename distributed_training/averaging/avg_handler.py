@@ -434,9 +434,9 @@ class AveragingHandler:
                 initial_weights = self._get_weights_sample()
                 bt.logging.info(f"Initial Weights Sample: {initial_weights}")
 
-                bt.logging.info(
-                    f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
-                )
+                # bt.logging.info(
+                #     f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
+                # )
 
                 # Perform offloaded outer optimization steps
                 # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)

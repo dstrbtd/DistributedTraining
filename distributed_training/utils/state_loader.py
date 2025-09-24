@@ -391,7 +391,6 @@ def load_model_optimizer_gradient_averager(
     reload_inner_optimizer=True,
     reload_outer_optimizer=True,
     revision=None,
-    use_fallback_model=True,
     reset_block_list=True,
 ):
     """
@@ -404,20 +403,23 @@ def load_model_optimizer_gradient_averager(
         f"CPU Memory Before Loading State {psutil.virtual_memory().available / 10**9} GB"
     )
     global_model_name = self.config.neuron.global_model_name
-    self.global_model_config = AutoConfig.from_pretrained(
-        global_model_name, trust_remote_code=False
-    )
-    if use_fallback_model:
-        model_name_list = [local_model_name, global_model_name]
-    else:
-        model_name_list = [local_model_name]
 
     if (revision is None) and (local_model_name != global_model_name):
         revision = f"{__run__}.{epoch}.{self.local_progress.inner_step}"
     elif (revision is None) and (local_model_name == global_model_name):
         revision = f"{__run__}.{epoch}.0"
 
-    # # Delete Gradient and State Averagers
+    # # Delete existing outer optimizer
+    # if hasattr(self, "outer_optimizer"):
+    #     for group in self.outer_optimizer.param_groups:
+    #         group["params"].clear()
+    #     self.outer_optimizer.state.clear()
+    #     del self.outer_optimizer
+    #     gc.collect()
+    #     torch.cuda.synchronize()
+    #     torch.cuda.empty_cache()
+
+    # # Delete existing gradient averager
     # if hasattr(self, "grad_averager"):
     #     self.grad_averager.shutdown()
     #     while self.grad_averager.is_alive():
@@ -431,16 +433,16 @@ def load_model_optimizer_gradient_averager(
     #     torch.cuda.synchronize()
     #     torch.cuda.empty_cache()
 
-    # # Delete existing averag handler
-    # if hasattr(self, "avg_handler"):
-    #     del self.avg_handler.model
-    #     del self.avg_handler.inner_optimizer
-    #     del self.avg_handler.grad_averager
-    #     del self.avg_handler
-    #     gc.collect()
-    #     torch.cuda.synchronize()
-    #     torch.cuda.empty_cache()
-    #     self.logger.info("Deleted Average Handler")
+    # Delete existing average handler
+    if hasattr(self, "avg_handler"):
+        del self.avg_handler.model
+        del self.avg_handler.inner_optimizer
+        del self.avg_handler.grad_averager
+        del self.avg_handler
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        self.logger.info("Deleted Average Handler")
 
     if hasattr(self, "inner_optimizer"):
         for group in self.inner_optimizer.param_groups:
@@ -462,254 +464,219 @@ def load_model_optimizer_gradient_averager(
     #     torch.cuda.empty_cache()
 
     loading_success = 0
-    for model_name in model_name_list:
-        optimizer_state = None
-        # Load Model & Inner Optimizer
-        try:
-            if model_name == global_model_name:
-                revision = ".".join(revision.split(".")[:-1] + ["0"])
+    optimizer_state = None
+    # Load Model & Inner Optimizer
+    try:
+        if local_model_name == global_model_name:
+            revision = ".".join(revision.split(".")[:-1] + ["0"])
 
-            if not check_model_exists(
-                self,
-                model_name,
+        if not check_model_exists(
+            self,
+            local_model_name,
+            revision=revision,
+        ):
+            raise Exception(f"Failed to load model. Check model exists failed.")
+
+        if not hasattr(self, "model"):
+            self.model = AutoModelForCausalLM.from_pretrained(
+                local_model_name,
                 revision=revision,
-            ):
-                continue
-
-            if not hasattr(self, "model"):
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    model_name,
-                    revision=revision,
-                    trust_remote_code=False,
-                )
-
-                need_full_state = self.master and not hasattr(self, "outer_optimizer")
-                if need_full_state:
-                    full_state = {
-                        k: v.cpu() for k, v in self.model.state_dict().items()
-                    }
-
-                mp_policy = MixedPrecisionPolicy(
-                    param_dtype=torch.bfloat16,  # match your autocast compute dtype
-                    reduce_dtype=torch.bfloat16,
-                    output_dtype=torch.bfloat16,  # required by FSDP2 policy
-                )
-
-                # Build a 1D device mesh over all ranks
-                self.mesh = DeviceMesh("cuda", list(range(dist.get_world_size())))
-
-                # Keep a plain HF module and enable FSDP2 on it
-                fully_shard(self.model, mesh=self.mesh, mp_policy=mp_policy)
-            else:
-                if self.master:
-                    model_state = torch.load(
-                        hf_hub_download(
-                            repo_id=model_name,
-                            filename="pytorch_model.bin",
-                            revision=revision,
-                        ),
-                        weights_only=True,
-                        map_location="cpu",
-                    )
-                else:
-                    model_state = None
-
-                objs = [model_state]
-                dist.broadcast_object_list(objs, src=0, group=self.gloo_group)
-                m_blob = objs[0]
-                self.logger.info("Downloaded Model State")
-                opts = StateDictOptions(
-                    full_state_dict=True, cpu_offload=True, broadcast_from_rank0=False
-                )
-                dist.barrier()
-                set_model_state_dict(self.model, m_blob, options=opts)
-
-                need_full_state = not hasattr(self, "outer_optimizer")
-                self.logger.info("Full state start")
-                if need_full_state:
-                    opts = StateDictOptions(
-                        full_state_dict=True,  # gather a full (HF-style) state dict
-                        cpu_offload=True,  # offload to host RAM (no GPU OOM)
-                    )
-                    full_state = m_blob
-                del objs, model_state, m_blob
-
-            self.logger.info(
-                f"Successfully Loaded Model From {model_name} With Revision {revision}"
+                trust_remote_code=False,
             )
 
-            # Move model to device
-            self.model.config.block_list = []
-            self.local_progress.inner_step = (
-                self.model.config.inner_step
-                if "inner_step" in self.model.config.__dict__
-                else 0
+            need_full_state = self.master and not hasattr(self, "outer_optimizer")
+            if need_full_state:
+                full_state = {k: v.cpu() for k, v in self.model.state_dict().items()}
+
+            mp_policy = MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,  # match your autocast compute dtype
+                reduce_dtype=torch.bfloat16,
+                output_dtype=torch.bfloat16,  # required by FSDP2 policy
             )
-            if (model_name == global_model_name) and (
-                epoch == self.global_progress.epoch
-            ):
-                self.allreduce_status_dict = (
-                    self.model.config.all_reduce_scores
-                    if "all_reduce_scores" in self.model.config.__dict__
-                    else {}
-                )
-            # if reload_inner_optimizer and not hasattr(self, "inner_optimizer"):
-            if reload_inner_optimizer:
-                if not hasattr(self, "inner_optimizer"):
-                    self.inner_optimizer = torch.optim.AdamW(
-                        self.model.parameters(),
-                        lr=self.learning_rate_maximum,
-                        betas=(0.9, 0.95),
-                        weight_decay=0.1,
-                    )
 
-                    self.logger.info(f"Loaded Inner Optimizer")
+            # Build a 1D device mesh over all ranks
+            self.mesh = DeviceMesh("cuda", list(range(dist.get_world_size())))
 
-                    self.scheduler = get_cosine_schedule_with_warmup(
-                        self.inner_optimizer,
-                        num_warmup_steps=1000,
-                        num_training_steps=88000,
-                    )
-
-                optimizer_state = torch.load(
+            # Keep a plain HF module and enable FSDP2 on it
+            fully_shard(self.model, mesh=self.mesh, mp_policy=mp_policy)
+        else:
+            if self.master:
+                model_state = torch.load(
                     hf_hub_download(
-                        repo_id=model_name,
-                        filename=f"inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
+                        repo_id=local_model_name,
+                        filename="pytorch_model.bin",
                         revision=revision,
                     ),
                     weights_only=True,
                     map_location="cpu",
                 )
-
-                opts = StateDictOptions(full_state_dict=False, cpu_offload=True)
-
-                # `optim_sd` is the dict loaded from HF
-                self.logger.info(
-                    f"[r{dist.get_rank()}] before set_optimizer_state_dict (NCCL) {opts}"
-                )
-                set_optimizer_state_dict(
-                    model=self.model,
-                    optimizers=self.inner_optimizer,
-                    optim_state_dict=optimizer_state["optimizer_state_dict"],
-                    options=opts,
-                )
-                self.logger.info(
-                    f"[r{dist.get_rank()}] after set_optimizer_state_dict (NCCL)"
-                )
-
-                if "scheduler_state" in optimizer_state:
-                    self.scheduler.load_state_dict(optimizer_state["scheduler_state"])
-
-                self.logger.info(
-                    f"Successfully Loaded Inner Optimizer State From {model_name} For Revision {revision}"
-                )
-                loading_success = 1
-
-                break
-
-        except Exception as e:
-            loading_success = 0
-            if model_name == model_name_list[-1]:
-                raise Exception(f"Failed to load model despite repo existing: {str(e)}")
             else:
-                self.logger.info(
-                    f"Failed to load model despite repo existing: {str(e)}"
+                model_state = None
+
+            objs = [model_state]
+            dist.broadcast_object_list(objs, src=0, group=self.gloo_group)
+            m_blob = objs[0]
+            self.logger.info("Downloaded Model State")
+            opts = StateDictOptions(
+                full_state_dict=True, cpu_offload=True, broadcast_from_rank0=False
+            )
+            dist.barrier()
+            set_model_state_dict(self.model, m_blob, options=opts)
+
+            need_full_state = not hasattr(self, "outer_optimizer")
+            self.logger.info("Full state start")
+            if need_full_state:
+                opts = StateDictOptions(
+                    full_state_dict=True,  # gather a full (HF-style) state dict
+                    cpu_offload=True,  # offload to host RAM (no GPU OOM)
                 )
+                full_state = m_blob
+            del objs, model_state, m_blob
 
-        finally:
-            loading_sync = torch.tensor([loading_success], device="cpu")
-            self.logger.info("before", loading_sync[0].item())
-            dist.all_reduce(loading_sync, group=self.gloo_group)
-            self.logger.info("after", loading_sync[0].item())
-            self.logger.info("after type", type(loading_sync[0].item()))
-            self.logger.info("world_size", self.world_size)
-            self.logger.info("world_size_type", type(self.world_size))
-            if loading_sync[0].item() != self.world_size:
-                self.logger.info(
-                    f"Failed to load model despite repo existing. Cleaning up failed model load"
-                )
-                if hasattr(self, "model"):
-                    try:
-                        self.model._reset_lazy_init()
-                    except Exception:
-                        pass
-                    del self.model
-
-                # if hasattr(self, "inner_optimizer"):
-                #     for group in self.inner_optimizer.param_groups:
-                #         group["params"].clear()
-                #     self.inner_optimizer.state.clear()
-                #     del self.inner_optimizer
-                #     gc.collect()
-                #     torch.cuda.synchronize()
-                #     torch.cuda.empty_cache()
-
-                gc.collect()
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
-                continue
-
-            if isinstance(optimizer_state, dict):
-                keys = list(optimizer_state.keys())
-                for k in keys:
-                    del optimizer_state[k]
-                    gc.collect()
-            del optimizer_state
-            gc.collect()
-            torch.cuda.empty_cache()
-
-    if self.master and not hasattr(self, "outer_optimizer"):
-        # Set outer optimizer
-        optimizer = partial(torch.optim.SGD, lr=1, momentum=0.9, nesterov=True)
-
-        # param_groups, main_parameters, parameter_names = check_params(optimizer, self.model.parameters(), None)
-        param_groups, main_parameters, parameter_names = check_params(
-            optimizer, full_state.values(), None
+        self.logger.info(
+            f"Successfully Loaded Model From {local_model_name} With Revision {revision}"
         )
-        self.logger.info("Check Params")
 
-        del full_state
+        # Move model to device
+        self.model.config.block_list = []
+        self.local_progress.inner_step = (
+            self.model.config.inner_step
+            if "inner_step" in self.model.config.__dict__
+            else 0
+        )
+        if (local_model_name == global_model_name) and (
+            epoch == self.global_progress.epoch
+        ):
+            self.allreduce_status_dict = (
+                self.model.config.all_reduce_scores
+                if "all_reduce_scores" in self.model.config.__dict__
+                else {}
+            )
+        # if reload_inner_optimizer and not hasattr(self, "inner_optimizer"):
+        if reload_inner_optimizer:
+            if not hasattr(self, "inner_optimizer"):
+                self.inner_optimizer = torch.optim.AdamW(
+                    self.model.parameters(),
+                    lr=self.learning_rate_maximum,
+                    betas=(0.9, 0.95),
+                    weight_decay=0.1,
+                )
+
+                self.logger.info(f"Loaded Inner Optimizer")
+
+                self.scheduler = get_cosine_schedule_with_warmup(
+                    self.inner_optimizer,
+                    num_warmup_steps=1000,
+                    num_training_steps=88000,
+                )
+
+            optimizer_state = torch.load(
+                hf_hub_download(
+                    repo_id=local_model_name,
+                    filename=f"inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
+                    revision=revision,
+                ),
+                weights_only=True,
+                map_location="cpu",
+            )
+
+            opts = StateDictOptions(full_state_dict=False, cpu_offload=True)
+
+            # `optim_sd` is the dict loaded from HF
+            self.logger.info(
+                f"[r{dist.get_rank()}] before set_optimizer_state_dict (NCCL) {opts}"
+            )
+            set_optimizer_state_dict(
+                model=self.model,
+                optimizers=self.inner_optimizer,
+                optim_state_dict=optimizer_state["optimizer_state_dict"],
+                options=opts,
+            )
+            self.logger.info(
+                f"[r{dist.get_rank()}] after set_optimizer_state_dict (NCCL)"
+            )
+
+            if "scheduler_state" in optimizer_state:
+                self.scheduler.load_state_dict(optimizer_state["scheduler_state"])
+
+            self.logger.info(
+                f"Successfully Loaded Inner Optimizer State From {local_model_name} For Revision {revision}"
+            )
+            loading_success = 1
+
+    except Exception as e:
+        loading_success = 0
+        if local_model_name == global_model_name:
+            raise Exception(f"Failed to load model despite repo existing: {str(e)}")
+        else:
+            self.logger.info(f"Failed to load model despite repo existing: {str(e)}")
+
+    finally:
+        if isinstance(optimizer_state, dict):
+            keys = list(optimizer_state.keys())
+            for k in keys:
+                del optimizer_state[k]
+                gc.collect()
+        del optimizer_state
         gc.collect()
-        torch.cuda.synchronize()
         torch.cuda.empty_cache()
 
-        self.status_loglevel = logging.DEBUG
-        self.offload_optimizer = True
-        self.custom_gradients = True
-        self.reuse_tensors = True
-        self.delta_rule_averaging = False
-        self._old_tensors: Optional[Sequence[torch.Tensor]] = None  # for delta rule
-        scheduler = None
-        initialize_optimizer = True
+    if self.master:
+        if not hasattr(self, "outer_optimizer"):
+            # Set outer optimizer
+            optimizer = partial(torch.optim.SGD, lr=1, momentum=0.9, nesterov=True)
 
-        self.main_parameters, self.parameter_names = main_parameters, parameter_names
+            # param_groups, main_parameters, parameter_names = check_params(optimizer, self.model.parameters(), None)
+            param_groups, main_parameters, parameter_names = check_params(
+                optimizer, full_state.values(), None
+            )
+            self.logger.info("Check Params")
 
-        self.outer_optimizer, _ = init_components(
-            self,
-            main_parameters,
-            param_groups,
-            optimizer,
-            scheduler,
-            initialize_optimizer,
-        )
-        self.logger.info("Init Components")
+            del full_state
+            gc.collect()
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
 
-        # Load a new gradient averager
-        self.grad_averager = DTGradAverager(
-            dht=self.dht,
-            main_parameters=main_parameters,
-            offloaded_optimizer=self.outer_optimizer,
-            prefix=f"{self.config.neuron.run_id}_grad_averager",
-            min_group_size=self.config.neuron.min_group_size,
-            min_matchmaking_time=30.0,
-            request_timeout=10.0,
-            next_chunk_timeout=45.0,
-            allreduce_timeout=self.allreduce_timeout - 30.0 - 15.0,
-            local_rank=self.local_rank,
-            world_size=self.world_size,
-            start=True,
-        )
-        self.logger.info("Successfully Loaded Gradient Averager")
+            self.status_loglevel = logging.DEBUG
+            self.offload_optimizer = True
+            self.custom_gradients = True
+            self.reuse_tensors = True
+            self.delta_rule_averaging = False
+            self._old_tensors: Optional[Sequence[torch.Tensor]] = None  # for delta rule
+            scheduler = None
+            initialize_optimizer = True
+
+            self.main_parameters, self.parameter_names = (
+                main_parameters,
+                parameter_names,
+            )
+
+            self.outer_optimizer, _ = init_components(
+                self,
+                main_parameters,
+                param_groups,
+                optimizer,
+                scheduler,
+                initialize_optimizer,
+            )
+            self.logger.info("Init Components")
+
+            # Load a new gradient averager
+            self.grad_averager = DTGradAverager(
+                dht=self.dht,
+                main_parameters=main_parameters,
+                offloaded_optimizer=self.outer_optimizer,
+                prefix=f"{self.config.neuron.run_id}_grad_averager",
+                min_group_size=self.config.neuron.min_group_size,
+                min_matchmaking_time=30.0,
+                request_timeout=10.0,
+                next_chunk_timeout=45.0,
+                allreduce_timeout=self.allreduce_timeout - 30.0 - 15.0,
+                local_rank=self.local_rank,
+                world_size=self.world_size,
+                start=True,
+            )
+            self.logger.info("Successfully Loaded Gradient Averager")
 
         if reload_outer_optimizer:
             optimizer_state = None
@@ -733,8 +700,10 @@ def load_model_optimizer_gradient_averager(
                 self.logger.info(
                     f"Successfully Loaded Outer Optimizer State From {global_model_name} For Revision {'.'.join(revision.split('.')[:-1] + ['0'])}"
                 )
+                loading_success = 1
 
             except Exception as e:
+                loading_success = 0
                 self.logger.warning(
                     f"No optimizer state found or failed to load: {str(e)}. Initializing fresh optimizer."
                 )
@@ -770,16 +739,23 @@ def load_model_optimizer_gradient_averager(
             and ("." in revision)
         ):
             self.avg_handler.reset_main_parameters(
-                model_name,
+                local_model_name,
                 revision=".".join(
                     revision.split(".")[:-1]
-                    + [str(get_min_local_inner_Step(self, model_name, epoch=epoch))]
+                    + [
+                        str(
+                            get_min_local_inner_Step(
+                                self, local_model_name, epoch=epoch
+                            )
+                        )
+                    ]
                 ),
             )
 
     self.logger.info(
         f"CPU Memory After Loading State {psutil.virtual_memory().available / 10**9} GB"
     )
+    return loading_success
 
 
 def load_state_from_peer(
@@ -789,7 +765,6 @@ def load_state_from_peer(
     reload_inner_optimizer=True,
     reload_outer_optimizer=True,
     revision=None,
-    use_fallback_model=True,
 ):
     try:
         state_loaded = False
@@ -829,8 +804,31 @@ def load_state_from_peer(
                         reload_inner_optimizer=reload_inner_optimizer,
                         reload_outer_optimizer=reload_outer_optimizer,
                         revision=revision,
-                        use_fallback_model=use_fallback_model,
                     )
+                    loading_success = torch.tensor(
+                        [
+                            load_model_optimizer_gradient_averager(
+                                self,
+                                local_model_name=repo_id,
+                                epoch=epoch,
+                                reload_inner_optimizer=reload_inner_optimizer,
+                                reload_outer_optimizer=reload_outer_optimizer,
+                                revision=revision,
+                            )
+                        ]
+                    )
+                    dist.all_reduce(loading_success, group=self.gloo_group)
+                    if (loading_success[0].item() != self.world_size) and (
+                        repo_id != self.config.neuron.global_model_name
+                    ):
+                        self.logger.info(
+                            "LOAD GLOBAL MODEL",
+                            load_model_optimizer_gradient_averager(
+                                self,
+                                self.config.neuron.global_model_name,
+                                self.local_progress.epoch,
+                            ),
+                        )
                     break
 
                 except Exception as e:
