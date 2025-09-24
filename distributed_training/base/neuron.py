@@ -81,8 +81,7 @@ class BaseNeuron(ABC):
         # These are core Bittensor classes to interact with the network.
         self.logger.info("Setting up bittensor objects.")
 
-        if True:
-            # if self.master:
+        if self.master:
             # The wallet holds the cryptographic key pairs for the miner.
             self.wallet = bt.wallet(config=self.config)
             self.logger.info(f"Wallet: {self.wallet}")
@@ -101,8 +100,7 @@ class BaseNeuron(ABC):
                     backend="gloo",
                 )
 
-        if True:
-            # if self.master:
+        if self.master:
             # The subtensor is our connection to the Bittensor blockchain.
             self.subtensor = bt.subtensor(config=self.config)
             self.logger.info(f"Subtensor: {self.subtensor}")
@@ -151,10 +149,9 @@ class BaseNeuron(ABC):
         """
         Wrapper for synchronizing the state of the network for the given miner or validator.
         """
-        if True:
-            # if self.master:
+        if self.master:
             # Ensure miner or validator hotkey is still registered on the network.
-            # self.check_registered()
+            self.check_registered()
 
             if self.should_sync_metagraph():
                 self.resync_metagraph()

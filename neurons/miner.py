@@ -143,28 +143,50 @@ class Miner(BaseMinerNeuron):
         self._init_basic_components()
         self._init_model_components()
         self._init_network_components()
+
         if self.master:
-            self.starting_block = self.block
+            self.block
         else:
-            self.starting_block = None
-        self.block
+            self.current_block = 0
+
+        current_block_tensor = torch.tensor([self.current_block])
+        dist.broadcast(current_block_tensor, src=0, group=self.gloo_group)
+        self.current_block = current_block_tensor[0].item()
+        self.logger.info(self.current_block)
         self.starting_block = self.current_block
+
         if self.should_sync_model:
             self.start_background_upload(
                 epoch=self.global_progress.epoch,
             )
-        self.reload_state_checker_thread = Thread(
-            target=self.reload_state_watcher, daemon=True
-        )
-        dist.barrier()
-        self.reload_state_checker_thread.start()
+        self.reload_state_event = threading.Event()
+        self.all_reduce_flag = 1
+
         self.loop = asyncio.new_event_loop()
+
         if self.master:
             cuda_mem(self.logger, f"Load 0")
 
+        if self.master:
+            # Serve passes the axon information to the network + netuid we are hosting on.
+            # This will auto-update if the axon port of external ip have changed.
+            self.logger.info(
+                f"Serving miner axon {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid} and port: {self.axon.port}"
+            )
+            self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
+
+            # Start  starts the miner's axon, making it active on the network.
+            self.axon.start()
+            self.logger.info(f"Miner starting at block: {self.block}")
+
+        if self.master:
+            self.reload_state_checker_thread = Thread(
+                target=self.reload_state_watcher, daemon=True
+            )
+            self.reload_state_checker_thread.start()
+
     def reload_state_watcher(self):
         """Background thread on every rank; only sets a local flag on rank 0."""
-        self.reload_state_event = threading.Event()
         while not self.stop_event.is_set():
             if not self.all_reduce_success_status:
                 wait_time = (
@@ -218,6 +240,12 @@ class Miner(BaseMinerNeuron):
         dist.barrier(group=self.gloo_group)
 
         if sync.item() == 0:
+            dist.broadcast(
+                torch.tensor([self.all_reduce_flag], device="cpu"),
+                src=0,
+                group=self.gloo_group,
+            )
+            dist.barrier(group=self.gloo_group)
             return  # nothing to do
         else:
             self.reload_state_event.clear()
@@ -605,7 +633,11 @@ class Miner(BaseMinerNeuron):
         attempt = 0
         while attempt < self.retry_limit:
             try:
-                sync = torch.tensor([self.current_block], device="cpu")
+                sync = (
+                    torch.tensor([self.current_block], device="cpu")
+                    if self.master
+                    else torch.tensor([0], device="cpu")
+                )
                 dist.broadcast(sync, src=0, group=self.gloo_group)
                 self.current_block = sync[0].item()
                 self.logger.info(self.current_block)
@@ -671,43 +703,46 @@ class Miner(BaseMinerNeuron):
         self._init_metrics_collection()
 
     def _init_metrics_collection(self):
-        # Initialize InfluxDB client
-        self.influx_client = None
-        self.influx_write_api = None
-        try:
-            self.logger.info(
-                "Attempting to initialize InfluxDB client for metrics collection..."
-            )
-            self.influx_client = InfluxDBClient(
-                url=self.config.neuron.influxdb_url,
-                token=self.config.neuron.influxdb_token,
-                org=self.config.neuron.influxdb_org,
-            )
-
-            self.influx_write_api = self.influx_client.write_api(
-                write_options=SYNCHRONOUS
-            )
-            self.logger.info("InfluxDB client and write_api initialized successfully.")
-
-            # Create a background thread for periodic metric submission
-            self.metrics_thread = threading.Thread(target=self._report_metrics_loop)
-            self.metrics_thread.daemon = True
-            self.metrics_thread.start()
-            self.logger.info("Metrics tracking thread initialized successfully.")
-
-        except Exception as e:
-            self.logger.error(
-                f"Failed to initialize InfluxDB client: {e}. Metrics collection will be disabled."
-            )
-            if self.influx_client:
-                try:
-                    self.influx_client.close()
-                except Exception as close_e:
-                    self.logger.error(
-                        f"Error closing InfluxDB client during cleanup: {close_e}"
-                    )
+        if self.master:
+            # Initialize InfluxDB client
             self.influx_client = None
             self.influx_write_api = None
+            try:
+                self.logger.info(
+                    "Attempting to initialize InfluxDB client for metrics collection..."
+                )
+                self.influx_client = InfluxDBClient(
+                    url=self.config.neuron.influxdb_url,
+                    token=self.config.neuron.influxdb_token,
+                    org=self.config.neuron.influxdb_org,
+                )
+
+                self.influx_write_api = self.influx_client.write_api(
+                    write_options=SYNCHRONOUS
+                )
+                self.logger.info(
+                    "InfluxDB client and write_api initialized successfully."
+                )
+
+                # Create a background thread for periodic metric submission
+                self.metrics_thread = threading.Thread(target=self._report_metrics_loop)
+                self.metrics_thread.daemon = True
+                self.metrics_thread.start()
+                self.logger.info("Metrics tracking thread initialized successfully.")
+
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to initialize InfluxDB client: {e}. Metrics collection will be disabled."
+                )
+                if self.influx_client:
+                    try:
+                        self.influx_client.close()
+                    except Exception as close_e:
+                        self.logger.error(
+                            f"Error closing InfluxDB client during cleanup: {close_e}"
+                        )
+                self.influx_client = None
+                self.influx_write_api = None
 
     def _report_metrics_loop(self):
         """Periodically send metrics to InfluxDB"""
@@ -961,7 +996,7 @@ class Miner(BaseMinerNeuron):
             self.owned_params = set()
             for n, p in full_state.items():
                 self.owned_params.add(n)
-                self.error_feedback[n] = torch.zeros_like(p, device=self.device)
+                self.error_feedback[n] = torch.zeros_like(p, device="cpu")
                 _, _, xshape, totalk = self.compressor.compress(
                     self.transformer.encode(
                         torch.zeros_like(p), use_dct=self.config.neuron.use_dct
@@ -1266,6 +1301,124 @@ class Miner(BaseMinerNeuron):
         self.training_status = TrainingStatus.STOPPED
 
     async def all_reduce(
+        self, synapse: distributed_training.protocol.AllReduce
+    ) -> distributed_training.protocol.AllReduce:
+        self.all_reduce_flag = 1
+        """Handle incoming all_reduce requests by pausing continuous training"""
+        self.logger.info("Received All Reduce Call")
+        self.all_reduce_start_time = time.perf_counter()
+        initial_weights = None
+        try:
+            async with self.training_lock:
+                # Cancel any ongoing upload
+                if self.current_upload_future and not self.current_upload_future.done():
+                    self.logger.info(
+                        "Cancelling Ongoing Model Upload For AllReduce Operation"
+                    )
+                    self.current_upload_future.cancel()
+
+                # Ensure training is paused
+                self.pause_training()
+
+                # Run inner optimizer step
+                self.inner_optimizer_step()
+
+                bt.logging.info(":wait: Starting Compute Pseudo Gradients")
+                self.compute_and_load_pseudo_grad_into_averager()
+                bt.logging.info(":wait: Finished Compute Pseudo Gradients")
+                # with self.grad_averager.get_tensors() as averaged_grads: print(averaged_grads)
+
+                if self.master:
+                    # Update gradient averager params to latest synapse values
+                    if synapse.min_group_size is not None:
+                        self.grad_averager.matchmaking_kwargs[
+                            "min_group_size"
+                        ] = synapse.min_group_size
+                    if synapse.request_timeout is not None:
+                        self.grad_averager.matchmaking_kwargs[
+                            "request_timeout"
+                        ] = synapse.request_timeout
+                    if synapse.allreduce_timeout is not None:
+                        self.grad_averager._allreduce_timeout = (
+                            synapse.synapse.allreduce_timeout
+                        )
+                    if synapse.next_chunk_timeout is not None:
+                        self.grad_averager.next_chunk_timeout = (
+                            synapse.next_chunk_timeout
+                        )
+                    if synapse.min_matchmaking_time is not None:
+                        self.grad_averager.matchmaking_kwargs[
+                            "min_matchmaking_time"
+                        ] = synapse.min_matchmaking_time
+
+                    try:
+                        self.logger.info("All Reduce Start")
+                        # Run allreduce with proper timeout
+                        (
+                            synapse,
+                            initial_weights,
+                        ) = await self.avg_handler.run_miner_allreduce(
+                            synapse,
+                            self.local_progress,
+                            self.all_reduce_start_time,
+                            self.current_block,
+                            # bandwidth
+                        )
+                        self.logger.info("All Reduce Finish")
+                        if not synapse.completion:
+                            raise Exception("AllReduce Failed, Loading Latest State")
+                    except Exception as e:
+                        self.logger.info(f"All Reduce Failed with error: {e}")
+                        synapse.completion = False
+
+        except Exception as e:
+            synapse.completion = False
+            raise Exception(f"Unexpected error during AllReduce: {str(e)}") from e
+
+        finally:
+            self.all_reduce_flag = 0
+            self.logger.info("Started Barrier")
+            # dist.barrier()
+            dist.barrier(group=self.gloo_group)
+            self.logger.info("Finished Barrier")
+            if (self.master and synapse.completion is True) or (not self.master):
+                self.logger.info(f"Apply opt params")
+                self.apply_optimizer_parameters()
+
+                bt.logging.info(
+                    ":white_heavy_check_mark: Finished Outer Optimizer Step."
+                )
+
+                if self.master:
+                    # Validate weight updates
+                    await self.avg_handler._validate_weight_update(
+                        initial_weights, self.current_block
+                    )
+
+                self.logger.info(
+                    f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
+                )
+                # self.avg_handler.update_main_param_after_outer_step()
+                dist.barrier(group=self.gloo_group)
+
+                # Reset inner_step and update epoch
+                self.local_progress.samples_accumulated = 0
+                self.local_progress.inner_step = 0
+                self.local_progress.epoch += 1
+                self.last_allreduce_block = self.current_block
+                self.logger.info("AllReduce Operation Finished Succesfully")
+                self.start_background_upload(
+                    epoch=self.local_progress.epoch,
+                )
+                # Resume training when done
+                self.resume_training()
+
+            else:
+                self.all_reduce_success_status = False
+
+            return synapse
+
+    async def all_reduce_local(
         self, synapse: distributed_training.protocol.AllReduce
     ) -> distributed_training.protocol.AllReduce:
         """Handle incoming all_reduce requests by pausing continuous training"""

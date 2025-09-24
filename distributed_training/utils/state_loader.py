@@ -606,6 +606,11 @@ def load_model_optimizer_gradient_averager(
 
     except Exception as e:
         loading_success = 0
+        return loading_success
+        self.logger.info(
+            "local_model_name == global_model_name",
+            local_model_name == global_model_name,
+        )
         if local_model_name == global_model_name:
             raise Exception(f"Failed to load model despite repo existing: {str(e)}")
         else:
@@ -703,6 +708,7 @@ def load_model_optimizer_gradient_averager(
                 loading_success = 1
 
             except Exception as e:
+                # TODO might need to remove these
                 loading_success = 0
                 self.logger.warning(
                     f"No optimizer state found or failed to load: {str(e)}. Initializing fresh optimizer."
@@ -797,14 +803,6 @@ def load_state_from_peer(
 
             while attempt < MAX_ATTEMPTS:
                 try:
-                    load_model_optimizer_gradient_averager(
-                        self,
-                        local_model_name=repo_id,
-                        epoch=epoch,
-                        reload_inner_optimizer=reload_inner_optimizer,
-                        reload_outer_optimizer=reload_outer_optimizer,
-                        revision=revision,
-                    )
                     loading_success = torch.tensor(
                         [
                             load_model_optimizer_gradient_averager(
@@ -834,9 +832,17 @@ def load_state_from_peer(
                 except Exception as e:
                     attempt += 1
                     if attempt == MAX_ATTEMPTS:
-                        raise Exception(
-                            f"Failed to load model after {MAX_ATTEMPTS} attempts: {str(e)}"
+                        self.logger.info(
+                            "LOAD GLOBAL MODEL",
+                            load_model_optimizer_gradient_averager(
+                                self,
+                                self.config.neuron.global_model_name,
+                                self.local_progress.epoch,
+                            ),
                         )
+                        # raise Exception(
+                        #     f"Failed to load model after {MAX_ATTEMPTS} attempts: {str(e)}"
+                        # )
                     self.logger.info(
                         f"Failed to load model, retrying. Attempt {attempt}/{MAX_ATTEMPTS}. Error {str(e)}"
                     )

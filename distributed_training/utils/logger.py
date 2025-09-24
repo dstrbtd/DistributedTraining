@@ -49,7 +49,7 @@ class JSONFormatter(logging.Formatter):
     def __init__(self, miner):
         self.network = miner.config.subtensor.network
         self.netuid = miner.config.netuid
-        self.hotkey = miner.wallet.hotkey.ss58_address
+        self.hotkey = miner.wallet.hotkey.ss58_address if miner.master else None
         self.version = __version__
         self.spec_version = __spec_version__
         self.run_id = None
@@ -193,7 +193,7 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
         tags={
             "application": "distributed_training",
             "level": "dynamic",  # Will be overridden dynamically
-            "hotkey": self.wallet.hotkey.ss58_address,
+            "hotkey": self.wallet.hotkey.ss58_address if self.master else None,
             "netuid": str(self.config.netuid),
         },
         auth=("944477", os.getenv("LOKI_KEY")),
