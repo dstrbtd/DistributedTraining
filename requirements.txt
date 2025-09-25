@@ -19,3 +19,4 @@ sentencepiece==0.2.0
 openskill==6.1.3
 muon-optimizer @ git+https://github.com/KellerJordan/Muon@f90a42b28e00b8d9d2d05865fe90d9f39abcbcbd
 rich==14.1.0
+bittensor-cli==9.11.2

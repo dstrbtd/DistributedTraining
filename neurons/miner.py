@@ -160,7 +160,7 @@ class Miner(BaseMinerNeuron):
                 epoch=self.global_progress.epoch,
             )
         self.reload_state_event = threading.Event()
-        self.all_reduce_flag = 1
+        self.all_reduce_flag = 0
 
         self.loop = asyncio.new_event_loop()
 
@@ -203,12 +203,22 @@ class Miner(BaseMinerNeuron):
                 # Check if master validator has failed to all_reduce
                 self.global_progress.epoch = get_global_epoch(self)
                 self.reload_state_event.set()
-            # elif (
-            #     self.local_progress.epoch == 0 and self.local_progress.inner_step > 410
-            # ) or (
-            #     self.local_progress.epoch != 0 and self.local_progress.inner_step > 10
-            # ):
-            #     self.reload_state_event.set()
+            elif (
+                (self.local_progress.epoch == 0 and self.local_progress.inner_step > 12)
+                or (
+                    self.local_progress.epoch != 0
+                    and self.local_progress.inner_step > 10
+                )
+            ) and (self.all_reduce_flag != 1):
+                self.loop.run_until_complete(
+                    self.all_reduce(
+                        distributed_training.protocol.AllReduce(
+                            min_group_size=self.config.neuron.min_group_size,
+                            timeout=420,
+                        )
+                    )
+                )
+                # time.sleep(self.allreduce_timeout+self.upload_state_duration)
             else:
                 # TODO convert 2nd if statement to listener
                 self.sync()
@@ -235,17 +245,12 @@ class Miner(BaseMinerNeuron):
             1 if (self.local_rank == 0 and self.reload_state_event.is_set()) else 0
         )
         sync = torch.tensor([sync_flag], device="cpu")
-        dist.barrier(group=self.gloo_group)
         dist.broadcast(sync, src=0, group=self.gloo_group)
-        dist.barrier(group=self.gloo_group)
 
-        if sync.item() == 0:
-            dist.broadcast(
-                torch.tensor([self.all_reduce_flag], device="cpu"),
-                src=0,
-                group=self.gloo_group,
-            )
-            dist.barrier(group=self.gloo_group)
+        all_reduce_flag_tensor = torch.tensor([self.all_reduce_flag], device="cpu")
+        dist.broadcast(all_reduce_flag_tensor, src=0, group=self.gloo_group)
+
+        if (sync.item() == 0) and (all_reduce_flag_tensor == 0):
             return  # nothing to do
         else:
             self.reload_state_event.clear()
@@ -255,7 +260,15 @@ class Miner(BaseMinerNeuron):
         # which is more invasive.)
         self.logger.info("Sync reload begin")
 
-        if not self.all_reduce_success_status:
+        if all_reduce_flag_tensor == 1:
+            self.loop.run_until_complete(
+                self.all_reduce_local(
+                    distributed_training.protocol.AllReduce(
+                        min_group_size=self.config.neuron.min_group_size, timeout=420
+                    )
+                )
+            )
+        elif not self.all_reduce_success_status:
             if self.local_progress.epoch > self.global_progress.epoch:
                 self.logger.info(
                     f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
@@ -284,19 +297,6 @@ class Miner(BaseMinerNeuron):
             ):
                 self.starting_block = self.current_block
                 self.load_state(reset_last_allreduce_block=False)
-
-        # self.load_state(reset_last_allreduce_block=False)
-        if (self.local_progress.epoch == 0 and self.local_progress.inner_step > 12) or (
-            self.local_progress.epoch != 0 and self.local_progress.inner_step > 10
-        ):
-            self.loop.run_until_complete(
-                self.all_reduce(
-                    distributed_training.protocol.AllReduce(
-                        min_group_size=self.config.neuron.min_group_size, timeout=420
-                    )
-                )
-            )
-        torch.cuda.empty_cache()
 
     def _process_training_batch(self, dataset):
         """Process a single training batch"""
@@ -645,7 +645,7 @@ class Miner(BaseMinerNeuron):
                 pages = await DatasetLoader.next_pages(
                     offset=self.current_block,
                     n_pages=35,
-                    seed=self.uid,
+                    seed=self.uid + self.local_rank,
                 )
                 rng = np.random.default_rng(hash(self.uid) & 0xFFFFFFFF)
                 rng.shuffle(pages)
@@ -658,6 +658,13 @@ class Miner(BaseMinerNeuron):
                     pages_info=pages,
                     tokenizer=self.tokenizer,
                 )
+
+                dataset_length = torch.tensor(len(dataset.buffer))
+                dist.all_reduce(
+                    dataset_length, op=dist.ReduceOp.MIN, group=self.gloo_group
+                )
+                dataset.buffer = dataset.buffer[:dataset_length]
+                self.logger.info("DATASET BUFFER LENGTH", len(dataset.buffer))
 
                 return dataset
             except Exception as e:
@@ -1303,7 +1310,9 @@ class Miner(BaseMinerNeuron):
     async def all_reduce(
         self, synapse: distributed_training.protocol.AllReduce
     ) -> distributed_training.protocol.AllReduce:
+        self.logger.info("Received Main All Reduce Call")
         self.all_reduce_flag = 1
+        return synapse
         """Handle incoming all_reduce requests by pausing continuous training"""
         self.logger.info("Received All Reduce Call")
         self.all_reduce_start_time = time.perf_counter()
@@ -1376,7 +1385,6 @@ class Miner(BaseMinerNeuron):
             raise Exception(f"Unexpected error during AllReduce: {str(e)}") from e
 
         finally:
-            self.all_reduce_flag = 0
             self.logger.info("Started Barrier")
             # dist.barrier()
             dist.barrier(group=self.gloo_group)
@@ -1422,7 +1430,7 @@ class Miner(BaseMinerNeuron):
         self, synapse: distributed_training.protocol.AllReduce
     ) -> distributed_training.protocol.AllReduce:
         """Handle incoming all_reduce requests by pausing continuous training"""
-        self.logger.info("Received All Reduce Call")
+        self.logger.info("Received Local All Reduce Call")
         self.all_reduce_start_time = time.perf_counter()
         initial_weights = None
         try:
@@ -1528,10 +1536,12 @@ class Miner(BaseMinerNeuron):
                 self.start_background_upload(
                     epoch=self.local_progress.epoch,
                 )
+                self.all_reduce_flag = 0
                 # Resume training when done
                 self.resume_training()
 
             else:
+                self.all_reduce_flag = 0
                 self.all_reduce_success_status = False
 
             return synapse

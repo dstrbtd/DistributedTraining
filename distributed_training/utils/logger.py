@@ -212,7 +212,7 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
     loki_handler.emit = dynamic_label_emit
 
     # File handler for Hivemind
-    if os.path.exists(local_logfile):
+    if os.path.exists(local_logfile) and self.master:
         shutil.copyfile(local_logfile, local_logfile.replace(".txt", "_archive.txt"))
         os.remove(local_logfile)
 

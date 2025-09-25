@@ -290,14 +290,17 @@ class DatasetLoader(SubsetLoader):
 
         return self
 
-    async def _fetch(self, page_info: typing.Tuple[str, int, str]):
+    async def _fetch(self, page_info: typing.Tuple[str, int, str], batch_size: int = 5):
         self.pages = list(page_info)
+
         async with aiohttp.ClientSession() as session:
-            tasks = [
-                self._fetch_data_for_page((config_name, page, split), session)
-                for (config_name, page, split) in self.pages
-            ]
-            await asyncio.gather(*tasks)
+            for i in range(0, len(self.pages), batch_size):
+                batch = self.pages[i : i + batch_size]
+                tasks = [
+                    self._fetch_data_for_page((config_name, page, split), session)
+                    for (config_name, page, split) in batch
+                ]
+                await asyncio.gather(*tasks)
 
     async def _fetch_data_to_buffer(self, num_pages):
         """
@@ -386,12 +389,12 @@ class DatasetLoader(SubsetLoader):
                 # Handle HTTP client errors with a retry mechanism
                 attempt += 1
                 if attempt < retry_limit:
-                    # self.logger.info(
-                    #     f"Retrying page {page} due to error: {e}. Attempt {attempt} of {retry_limit}"
-                    # )
-                    # self.logger.info(
-                    #     f"Waiting {self.retry_delay * attempt} seconds before retrying..."
-                    # )
+                    self.logger.info(
+                        f"Retrying page {page} due to error: {e}. Attempt {attempt} of {retry_limit}"
+                    )
+                    self.logger.info(
+                        f"Waiting {self.retry_delay * attempt} seconds before retrying..."
+                    )
                     await asyncio.sleep(
                         self.retry_delay * attempt
                     )  # Wait before retrying
