@@ -234,7 +234,7 @@ async def forward(self):
                     self.logger.info(
                         f"Error reporting allreduce metrics to dashboard {e}"
                     )
-                self.config.neuron.blocks_per_allreduce = 500
+                self.config.neuron.blocks_per_allreduce = 250
             else:
                 raise GradientAveragingError("Unsuccessful AllReduce Step")
 
