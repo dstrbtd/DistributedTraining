@@ -19,6 +19,7 @@ from hivemind.utils import get_logger
 from huggingface_hub import (
     create_tag,
     hf_hub_download,
+    snapshot_download,
     list_repo_refs,
     list_repo_files,
     scan_cache_dir,
@@ -95,6 +96,8 @@ from torch.distributed.tensor._dtensor_spec import (
 from torch.distributed.tensor import DTensor
 from torch.distributed.device_mesh import DeviceMesh as DM
 from torch.distributed.tensor.placement_types import Shard
+import hivemind
+from safetensors.torch import save_file, load_file
 
 torch.serialization.add_safe_globals([DTensorSpec])
 torch.serialization.add_safe_globals([DTensor])
@@ -403,6 +406,9 @@ def load_model_optimizer_gradient_averager(
         f"CPU Memory Before Loading State {psutil.virtual_memory().available / 10**9} GB"
     )
     global_model_name = self.config.neuron.global_model_name
+    self.global_model_config = AutoConfig.from_pretrained(
+        global_model_name, trust_remote_code=True
+    )
 
     if (revision is None) and (local_model_name != global_model_name):
         revision = f"{__run__}.{epoch}.{self.local_progress.inner_step}"
@@ -501,15 +507,12 @@ def load_model_optimizer_gradient_averager(
             fully_shard(self.model, mesh=self.mesh, mp_policy=mp_policy)
         else:
             if self.master:
-                model_state = torch.load(
-                    hf_hub_download(
-                        repo_id=local_model_name,
-                        filename="pytorch_model.bin",
-                        revision=revision,
-                    ),
-                    weights_only=True,
-                    map_location="cpu",
+                saftensors_path = hf_hub_download(
+                    repo_id=local_model_name,
+                    filename="model.safetensors",
+                    revision=revision,
                 )
+                model_state = load_file(saftensors_path, device="cpu")
             else:
                 model_state = None
 
@@ -671,6 +674,7 @@ def load_model_optimizer_gradient_averager(
                 dht=self.dht,
                 main_parameters=main_parameters,
                 offloaded_optimizer=self.outer_optimizer,
+                compression=hivemind.Quantile8BitQuantization(),
                 prefix=f"{self.config.neuron.run_id}_grad_averager",
                 min_group_size=self.config.neuron.min_group_size,
                 min_matchmaking_time=30.0,
@@ -771,6 +775,7 @@ def load_state_from_peer(
     reload_inner_optimizer=True,
     reload_outer_optimizer=True,
     revision=None,
+    use_fallback_model=True,
 ):
     try:
         state_loaded = False
@@ -832,17 +837,21 @@ def load_state_from_peer(
                 except Exception as e:
                     attempt += 1
                     if attempt == MAX_ATTEMPTS:
-                        self.logger.info(
-                            "LOAD GLOBAL MODEL",
-                            load_model_optimizer_gradient_averager(
-                                self,
-                                self.config.neuron.global_model_name,
-                                self.local_progress.epoch,
-                            ),
-                        )
-                        # raise Exception(
-                        #     f"Failed to load model after {MAX_ATTEMPTS} attempts: {str(e)}"
-                        # )
+                        if use_fallback_model:
+                            # TODO Crash the whole process if global model is not loaded
+                            loading_success = torch.tensor(
+                                [
+                                    load_model_optimizer_gradient_averager(
+                                        self,
+                                        self.config.neuron.global_model_name,
+                                        self.local_progress.epoch,
+                                    ),
+                                ]
+                            )
+                        else:
+                            raise Exception(
+                                f"Failed to load model after {MAX_ATTEMPTS} attempts: {str(e)}"
+                            )
                     self.logger.info(
                         f"Failed to load model, retrying. Attempt {attempt}/{MAX_ATTEMPTS}. Error {str(e)}"
                     )
@@ -955,7 +964,15 @@ def cleanup_old_cache(self, repo_id=None, current_revision=None):
                     )
 
 
-def upload_new_state(self, epoch: int, results: dict, block: int = None):
+def upload_new_state(
+    self,
+    epoch: int,
+    results: dict,
+    model_state: dict,
+    inner_optimizer_state: dict,
+    inner_optimizer_lr: int,
+    block: int = None,
+):
     attempt = 0
     while attempt < self.model_upload_retry_limit:
         try:
@@ -965,7 +982,13 @@ def upload_new_state(self, epoch: int, results: dict, block: int = None):
 
             # Save and upload both model and optimizer state
             upload_success = save_and_upload_state(
-                self, epoch=epoch, results=results, block=block
+                self,
+                epoch=epoch,
+                results=results,
+                model_state=model_state,
+                inner_optimizer_state=inner_optimizer_state,
+                inner_optimizer_lr=inner_optimizer_lr,
+                block=block,
             )
 
             if upload_success:
@@ -1014,7 +1037,15 @@ def upload_new_state(self, epoch: int, results: dict, block: int = None):
     return upload_success
 
 
-def save_and_upload_state(self, epoch: int, results: dict, block: int = None):
+def save_and_upload_state(
+    self,
+    epoch: int,
+    results: dict,
+    model_state: dict,
+    inner_optimizer_state: dict,
+    inner_optimizer_lr: int,
+    block: int = None,
+):
     """Unified function to save and upload both model and optimizer state"""
     batch_size = sum(
         [result for result in results["gathered"].values() if result is not None]
@@ -1031,7 +1062,14 @@ def save_and_upload_state(self, epoch: int, results: dict, block: int = None):
                 if block is not None:
                     self.model.config.last_allreduce_block = block
                 self.model.config.inner_step = 0
-                self.model.save_pretrained(tmp_folder)
+                self.model.config.save_pretrained(tmp_folder)
+                self.logger.info("Save config")
+                save_file(
+                    model_state,
+                    os.path.join(tmp_folder, "model.safetensors"),
+                    metadata={"format": "pt"},
+                )
+                self.logger.info("Save model")
 
                 # Save outer optimizer state
                 outer_optimizer_state = {
@@ -1043,11 +1081,12 @@ def save_and_upload_state(self, epoch: int, results: dict, block: int = None):
                     outer_optimizer_state,
                     os.path.join(tmp_folder, "outer_optimizer.pt"),
                 )
+                self.logger.info("Save optimizer")
                 # TODO Save non sharded inner optimizer
                 # Save outer optimizer state
                 inner_optimizer_state = {
-                    "optimizer_state_dict": self.inner_optimizer.state_dict(),
-                    "learning_rate": self.inner_optimizer.param_groups[0]["lr"],
+                    "optimizer_state_dict": inner_optimizer_state,
+                    "learning_rate": inner_optimizer_lr,
                     "scheduler_state": self.scheduler.state_dict(),
                     "epoch": epoch,
                 }

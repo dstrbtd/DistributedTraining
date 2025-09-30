@@ -61,6 +61,13 @@ class BaseNeuron(ABC):
         self.current_block = ttl_get_block(self)
         return self.current_block
 
+    def set_current_block_across_ranks(self):
+        current_block_tensor = (
+            torch.tensor([self.current_block]) if self.master else torch.tensor([0])
+        )
+        dist.broadcast(current_block_tensor, src=0, group=self.gloo_group)
+        self.current_block = current_block_tensor[0].item()
+
     def __init__(self, config=None):
         base_config = copy.deepcopy(config or BaseNeuron.config())
         self.config = self.config()
@@ -113,7 +120,6 @@ class BaseNeuron(ABC):
 
             # Each miner gets a unique identity (UID) in the network for differentiation.
             self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
-            self.uid = 2
             self.logger.info(
                 f"Running neuron on subnet: {self.config.netuid} with uid {self.uid} using network: {self.subtensor.chain_endpoint}"
             )

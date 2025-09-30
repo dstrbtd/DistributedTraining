@@ -159,10 +159,11 @@ class AveragingHandler:
         query_tasks = []
         all_reduce_success_status = True
         results = {}
+        initial_weights = None
 
         try:
             # Clip gradients
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
             # Used for load balancing and scoring
             if bandwidth is not None:
@@ -226,21 +227,16 @@ class AveragingHandler:
                 bt.logging.info(f"Initial Weights Sample: {initial_weights}")
 
                 # Perform offloaded outer optimization steps
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 bt.logging.info("Performing Outer Optimizer Step..")
-                self.state_averager.step(
-                    increment_epoch=True, optimizer_step=True, zero_grad=False
-                )
-
-                # Update state_avgs main params with inner optimizer params
-                self.update_main_param_after_outer_step()
+                self.outer_optimizer.step()
 
                 bt.logging.info(
                     ":white_heavy_check_mark: Finished Outer Optimizer Step."
                 )
 
-                # Validate weight updates
-                await self._validate_weight_update(initial_weights, block)
+                # # Validate weight updates
+                # await self._validate_weight_update(initial_weights, block)
 
                 all_reduce_success_status = True
                 results = {
@@ -405,6 +401,7 @@ class AveragingHandler:
         bandwidth=None,
     ) -> distributed_training.protocol.AllReduce:
         """Process allreduce specifically for miner."""
+        initial_weights = None
         try:
             # # Clip gradients
             # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)

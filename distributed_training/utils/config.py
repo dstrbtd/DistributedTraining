@@ -157,7 +157,7 @@ def add_args(cls, parser, prefix=None):
         "--neuron.global_model_name",
         type=str,
         help="The model to be trained",
-        default="distributed/llama-1b-ws-2",
+        default="dstrbtd/llama-1b-ws-2",
     )
 
     parser.add_argument(

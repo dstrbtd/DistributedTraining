@@ -48,46 +48,48 @@ class BaseValidatorNeuron(BaseNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
-        # Save a copy of the hotkeys to local memory.
-        self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
+        if self.master:
+            # Save a copy of the hotkeys to local memory.
+            self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
 
-        # Dendrite lets us send messages to other nodes (axons) in the network.
-        self.dendrite = bt.dendrite(wallet=self.wallet)
-        self.logger.info(f"Dendrite: {self.dendrite}")
+            # Dendrite lets us send messages to other nodes (axons) in the network.
+            self.dendrite = bt.dendrite(wallet=self.wallet)
+            self.logger.info(f"Dendrite: {self.dendrite}")
 
-        # Set up initial scoring weights for validation
-        self.logger.info("Building validation weights.")
-        self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
+            # Set up initial scoring weights for validation
+            self.logger.info("Building validation weights.")
+            self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
 
-        # Initialize openskill_model before loading state
-        self.openskill_model = PlackettLuce(
-            beta=self.config.neuron.openskill_beta, tau=self.config.neuron.openskill_tau
-        )
-        self.openskill_ratings = {
-            int(uid): self.openskill_model.rating(name=str(uid))
-            for uid in range(self.metagraph.n)
-        }
+            # Initialize openskill_model before loading state
+            self.openskill_model = PlackettLuce(
+                beta=self.config.neuron.openskill_beta,
+                tau=self.config.neuron.openskill_tau,
+            )
+            self.openskill_ratings = {
+                int(uid): self.openskill_model.rating(name=str(uid))
+                for uid in range(self.metagraph.n)
+            }
 
-        # Initialize uid_tracker
-        self.uid_tracker = {
-            uid: UidTracker(uid=uid) for uid in self.metagraph.uids.tolist()
-        }
+            # Initialize uid_tracker
+            self.uid_tracker = {
+                uid: UidTracker(uid=uid) for uid in self.metagraph.uids.tolist()
+            }
 
-        # Load current state
-        self.logger.debug("load_state()")
-        self.load_state()
+            # Load current state
+            self.logger.debug("load_state()")
+            self.load_state()
 
-        # Set event dictionary
-        self.event = {}
+            # Set event dictionary
+            self.event = {}
 
-        # Init sync with the network. Updates the metagraph.
-        self.sync()
+            # Init sync with the network. Updates the metagraph.
+            self.sync()
 
-        # Serve axon to enable external connections.
-        if not self.config.neuron.axon_off:
-            self.serve_axon()
-        else:
-            self.logger.warning("axon off, not serving ip to chain.")
+            # Serve axon to enable external connections.
+            if not self.config.neuron.axon_off:
+                self.serve_axon()
+            else:
+                self.logger.warning("axon off, not serving ip to chain.")
 
         # Create asyncio event loop to manage async tasks.
         self.loop = asyncio.get_event_loop()
@@ -156,50 +158,52 @@ class BaseValidatorNeuron(BaseNeuron):
         # Check that validator is registered on the network.
         self.sync()
 
-        self.logger.info(
-            f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
-        )
+        if self.master:
+            self.logger.info(
+                f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
+            )
 
-        self.logger.info(f"Validator starting at block: {self.block}")
+            self.logger.info(f"Validator starting at block: {self.block}")
 
         # This loop maintains the validator's operations until intentionally stopped.
         try:
             while True:
-                self.logger.info(f"step({self.step}) block({self.block})")
+                if self.master:
+                    self.logger.info(f"step({self.step}) block({self.block})")
 
-                # Init Wandb Event For Step
-                if self.event != {}:
-                    self.event = {}
+                    # Init Wandb Event For Step
+                    if self.event != {}:
+                        self.event = {}
 
-                current_global_epoch = self.global_progress.epoch
-                self.global_progress.epoch = get_global_epoch(self)
-                if (
-                    self.blocks_since_allreduce
-                    > (self.config.neuron.blocks_per_allreduce / 2)
-                ) and (
-                    (self.local_progress.epoch != self.global_progress.epoch)
-                    or (not self.all_reduce_success_status)
-                ):
-                    if self.local_progress.epoch != self.global_progress.epoch:
-                        self.logger.info(
-                            f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
-                        )
-                    if not self.all_reduce_success_status:
-                        self.logger.info(
-                            "All Reduce Failed. Loading Latest Model State."
-                        )
-                    load_state_from_peer(self, epoch=self.global_progress.epoch)
-                    # Reset all_reduce success status
-                    if not self.all_reduce_success_status:
-                        self.all_reduce_success_status = True
-                        self.last_allreduce_block = self.block
-                    # Load all_reduce scores if non_master_uid
-                    if (
-                        (self.uid != self.master_uid)
-                        and (self.global_progress.epoch != current_global_epoch)
-                        and (self.should_all_reduce)
-                    ):
-                        update_total_scores(self)
+                    # current_global_epoch = self.global_progress.epoch
+                    # self.global_progress.epoch = get_global_epoch(self)
+                    # if (
+                    #     self.blocks_since_allreduce
+                    #     > (self.config.neuron.blocks_per_allreduce / 2)
+                    # ) and (
+                    #     (self.local_progress.epoch != self.global_progress.epoch)
+                    #     or (not self.all_reduce_success_status)
+                    # ):
+                    #     if self.local_progress.epoch != self.global_progress.epoch:
+                    #         self.logger.info(
+                    #             f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
+                    #         )
+                    #     if not self.all_reduce_success_status:
+                    #         self.logger.info(
+                    #             "All Reduce Failed. Loading Latest Model State."
+                    #         )
+                    #     load_state_from_peer(self, epoch=self.global_progress.epoch)
+                    #     # Reset all_reduce success status
+                    #     if not self.all_reduce_success_status:
+                    #         self.all_reduce_success_status = True
+                    #         self.last_allreduce_block = self.block
+                    #     # Load all_reduce scores if non_master_uid
+                    #     if (
+                    #         (self.uid != self.master_uid)
+                    #         and (self.global_progress.epoch != current_global_epoch)
+                    #         and (self.should_all_reduce)
+                    #     ):
+                    #         update_total_scores(self)
 
                 # Run multiple forwards concurrently.
                 self.loop.run_until_complete(self.concurrent_forward())
@@ -210,17 +214,18 @@ class BaseValidatorNeuron(BaseNeuron):
 
                 # Sync metagraph and potentially set weights.
                 self.sync()
-                # Log to wandb
-                if (
-                    not self.config.neuron.dont_wandb_log
-                    and "uids" in self.event
-                    and len(self.event["uids"]) > 0
-                ):
-                    self.wandb.log(self.event)
+                if self.master:
+                    # Log to wandb
+                    if (
+                        not self.config.neuron.dont_wandb_log
+                        and "uids" in self.event
+                        and len(self.event["uids"]) > 0
+                    ):
+                        self.wandb.log(self.event)
 
-                self.step += 1
-                if self.peer_id_logged_to_chain is False:
-                    log_peerid_to_chain(self)
+                    self.step += 1
+                    if self.peer_id_logged_to_chain is False:
+                        log_peerid_to_chain(self)
 
         # If someone intentionally stops the validator, it'll safely terminate operations.
         except KeyboardInterrupt:

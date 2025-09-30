@@ -165,88 +165,89 @@ def get_bandwidth():
 
 
 def init_dht(self):
-    # Init DHT and model
-    if self.config.dht.ip:
-        version = "4"
-        address = self.config.dht.ip
-        announce_maddrs = [f"/ip{version}/{address}/tcp/{self.config.dht.port}"]
-    else:
-        address = bt.utils.networking.get_external_ip()
-        self.logger.info(f"Received public IP address of this machine: {address}")
-        version = ip_address(address).version
-        announce_maddrs = [f"/ip{version}/{address}/tcp/{self.config.dht.port}"]
+    if self.master:
+        # Init DHT and model
+        if self.config.dht.ip:
+            version = "4"
+            address = self.config.dht.ip
+            announce_maddrs = [f"/ip{version}/{address}/tcp/{self.config.dht.port}"]
+        else:
+            address = bt.utils.networking.get_external_ip()
+            self.logger.info(f"Received public IP address of this machine: {address}")
+            version = ip_address(address).version
+            announce_maddrs = [f"/ip{version}/{address}/tcp/{self.config.dht.port}"]
 
-    # Init list of available DHT addresses from wandb
-    api = wandb.Api()
-    initial_peers_list = self.config.neuron.initial_peers
+        # Init list of available DHT addresses from wandb
+        api = wandb.Api()
+        initial_peers_list = self.config.neuron.initial_peers
 
-    # validator_runs = api.runs(
-    #     f"{self.config.neuron.wandb_entity}/{self.config.neuron.wandb_project.replace('_validators','').replace('_miners','')}_validators"
-    # )
-    # for ru in validator_runs:
-    #     if ru.state == "running":
-    #         if "dht_addresses" not in ru.config["neuron"].keys():
-    #             continue
-    #         else:
-    #             for peer in ru.config["neuron"]["dht_addresses"]:
-    #                 if peer not in initial_peers_list:
-    #                     initial_peers_list.append(peer)
+        # validator_runs = api.runs(
+        #     f"{self.config.neuron.wandb_entity}/{self.config.neuron.wandb_project.replace('_validators','').replace('_miners','')}_validators"
+        # )
+        # for ru in validator_runs:
+        #     if ru.state == "running":
+        #         if "dht_addresses" not in ru.config["neuron"].keys():
+        #             continue
+        #         else:
+        #             for peer in ru.config["neuron"]["dht_addresses"]:
+        #                 if peer not in initial_peers_list:
+        #                     initial_peers_list.append(peer)
 
-    # miner_runs = api.runs(
-    #     f"{self.config.neuron.wandb_entity}/{self.config.neuron.wandb_project.replace('_validators','').replace('_miners','')}_miners"
-    # )
-    # for ru in miner_runs:
-    #     if ru.state == "running":
-    #         if "dht_addresses" not in ru.config["neuron"].keys():
-    #             continue
-    #         else:
-    #             for peer in ru.config["neuron"]["dht_addresses"]:
-    #                 if peer not in initial_peers_list:
-    #                     initial_peers_list.append(peer)
+        # miner_runs = api.runs(
+        #     f"{self.config.neuron.wandb_entity}/{self.config.neuron.wandb_project.replace('_validators','').replace('_miners','')}_miners"
+        # )
+        # for ru in miner_runs:
+        #     if ru.state == "running":
+        #         if "dht_addresses" not in ru.config["neuron"].keys():
+        #             continue
+        #         else:
+        #             for peer in ru.config["neuron"]["dht_addresses"]:
+        #                 if peer not in initial_peers_list:
+        #                     initial_peers_list.append(peer)
 
-    # Init DHT
-    retries = 0
-    buffer = 5
-    max_retries = buffer * len(initial_peers_list)
-    successful_connection = False
-    while successful_connection is False:
-        if (retries == max_retries) and (successful_connection is False):
-            raise Exception("Max retries reached, operation failed.")
-        for attempt in range(0, buffer):
-            for initial_peer in initial_peers_list:
-                try:
-                    # Init DHT
-                    self.dht = hivemind.DHT(
-                        host_maddrs=[
-                            f"/ip4/0.0.0.0/tcp/{self.config.dht.port}",
-                            f"/ip4/0.0.0.0/udp/{self.config.dht.port}/quic",
-                        ],
-                        # initial_peers=[initial_peer],
-                        announce_maddrs=announce_maddrs,
-                        start=True,
-                    )
-                    self.logger.info(
-                        f"Successfully initialised dht using initial_peer as {initial_peer}"
-                    )
-                    successful_connection = True
-                    utils.log_visible_maddrs(
-                        self.dht.get_visible_maddrs(), only_p2p=True
-                    )
-                    # Add DHT address to wandb config
-                    self.config.neuron.dht_addresses = [
-                        re.sub(
-                            "ip4/?(.*?)/",
-                            f"ip{version}/{address}/",
-                            str(addr),
-                            flags=re.DOTALL,
+        # Init DHT
+        retries = 0
+        buffer = 5
+        max_retries = buffer * len(initial_peers_list)
+        successful_connection = False
+        while successful_connection is False:
+            if (retries == max_retries) and (successful_connection is False):
+                raise Exception("Max retries reached, operation failed.")
+            for attempt in range(0, buffer):
+                for initial_peer in initial_peers_list:
+                    try:
+                        # Init DHT
+                        self.dht = hivemind.DHT(
+                            host_maddrs=[
+                                f"/ip4/0.0.0.0/tcp/{self.config.dht.port}",
+                                f"/ip4/0.0.0.0/udp/{self.config.dht.port}/quic",
+                            ],
+                            initial_peers=[initial_peer],
+                            announce_maddrs=announce_maddrs,
+                            start=True,
                         )
-                        for addr in self.dht.get_visible_maddrs()
-                    ]
-                    return
-                except Exception as e:
-                    self.logger.error(
-                        f"Attempt {retries + 1} to init DHT using initial_peer as {initial_peer} failed with error: {e}"
-                    )
-                    retries += 1
-                    time.sleep(5)
-                    self.logger.error("Retrying...")
+                        self.logger.info(
+                            f"Successfully initialised dht using initial_peer as {initial_peer}"
+                        )
+                        successful_connection = True
+                        utils.log_visible_maddrs(
+                            self.dht.get_visible_maddrs(), only_p2p=True
+                        )
+                        # Add DHT address to wandb config
+                        self.config.neuron.dht_addresses = [
+                            re.sub(
+                                "ip4/?(.*?)/",
+                                f"ip{version}/{address}/",
+                                str(addr),
+                                flags=re.DOTALL,
+                            )
+                            for addr in self.dht.get_visible_maddrs()
+                        ]
+                        return
+                    except Exception as e:
+                        self.logger.error(
+                            f"Attempt {retries + 1} to init DHT using initial_peer as {initial_peer} failed with error: {e}"
+                        )
+                        retries += 1
+                        time.sleep(5)
+                        self.logger.error("Retrying...")

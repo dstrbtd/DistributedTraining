@@ -102,15 +102,13 @@ from threading import Thread
 from threading import Event
 import distributed_training
 
+
+import torch
+import torch.distributed as dist
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
 )
-from contextlib import nullcontext
-import torch
-import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint.state_dict import get_state_dict, set_state_dict
-
-import torch.distributed as dist
+from safetensors.torch import save_file
 
 import faulthandler, signal
 
@@ -195,21 +193,25 @@ class Miner(BaseMinerNeuron):
                     - time.perf_counter()
                     + self.all_reduce_start_time
                 )
-                self.logger.info(
-                    f"Waiting {int(wait_time)} seconds until validator complete the all_reduce"
-                )
-                # Wait for the master validator to upload new global model
-                time.sleep(wait_time)
+                if wait_time > 0:
+                    self.logger.info(
+                        f"Waiting {int(wait_time)} seconds until validator complete the all_reduce"
+                    )
+                    # Wait for the master validator to upload new global model
+                    time.sleep(wait_time)
                 # Check if master validator has failed to all_reduce
                 self.global_progress.epoch = get_global_epoch(self)
                 self.reload_state_event.set()
             elif (
-                (self.local_progress.epoch == 0 and self.local_progress.inner_step > 12)
+                (self.local_progress.epoch == 0 and self.local_progress.inner_step > 20)
                 or (
                     self.local_progress.epoch != 0
-                    and self.local_progress.inner_step > 10
+                    and self.local_progress.inner_step > 20
                 )
             ) and (self.all_reduce_flag != 1):
+                # elif (datetime.datetime.now().minute % 30 == 0) and (
+                #     self.all_reduce_flag != 1
+                # ):
                 self.loop.run_until_complete(
                     self.all_reduce(
                         distributed_training.protocol.AllReduce(
@@ -407,8 +409,10 @@ class Miner(BaseMinerNeuron):
                     self.logger.info(
                         f"Saving model state dict with {len(full_state)} keys"
                     )
-                    torch.save(
-                        full_state, os.path.join(self.output_dir, "pytorch_model.bin")
+                    save_file(
+                        full_state,
+                        os.path.join(self.output_dir, "model.safetensors"),
+                        metadata={"format": "pt"},
                     )
                     self.model.config.save_pretrained(self.output_dir)
                     self.logger.info(f"Model Saved")
@@ -691,8 +695,7 @@ class Miner(BaseMinerNeuron):
 
         # Core setup
         self.device = self.config.neuron.device
-        if self.master:
-            init_dht(self)
+        init_dht(self)
 
         # Progress tracking
         self._init_progress_tracking()
@@ -1385,11 +1388,12 @@ class Miner(BaseMinerNeuron):
             raise Exception(f"Unexpected error during AllReduce: {str(e)}") from e
 
         finally:
-            self.logger.info("Started Barrier")
-            # dist.barrier()
-            dist.barrier(group=self.gloo_group)
-            self.logger.info("Finished Barrier")
-            if (self.master and synapse.completion is True) or (not self.master):
+            synapse_completion = (
+                torch.tensor([1]) if synapse.completion else torch.tensor([0])
+            )
+            dist.broadcast(synapse_completion, src=0, group=self.gloo_group)
+            self.logger.info("Synapse Completion" + str(synapse_completion[0].item()))
+            if synapse_completion[0].item() == 1:
                 self.logger.info(f"Apply opt params")
                 self.apply_optimizer_parameters()
 
@@ -1503,11 +1507,12 @@ class Miner(BaseMinerNeuron):
         finally:
             # TODO make sure rank 0 and 1 are alligned
             # Update epoch if all_reduce was succsefull
-            self.logger.info("Started Barrier")
-            # dist.barrier()
-            dist.barrier(group=self.gloo_group)
-            self.logger.info("Finished Barrier")
-            if (self.master and synapse.completion is True) or (not self.master):
+            synapse_completion = (
+                torch.tensor([1]) if synapse.completion else torch.tensor([0])
+            )
+            dist.broadcast(synapse_completion, src=0, group=self.gloo_group)
+            self.logger.info("Synapse Completion" + str(synapse_completion[0].item()))
+            if synapse_completion[0].item() == 1:
                 self.logger.info(f"Apply opt params")
                 self.apply_optimizer_parameters()
 
@@ -1543,7 +1548,7 @@ class Miner(BaseMinerNeuron):
             else:
                 self.all_reduce_flag = 0
                 self.all_reduce_success_status = False
-
+            self.maybe_sync_and_reload()
             return synapse
 
     async def blacklist_base(self, synapse) -> typing.Tuple[bool, str]:
