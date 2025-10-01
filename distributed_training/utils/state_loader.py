@@ -581,6 +581,7 @@ def load_model_optimizer_gradient_averager(
                 weights_only=True,
                 map_location="cpu",
             )
+            self.logger.info(f"Donwloaded State")
 
             opts = StateDictOptions(full_state_dict=False, cpu_offload=True)
 
@@ -608,15 +609,11 @@ def load_model_optimizer_gradient_averager(
 
     except Exception as e:
         loading_success = 0
-        return loading_success
-        self.logger.info(
-            "local_model_name == global_model_name",
-            local_model_name == global_model_name,
+        self.logger.exception(
+            "Failed to load inner optimizer state"
+            f"(repo_id={local_model_name}, rev={revision}, rank={self.local_rank}, world={self.world_size})"
         )
-        if local_model_name == global_model_name:
-            raise Exception(f"Failed to load model despite repo existing: {str(e)}")
-        else:
-            self.logger.info(f"Failed to load model despite repo existing: {str(e)}")
+        return loading_success
 
     finally:
         if isinstance(optimizer_state, dict):
@@ -895,71 +892,72 @@ def load_state_from_peer(
 
 def cleanup_old_cache(self, repo_id=None, current_revision=None):
     """Helper method to clean up old cache files"""
-    if repo_id is None:
-        repo_id = self.config.neuron.global_model_name
-        current_revision = self.model.config._commit_hash
+    if self.master:
+        if repo_id is None:
+            repo_id = self.config.neuron.global_model_name
+            current_revision = self.model.config._commit_hash
 
-    cache_info = scan_cache_dir()
-    broken_cache_list = [str(warning) for warning in cache_info.warnings]
-    cache_dir = HF_HUB_CACHE
-    cache_dir = Path(cache_dir).expanduser().resolve()
-    self.logger.info("Cache clearing warnings:")
-    self.logger.info(f"{cache_info.warnings}")
+        cache_info = scan_cache_dir()
+        broken_cache_list = [str(warning) for warning in cache_info.warnings]
+        cache_dir = HF_HUB_CACHE
+        cache_dir = Path(cache_dir).expanduser().resolve()
+        self.logger.info("Cache clearing warnings:")
+        self.logger.info(f"{cache_info.warnings}")
 
-    # Delete cache using preferred huggingface cache clearing method
-    if current_revision is None:
-        for cache in cache_dir.iterdir():
-            if repo_id.replace("/", "--") in str(cache):
-                self.logger.info(
-                    f"Deleting the entire cache folder for repo {repo_id}."
-                )
-                try:
-                    shutil.rmtree(str(cache))
-                except OSError as e:
+        # Delete cache using preferred huggingface cache clearing method
+        if current_revision is None:
+            for cache in cache_dir.iterdir():
+                if repo_id.replace("/", "--") in str(cache):
                     self.logger.info(
-                        "Error: %s - %s deleting the entire cache folder for the repo: %s"
-                        % (e.filename, e.strerror, repo_id)
+                        f"Deleting the entire cache folder for repo {repo_id}."
+                    )
+                    try:
+                        shutil.rmtree(str(cache))
+                    except OSError as e:
+                        self.logger.info(
+                            "Error: %s - %s deleting the entire cache folder for the repo: %s"
+                            % (e.filename, e.strerror, repo_id)
+                        )
+
+        else:
+            for repo in cache_info.repos:
+                if repo.repo_id == repo_id:
+                    revisions = sorted(
+                        repo.revisions, key=lambda r: r.last_modified, reverse=True
                     )
 
-    else:
-        for repo in cache_info.repos:
-            if repo.repo_id == repo_id:
-                revisions = sorted(
-                    repo.revisions, key=lambda r: r.last_modified, reverse=True
-                )
-
-                self.logger.info(
-                    f"Found {len(revisions)} model revisions in .cache folder. Proceeding to delete all non-current revision."
-                )
-                for revision in revisions:
-                    if (current_revision is not None) and (
-                        revision.commit_hash == current_revision
-                    ):
-                        self.logger.info(
-                            f"Skipping cache for current revision {revision.commit_hash}"
-                        )
-                        continue
-                    else:
-                        self.logger.info(
-                            f"Deleting cache for revision {revision.commit_hash}"
-                        )
-                        cache_info.delete_revisions(revision.commit_hash).execute()
-                break
-
-    # Forcefully remove the entire cache folder for a model if it's corrupted
-    if len(broken_cache_list) > 1:
-        for cache in cache_dir.iterdir():
-            if str(cache) in str(broken_cache_list):
-                self.logger.info(
-                    f"Found repo {repo_id} in HF cache warning message. Proceeding to delete the entire cache folder."
-                )
-                try:
-                    shutil.rmtree(str(cache))
-                except OSError as e:
                     self.logger.info(
-                        "Error: %s - %s deleting the entire cache folder for the repo: %s"
-                        % (e.filename, e.strerror, repo_id)
+                        f"Found {len(revisions)} model revisions in .cache folder. Proceeding to delete all non-current revision."
                     )
+                    for revision in revisions:
+                        if (current_revision is not None) and (
+                            revision.commit_hash == current_revision
+                        ):
+                            self.logger.info(
+                                f"Skipping cache for current revision {revision.commit_hash}"
+                            )
+                            continue
+                        else:
+                            self.logger.info(
+                                f"Deleting cache for revision {revision.commit_hash}"
+                            )
+                            cache_info.delete_revisions(revision.commit_hash).execute()
+                    break
+
+        # Forcefully remove the entire cache folder for a model if it's corrupted
+        if len(broken_cache_list) > 1:
+            for cache in cache_dir.iterdir():
+                if str(cache) in str(broken_cache_list):
+                    self.logger.info(
+                        f"Found repo {repo_id} in HF cache warning message. Proceeding to delete the entire cache folder."
+                    )
+                    try:
+                        shutil.rmtree(str(cache))
+                    except OSError as e:
+                        self.logger.info(
+                            "Error: %s - %s deleting the entire cache folder for the repo: %s"
+                            % (e.filename, e.strerror, repo_id)
+                        )
 
 
 def upload_new_state(
@@ -971,67 +969,109 @@ def upload_new_state(
     inner_optimizer_lr: int,
     block: int = None,
 ):
-    attempt = 0
-    while attempt < self.model_upload_retry_limit:
-        try:
-            self.logger.info(
-                f"Pushing new model and optimizer state to HF Hub with tag {epoch}"
-            )
+    # Save and upload both model and optimizer state
+    upload_success = save_and_upload_state(
+        self,
+        epoch=epoch,
+        results=results,
+        model_state=model_state,
+        inner_optimizer_state=inner_optimizer_state,
+        inner_optimizer_lr=inner_optimizer_lr,
+        block=block,
+    )
 
-            # Save and upload both model and optimizer state
-            upload_success = save_and_upload_state(
-                self,
-                epoch=epoch,
-                results=results,
-                model_state=model_state,
-                inner_optimizer_state=inner_optimizer_state,
-                inner_optimizer_lr=inner_optimizer_lr,
-                block=block,
-            )
-
-            if upload_success:
-                # Verify the upload
-                updated_refs = list_repo_refs(
-                    self.config.neuron.global_model_name,
-                    repo_type="model",
-                )
-                new_tag = (
-                    max(
-                        [
-                            int(tag.name.split(".")[1])
-                            for tag in updated_refs.tags
-                            if (
-                                (len(tag.name.split(".")) == 3)
-                                and (tag.name.split(".")[0] == __run__)
-                            )
-                        ]
+    upload_success_status = torch.tensor([1]) if upload_success else torch.tensor([0])
+    dist.all_reduce(upload_success_status, group=self.gloo_group)
+    if (upload_success[0].item() == self.world_size) and self.master:
+        # Verify the upload
+        updated_refs = list_repo_refs(
+            self.config.neuron.global_model_name,
+            repo_type="model",
+        )
+        new_tag = (
+            max(
+                [
+                    int(tag.name.split(".")[1])
+                    for tag in updated_refs.tags
+                    if (
+                        (len(tag.name.split(".")) == 3)
+                        and (tag.name.split(".")[0] == __run__)
                     )
-                    if updated_refs.tags
-                    else 0
-                )
-                self.logger.info(f"Successfully pushed new model with tag {new_tag}")
-                # Wait to allow out of sync miners to download new model state
-                time.sleep(self.load_state_timeout)
-                break
-
-        except HfHubHTTPError as e:
-            attempt += 1
-            self.logger.info(f"{e}. Loading State from Peer.")
-            state_loaded = load_state_from_peer(self, epoch=self.global_progress.epoch)
-            if state_loaded:
-                break
-        except Exception:
-            attempt += 1
-            self.logger.warning(
-                f"Failed To Upload Model To HF hub, Retrying. Attempt {attempt}/{self.model_upload_retry_limit}."
+                ]
             )
-            if attempt < self.model_upload_retry_limit:
-                time.sleep(self.model_upload_retry_delay)
-            else:
-                self.logger.error(
-                    "Maximum Retry Limit Reached. Unable To Upload Model To HF Hub."
-                )
-                raise
+            if updated_refs.tags
+            else 0
+        )
+        self.logger.info(f"Successfully pushed new model with tag {new_tag}")
+        # Wait to allow out of sync miners to download new model state
+        time.sleep(self.load_state_timeout)
+    else:
+        self.logger.error(
+            "Maximum Retry Limit Reached. Unable To Upload Model To HF Hub."
+        )
+
+    # attempt = 0
+    # while attempt < self.model_upload_retry_limit:
+    #     try:
+    #         self.logger.info(
+    #             f"Pushing new model and optimizer state to HF Hub with tag {epoch}"
+    #         )
+
+    #         # Save and upload both model and optimizer state
+    #         upload_success = save_and_upload_state(
+    #             self,
+    #             epoch=epoch,
+    #             results=results,
+    #             model_state=model_state,
+    #             inner_optimizer_state=inner_optimizer_state,
+    #             inner_optimizer_lr=inner_optimizer_lr,
+    #             block=block,
+    #         )
+
+    #         if upload_success and self.master:
+    #             # Verify the upload
+    #             updated_refs = list_repo_refs(
+    #                 self.config.neuron.global_model_name,
+    #                 repo_type="model",
+    #             )
+    #             new_tag = (
+    #                 max(
+    #                     [
+    #                         int(tag.name.split(".")[1])
+    #                         for tag in updated_refs.tags
+    #                         if (
+    #                             (len(tag.name.split(".")) == 3)
+    #                             and (tag.name.split(".")[0] == __run__)
+    #                         )
+    #                     ]
+    #                 )
+    #                 if updated_refs.tags
+    #                 else 0
+    #             )
+    #             self.logger.info(f"Successfully pushed new model with tag {new_tag}")
+    #             # Wait to allow out of sync miners to download new model state
+    #             time.sleep(self.load_state_timeout)
+    #             break
+
+    #     except HfHubHTTPError as e:
+    #         attempt += 1
+    #         self.logger.info(f"{e}. Loading State from Peer.")
+    #         state_loaded = load_state_from_peer(self, epoch=self.global_progress.epoch)
+    #         if state_loaded:
+    #             break
+    #     except Exception:
+    #         attempt += 1
+    #         self.logger.warning(
+    #             f"Failed To Upload Model To HF hub, Retrying. Attempt {attempt}/{self.model_upload_retry_limit}."
+    #         )
+    #         if attempt < self.model_upload_retry_limit:
+    #             time.sleep(self.model_upload_retry_delay)
+    #         else:
+    #             self.logger.error(
+    #                 "Maximum Retry Limit Reached. Unable To Upload Model To HF Hub."
+    #             )
+    #             raise
+
     return upload_success
 
 
@@ -1045,43 +1085,45 @@ def save_and_upload_state(
     block: int = None,
 ):
     """Unified function to save and upload both model and optimizer state"""
-    batch_size = sum(
-        [result for result in results["gathered"].values() if result is not None]
-    )
-    participating_peers = results["participating_peers"]
-    failed_peers = results["failed_peers"]
-    attempt = 0
+    if self.master:
+        batch_size = sum(
+            [result for result in results["gathered"].values() if result is not None]
+        )
+        participating_peers = results["participating_peers"]
+        failed_peers = results["failed_peers"]
+        attempt = 0
     while attempt < self.model_upload_retry_limit:
         try:
             with tempfile.TemporaryDirectory() as tmp_folder:
-                self.logger.info(
-                    f"Preparing model and optimizer state for epoch {epoch}"
-                )
-                if block is not None:
-                    self.model.config.last_allreduce_block = block
-                self.model.config.inner_step = 0
-                self.model.config.save_pretrained(tmp_folder)
-                self.logger.info("Save config")
-                save_file(
-                    model_state,
-                    os.path.join(tmp_folder, "model.safetensors"),
-                    metadata={"format": "pt"},
-                )
-                self.logger.info("Save model")
+                if self.master:
+                    self.logger.info(
+                        f"Preparing model and optimizer state for epoch {epoch}"
+                    )
+                    if block is not None:
+                        self.model.config.last_allreduce_block = block
+                    self.model.config.inner_step = 0
+                    self.model.config.save_pretrained(tmp_folder)
+                    self.logger.info("Save config")
+                    save_file(
+                        model_state,
+                        os.path.join(tmp_folder, "model.safetensors"),
+                        metadata={"format": "pt"},
+                    )
+                    self.logger.info("Save model")
 
-                # Save outer optimizer state
-                outer_optimizer_state = {
-                    "optimizer_state_dict": self.outer_optimizer.state_dict(),
-                    "learning_rate": self.outer_optimizer.param_groups[0]["lr"],
-                    "epoch": epoch,
-                }
-                torch.save(
-                    outer_optimizer_state,
-                    os.path.join(tmp_folder, "outer_optimizer.pt"),
-                )
-                self.logger.info("Save optimizer")
-                # TODO Save non sharded inner optimizer
-                # Save outer optimizer state
+                    # Save outer optimizer state
+                    outer_optimizer_state = {
+                        "optimizer_state_dict": self.outer_optimizer.state_dict(),
+                        "learning_rate": self.outer_optimizer.param_groups[0]["lr"],
+                        "epoch": epoch,
+                    }
+                    torch.save(
+                        outer_optimizer_state,
+                        os.path.join(tmp_folder, "outer_optimizer.pt"),
+                    )
+                    self.logger.info("Save optimizer")
+
+                # Save inner optimizer state
                 inner_optimizer_state = {
                     "optimizer_state_dict": inner_optimizer_state,
                     "learning_rate": inner_optimizer_lr,
@@ -1090,7 +1132,10 @@ def save_and_upload_state(
                 }
                 torch.save(
                     inner_optimizer_state,
-                    os.path.join(tmp_folder, "inner_optimizer.pt"),
+                    os.path.join(
+                        tmp_folder,
+                        f"inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
+                    ),
                 )
 
                 self.logger.info(
@@ -1130,7 +1175,8 @@ def save_and_upload_state(
                 self.logger.error(
                     "Maximum retry limit reached. Unable to upload state to HF Hub."
                 )
-                raise
+                # raise
+                return False
     return False
 
 

@@ -105,7 +105,8 @@ async def forward(self):
                 sample_size = int(self.metagraph.n)
 
                 min_sample_size = self.config.neuron.min_group_size * 2
-                min_sample_size = 1
+                min_sample_size = 2
+                self.miner_uids = []
                 # Get active miners
                 while len(self.miner_uids) < min_sample_size:
                     self.logger.info(
@@ -275,19 +276,18 @@ async def forward(self):
                 )
                 self.logger.info(f"Extracted Optimizer & Model State Dict")
 
-                if self.master:
-                    if self.uid == self.master_uid:
-                        # Upload new global state to HF
-                        upload_new_state(
-                            self,
-                            self.local_progress.epoch,
-                            results,
-                            model_state,
-                            inner_optimizer_state,
-                            self.inner_optimizer.param_groups[0]["lr"],
-                            self.current_block,
-                        )
+                # Upload new global state to HF
+                upload_new_state(
+                    self,
+                    self.local_progress.epoch,
+                    results,
+                    model_state,
+                    inner_optimizer_state,
+                    self.inner_optimizer.param_groups[0]["lr"],
+                    self.current_block,
+                )
 
+                if self.master:
                     update_total_scores(self)
 
                     try:
@@ -333,14 +333,15 @@ async def forward(self):
 
         finally:
             all_reduce_completion = (
-                torch.tensor([1]) if self.all_reduce_success_status else torch.tensor([0])
+                torch.tensor([1])
+                if self.all_reduce_success_status
+                else torch.tensor([0])
             )
             dist.broadcast(all_reduce_completion, src=0, group=self.gloo_group)
             self.logger.info(
-                "Synapse Completion" + str(all_reduce_completion[0].item())
+                "Synapse Completion " + str(all_reduce_completion[0].item())
             )
             if all_reduce_completion[0].item() != 1:
-                self.logger.error(f"AllReduce Failed: {e}")
                 self.global_progress.epoch = get_global_epoch(self)
                 self.all_reduce_success_status = False
                 self.last_allreduce_block += int(

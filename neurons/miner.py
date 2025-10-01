@@ -287,7 +287,6 @@ class Miner(BaseMinerNeuron):
             self.resume_training()
             self.all_reduce_success_status = True
         else:
-            self.logger.info(self.last_allreduce_block, "self.last_allreduce_block")
             if self.last_allreduce_block is not None:
                 self.load_state(reset_last_allreduce_block=True)
             else:
@@ -946,7 +945,7 @@ class Miner(BaseMinerNeuron):
             self, self.config.neuron.local_model_name, self.local_progress.epoch
         )
         self.model.config.block_list = []
-        # cleanup_old_cache(self, repo_id=self.config.neuron.local_model_name)
+        cleanup_old_cache(self, repo_id=self.config.neuron.local_model_name)
 
         # Setup upload executor
         self.upload_executor = ThreadPoolExecutor(
@@ -1307,120 +1306,26 @@ class Miner(BaseMinerNeuron):
     ) -> distributed_training.protocol.AllReduce:
         self.logger.info("Received Main All Reduce Call")
         self.all_reduce_flag = 1
+
+        # Update gradient averager params to latest synapse values
+        if synapse.min_group_size is not None:
+            self.grad_averager.matchmaking_kwargs[
+                "min_group_size"
+            ] = synapse.min_group_size
+        if synapse.request_timeout is not None:
+            self.grad_averager.matchmaking_kwargs[
+                "request_timeout"
+            ] = synapse.request_timeout
+        if synapse.allreduce_timeout is not None:
+            self.grad_averager._allreduce_timeout = synapse.synapse.allreduce_timeout
+        if synapse.next_chunk_timeout is not None:
+            self.grad_averager.next_chunk_timeout = synapse.next_chunk_timeout
+        if synapse.min_matchmaking_time is not None:
+            self.grad_averager.matchmaking_kwargs[
+                "min_matchmaking_time"
+            ] = synapse.min_matchmaking_time
+
         return synapse
-        """Handle incoming all_reduce requests by pausing continuous training"""
-        self.logger.info("Received All Reduce Call")
-        self.all_reduce_start_time = time.perf_counter()
-        initial_weights = None
-        try:
-            async with self.training_lock:
-                # Cancel any ongoing upload
-                if self.current_upload_future and not self.current_upload_future.done():
-                    self.logger.info(
-                        "Cancelling Ongoing Model Upload For AllReduce Operation"
-                    )
-                    self.current_upload_future.cancel()
-
-                # Ensure training is paused
-                self.pause_training()
-
-                # Run inner optimizer step
-                self.inner_optimizer_step()
-
-                bt.logging.info(":wait: Starting Compute Pseudo Gradients")
-                self.compute_and_load_pseudo_grad_into_averager()
-                bt.logging.info(":wait: Finished Compute Pseudo Gradients")
-                # with self.grad_averager.get_tensors() as averaged_grads: print(averaged_grads)
-
-                if self.master:
-                    # Update gradient averager params to latest synapse values
-                    if synapse.min_group_size is not None:
-                        self.grad_averager.matchmaking_kwargs[
-                            "min_group_size"
-                        ] = synapse.min_group_size
-                    if synapse.request_timeout is not None:
-                        self.grad_averager.matchmaking_kwargs[
-                            "request_timeout"
-                        ] = synapse.request_timeout
-                    if synapse.allreduce_timeout is not None:
-                        self.grad_averager._allreduce_timeout = (
-                            synapse.synapse.allreduce_timeout
-                        )
-                    if synapse.next_chunk_timeout is not None:
-                        self.grad_averager.next_chunk_timeout = (
-                            synapse.next_chunk_timeout
-                        )
-                    if synapse.min_matchmaking_time is not None:
-                        self.grad_averager.matchmaking_kwargs[
-                            "min_matchmaking_time"
-                        ] = synapse.min_matchmaking_time
-
-                    try:
-                        self.logger.info("All Reduce Start")
-                        # Run allreduce with proper timeout
-                        (
-                            synapse,
-                            initial_weights,
-                        ) = await self.avg_handler.run_miner_allreduce(
-                            synapse,
-                            self.local_progress,
-                            self.all_reduce_start_time,
-                            self.current_block,
-                            # bandwidth
-                        )
-                        self.logger.info("All Reduce Finish")
-                        if not synapse.completion:
-                            raise Exception("AllReduce Failed, Loading Latest State")
-                    except Exception as e:
-                        self.logger.info(f"All Reduce Failed with error: {e}")
-                        synapse.completion = False
-
-        except Exception as e:
-            synapse.completion = False
-            raise Exception(f"Unexpected error during AllReduce: {str(e)}") from e
-
-        finally:
-            synapse_completion = (
-                torch.tensor([1]) if synapse.completion else torch.tensor([0])
-            )
-            dist.broadcast(synapse_completion, src=0, group=self.gloo_group)
-            self.logger.info("Synapse Completion" + str(synapse_completion[0].item()))
-            if synapse_completion[0].item() == 1:
-                self.logger.info(f"Apply opt params")
-                self.apply_optimizer_parameters()
-
-                bt.logging.info(
-                    ":white_heavy_check_mark: Finished Outer Optimizer Step."
-                )
-
-                if self.master:
-                    # Validate weight updates
-                    await self.avg_handler._validate_weight_update(
-                        initial_weights, self.current_block
-                    )
-
-                self.logger.info(
-                    f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
-                )
-                # self.avg_handler.update_main_param_after_outer_step()
-                dist.barrier(group=self.gloo_group)
-
-                # Reset inner_step and update epoch
-                self.local_progress.samples_accumulated = 0
-                self.local_progress.inner_step = 0
-                self.local_progress.epoch += 1
-                self.last_allreduce_block = self.current_block
-                self.logger.info("AllReduce Operation Finished Succesfully")
-                self.start_background_upload(
-                    epoch=self.local_progress.epoch,
-                )
-                # Resume training when done
-                self.resume_training()
-
-            else:
-                self.all_reduce_success_status = False
-
-            return synapse
 
     async def all_reduce_local(
         self, synapse: distributed_training.protocol.AllReduce

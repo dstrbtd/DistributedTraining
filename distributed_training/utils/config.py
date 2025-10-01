@@ -218,6 +218,13 @@ def add_args(cls, parser, prefix=None):
     )
 
     parser.add_argument(
+        "--neuron.rank_0_only_log",
+        action="store_true",
+        help="Toggles wandb logging for the project",
+        default=False,
+    )
+
+    parser.add_argument(
         "--neuron.dont_wandb_log",
         action="store_true",
         help="Toggles wandb logging for the project",
