@@ -248,7 +248,6 @@ def init_components(
         else:
             param_groups_for_optimizer = param_groups
         optimizer = optimizer_or_factory(param_groups_for_optimizer)
-        # breakpoint()
     else:
         optimizer = optimizer_or_factory
 
@@ -779,7 +778,6 @@ def load_state_from_peer(
 ):
     try:
         state_loaded = False
-        epoch = 0
         if epoch is None:
             self.global_progress.epoch = get_global_epoch(self)
             epoch = self.global_progress.epoch
@@ -829,7 +827,7 @@ def load_state_from_peer(
                             load_model_optimizer_gradient_averager(
                                 self,
                                 self.config.neuron.global_model_name,
-                                self.local_progress.epoch,
+                                self.global_progress.epoch,
                             ),
                         )
                     break
@@ -844,7 +842,7 @@ def load_state_from_peer(
                                     load_model_optimizer_gradient_averager(
                                         self,
                                         self.config.neuron.global_model_name,
-                                        self.local_progress.epoch,
+                                        self.global_progress.epoch,
                                     ),
                                 ]
                             )
@@ -869,21 +867,21 @@ def load_state_from_peer(
             self.local_progress.samples_accumulated = 0
             self.logger.info(f"New Model Tag: {self.global_progress.epoch}")
 
-            # # Clean up old cache
-            # try:
-            #     cleanup_old_cache(self, repo_id, revision)
-            # except Exception as e:
-            #     self.logger.warning(f"Failed to cleanup cache: {str(e)}")
+            # Clean up old cache
+            try:
+                cleanup_old_cache(self, repo_id, revision)
+            except Exception as e:
+                self.logger.warning(f"Failed to cleanup cache: {str(e)}")
 
-            # if repo_id != self.config.neuron.global_model_name:
-            #     try:
-            #         cleanup_old_cache(
-            #             self,
-            #             self.config.neuron.global_model_name,
-            #             current_revision=None,
-            #         )
-            #     except Exception as e:
-            #         self.logger.warning(f"Failed to cleanup cache: {str(e)}")
+            if repo_id != self.config.neuron.global_model_name:
+                try:
+                    cleanup_old_cache(
+                        self,
+                        self.config.neuron.global_model_name,
+                        current_revision=None,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to cleanup cache: {str(e)}")
 
         else:
             self.logger.debug(f"Model With Tag: {epoch} Does Not Exist")

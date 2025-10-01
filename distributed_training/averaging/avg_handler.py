@@ -249,6 +249,7 @@ class AveragingHandler:
                 }
             else:
                 all_reduce_success_status = False
+            # raise Exception("Forcing AllReduce Failure for Testing")
 
         except Exception as e:
             bt.logging.error(f"Unexpected error during Averaging Process: {str(e)}")

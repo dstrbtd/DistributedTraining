@@ -93,7 +93,6 @@ from distributed_training.utils.progress_tracker import (
 )
 from distributed_training.utils.state_loader import (
     cleanup_old_cache,
-    load_model_optimizer_gradient_averager,
     load_state_from_peer,
 )
 from distributed_training.utils.compression import TransformDCT, CompressDCT
@@ -147,10 +146,7 @@ class Miner(BaseMinerNeuron):
         else:
             self.current_block = 0
 
-        current_block_tensor = torch.tensor([self.current_block])
-        dist.broadcast(current_block_tensor, src=0, group=self.gloo_group)
-        self.current_block = current_block_tensor[0].item()
-        self.logger.info(self.current_block)
+        self.sync_current_block()
         self.starting_block = self.current_block
 
         if self.should_sync_model:
@@ -183,6 +179,8 @@ class Miner(BaseMinerNeuron):
             )
             self.reload_state_checker_thread.start()
 
+        # self.load_state(reset_last_allreduce_block=False)
+
     def reload_state_watcher(self):
         """Background thread on every rank; only sets a local flag on rank 0."""
         while not self.stop_event.is_set():
@@ -202,25 +200,25 @@ class Miner(BaseMinerNeuron):
                 # Check if master validator has failed to all_reduce
                 self.global_progress.epoch = get_global_epoch(self)
                 self.reload_state_event.set()
-            elif (
-                (self.local_progress.epoch == 0 and self.local_progress.inner_step > 20)
-                or (
-                    self.local_progress.epoch != 0
-                    and self.local_progress.inner_step > 20
-                )
-            ) and (self.all_reduce_flag != 1):
-                # elif (datetime.datetime.now().minute % 30 == 0) and (
-                #     self.all_reduce_flag != 1
-                # ):
-                self.loop.run_until_complete(
-                    self.all_reduce(
-                        distributed_training.protocol.AllReduce(
-                            min_group_size=self.config.neuron.min_group_size,
-                            timeout=420,
-                        )
-                    )
-                )
-                # time.sleep(self.allreduce_timeout+self.upload_state_duration)
+            # elif (
+            #     (self.local_progress.epoch == 0 and self.local_progress.inner_step > 20)
+            #     or (
+            #         self.local_progress.epoch != 0
+            #         and self.local_progress.inner_step > 20
+            #     )
+            # ) and (self.all_reduce_flag != 1):
+            #     # elif (datetime.datetime.now().minute % 30 == 0) and (
+            #     #     self.all_reduce_flag != 1
+            #     # ):
+            #     self.loop.run_until_complete(
+            #         self.all_reduce(
+            #             distributed_training.protocol.AllReduce(
+            #                 min_group_size=self.config.neuron.min_group_size,
+            #                 timeout=420,
+            #             )
+            #         )
+            #     )
+            #     # time.sleep(self.allreduce_timeout+self.upload_state_duration)
             else:
                 # TODO convert 2nd if statement to listener
                 self.sync()
@@ -230,7 +228,7 @@ class Miner(BaseMinerNeuron):
                 ):
                     self.reload_state_event.set()
                 elif (self.last_allreduce_block is None) and (
-                    self.current_block - self.starting_block > 25
+                    self.current_block - self.starting_block > 5
                 ):
                     self.reload_state_event.set()
             time.sleep(1)
@@ -273,7 +271,7 @@ class Miner(BaseMinerNeuron):
         elif not self.all_reduce_success_status:
             if self.local_progress.epoch > self.global_progress.epoch:
                 self.logger.info(
-                    f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
+                    f"Local Epoch {self.local_progress.epoch} Ahead Of Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
                 )
                 load_state_from_peer(
                     self,
@@ -289,14 +287,10 @@ class Miner(BaseMinerNeuron):
             self.resume_training()
             self.all_reduce_success_status = True
         else:
-            if (self.last_allreduce_block is not None) and (
-                (time.perf_counter() - self.all_reduce_start_time)
-                > (self.allreduce_timeout + self.upload_state_duration)
-            ):
+            self.logger.info(self.last_allreduce_block, "self.last_allreduce_block")
+            if self.last_allreduce_block is not None:
                 self.load_state(reset_last_allreduce_block=True)
-            elif (self.last_allreduce_block is None) and (
-                self.current_block - self.starting_block > 25
-            ):
+            else:
                 self.starting_block = self.current_block
                 self.load_state(reset_last_allreduce_block=False)
 
@@ -349,8 +343,8 @@ class Miner(BaseMinerNeuron):
                 self.inner_optimizer_step()
 
                 if (
-                    self.local_progress.inner_step % self.config.neuron.upload_steps
-                    # self.local_progress.inner_step % 1
+                    # self.local_progress.inner_step % self.config.neuron.upload_steps
+                    self.local_progress.inner_step % 20
                     == 0
                 ):
                     # # Upload model every x steps
@@ -507,12 +501,12 @@ class Miner(BaseMinerNeuron):
                         tag=f"{__run__}.{epoch}.{self.model.config.inner_step}",
                         tag_message=commit_message,
                     )
-                    # # Cleanup old cache
-                    # cleanup_old_cache(
-                    #     self,
-                    #     repo_id=self.config.neuron.local_model_name,
-                    #     current_revision=None,
-                    # )
+                    # Cleanup old cache
+                    cleanup_old_cache(
+                        self,
+                        repo_id=self.config.neuron.local_model_name,
+                        current_revision=None,
+                    )
 
                     self.logger.info(
                         f"Successfully pushed new model state with tag {__run__}.{epoch}.{self.model.config.inner_step} to repo: {self.config.neuron.local_model_name}"
@@ -632,19 +626,18 @@ class Miner(BaseMinerNeuron):
         self.training_status = TrainingStatus.RUNNING
         self.logger.info(":white_heavy_check_mark: Resuming continuous training.")
 
+    def sync_current_block(self):
+        current_block_tensor = torch.tensor([self.current_block])
+        dist.broadcast(current_block_tensor, src=0, group=self.gloo_group)
+        self.current_block = current_block_tensor[0].item()
+        self.logger.info(self.current_block)
+
     async def fetch_training_data(self):
         """Async function to fetch training data"""
         attempt = 0
         while attempt < self.retry_limit:
             try:
-                sync = (
-                    torch.tensor([self.current_block], device="cpu")
-                    if self.master
-                    else torch.tensor([0], device="cpu")
-                )
-                dist.broadcast(sync, src=0, group=self.gloo_group)
-                self.current_block = sync[0].item()
-                self.logger.info(self.current_block)
+                self.sync_current_block()
 
                 pages = await DatasetLoader.next_pages(
                     offset=self.current_block,
@@ -865,8 +858,7 @@ class Miner(BaseMinerNeuron):
             loss=0.0,
         )
         self.global_progress = GlobalTrainingProgress(epoch=0, samples_accumulated=0)
-        # self.global_progress.epoch = get_global_epoch(self)
-        self.global_progress.epoch = 0
+        self.global_progress.epoch = get_global_epoch(self)
         self.local_progress.epoch = self.global_progress.epoch
         self.local_progress.inner_step = get_local_inner_step(self)
 
@@ -1536,6 +1528,7 @@ class Miner(BaseMinerNeuron):
                 self.local_progress.samples_accumulated = 0
                 self.local_progress.inner_step = 0
                 self.local_progress.epoch += 1
+                self.sync_current_block()
                 self.last_allreduce_block = self.current_block
                 self.logger.info("AllReduce Operation Finished Succesfully")
                 self.start_background_upload(

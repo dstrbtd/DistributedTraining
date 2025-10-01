@@ -72,8 +72,6 @@ async def forward(self):
 
     """
     if self.master:
-        update_total_scores(self)
-
         # Evaluate wether to run an AllReduce or validate HF miner states
         if self.step % 2 == 0:
             map_uid_to_peerid(self)
@@ -119,7 +117,6 @@ async def forward(self):
                         k=sample_size,
                         epoch=self.local_progress.epoch,
                     )
-                    self.miner_uids = [0, 2]
                     if min_sample_size > 1:
                         min_sample_size = min_sample_size - 1
             dist.barrier()
@@ -198,8 +195,7 @@ async def forward(self):
                     all_reduce_success_status,
                     results,
                 ) = await self.avg_handler.run_validator_allreduce(
-                    # timeout=self.allreduce_timeout,
-                    timeout=100,
+                    timeout=self.allreduce_timeout,
                     wallet=self.wallet,
                     metagraph=self.metagraph,
                     peerids_to_uids=self.peerids_to_uids,
@@ -327,17 +323,32 @@ async def forward(self):
                         self.logger.info(
                             f"Error reporting allreduce metrics to dashboard {e}"
                         )
-
-                self.config.neuron.blocks_per_allreduce = 500
+                self.all_reduce_success_status = all_reduce_success_status
             else:
                 raise GradientAveragingError("Unsuccessful AllReduce Step")
 
         except Exception as e:
-            self.logger.error(f"AllReduce Failed: {e}")
-            self.global_progress.epoch = get_global_epoch(self)
             self.all_reduce_success_status = False
             return
 
+        finally:
+            all_reduce_completion = (
+                torch.tensor([1]) if self.all_reduce_success_status else torch.tensor([0])
+            )
+            dist.broadcast(all_reduce_completion, src=0, group=self.gloo_group)
+            self.logger.info(
+                "Synapse Completion" + str(all_reduce_completion[0].item())
+            )
+            if all_reduce_completion[0].item() != 1:
+                self.logger.error(f"AllReduce Failed: {e}")
+                self.global_progress.epoch = get_global_epoch(self)
+                self.all_reduce_success_status = False
+                self.last_allreduce_block += int(
+                    self.config.neruon.blocks_per_allreduce / 10
+                )
+            else:
+                self.all_reduce_success_status = True
+                self.config.neuron.blocks_per_allreduce = 500
         dist.barrier()
     else:
         if self.master:
@@ -366,6 +377,9 @@ async def forward(self):
         self.logger.info(f"UIDs:  {self.miner_uids}")
 
         await score_uids(self, self.miner_uids)
+
+        # if self.master:
+        #     breakpoint()
 
         if self.master:
             # Update train.scores for each UID
