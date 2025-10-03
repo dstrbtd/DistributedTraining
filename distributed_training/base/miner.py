@@ -191,6 +191,7 @@ class BaseMinerNeuron(BaseNeuron):
             self.logger.error(traceback.format_exc())
 
     def load_state(self, reset_last_allreduce_block=False):
+        # TODO Need to sync this across rnaks
         self.global_progress.epoch = get_global_epoch(self)
         if self.local_progress.epoch != self.global_progress.epoch:
             self.logger.info(

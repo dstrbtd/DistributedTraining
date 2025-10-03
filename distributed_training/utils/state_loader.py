@@ -1,5 +1,6 @@
 import copy
 import gc
+import boto3
 import os
 import requests
 import pytz
@@ -10,6 +11,7 @@ from functools import partial
 from pathlib import Path
 from typing import Optional
 
+import tempfile
 import psutil
 import torch
 from datetime import datetime
@@ -116,6 +118,22 @@ else:
     LRSchedulerBase = torch.optim.lr_scheduler._LRScheduler
 OptimizerFactory = Callable[[Union[Parameters, ParamGroups]], TorchOptimizer]
 SchedulerFactory = Callable[[TorchOptimizer], LRSchedulerBase]
+
+
+def r2_download(self, bucket, key, dst=None):
+    if dst is None:
+        fd, dst_path = tempfile.mkstemp()
+        os.close(fd)
+    else:
+        dst_path = dst
+        # if self.master:
+        #     breakpoint()
+        # dist.barrier()
+        if os.path.isdir(dst_path):
+            dst_path = os.path.join(dst_path, os.path.basename(key))
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    self.r2.download_file(bucket, key, dst_path)
+    return dst_path
 
 
 @staticmethod
@@ -482,10 +500,51 @@ def load_model_optimizer_gradient_averager(
         ):
             raise Exception(f"Failed to load model. Check model exists failed.")
 
+        R2_DATASET_ACCOUNT_ID = "b8ef6a12e4c28b77ecda126d6f02ab07"
+        R2_DATASET_BUCKET_NAME = "llama-1b-ws-2"
+        R2_DATASET_READ_ACCESS_KEY_ID = "c838304b4d1d11a387dc2220bbe6bd8b"
+        R2_DATASET_READ_SECRET_ACCESS_KEY = (
+            "59076c96a54e53b35f7d61d4feef32881e005c5a9d18371e0977c40432118384"
+        )
+
+        self.r2 = boto3.client(
+            "s3",
+            endpoint_url=f"https://{R2_DATASET_ACCOUNT_ID}.r2.cloudflarestorage.com",
+            aws_access_key_id=R2_DATASET_READ_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_DATASET_READ_SECRET_ACCESS_KEY,
+            region_name="auto",
+        )
+        revision = "0.0.0"
+        local_model_name = "llama-1b-ws-2"
+        # TODO change this to global_model_name
+        config_path = r2_download(
+            self, local_model_name, f"checkpoints/run-{revision}/config.json"
+        )
+        self.global_model_config = AutoConfig.from_pretrained(config_path)
+
         if not hasattr(self, "model"):
-            self.model = AutoModelForCausalLM.from_pretrained(
+            # self.model = AutoModelForCausalLM.from_pretrained(
+            #     local_model_name,
+            #     revision=revision,
+            #     trust_remote_code=False,
+            # )
+            tmpdir = tempfile.mkdtemp()  # create an ephemeral folder
+            model_path = r2_download(
+                self,
                 local_model_name,
-                revision=revision,
+                f"checkpoints/run-{revision}/model.safetensors",
+                tmpdir,
+            )
+            self.logger.info(model_path)
+            config_path = r2_download(
+                self,
+                local_model_name,
+                f"checkpoints/run-{revision}/config.json",
+                tmpdir,
+            )
+            self.logger.info(config_path)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                os.path.dirname(model_path),  # directory containing model files
                 trust_remote_code=False,
             )
 
@@ -510,6 +569,12 @@ def load_model_optimizer_gradient_averager(
                     repo_id=local_model_name,
                     filename="model.safetensors",
                     revision=revision,
+                )
+                saftensors_path = r2_download(
+                    self,
+                    local_model_name,
+                    f"checkpoints/run-{revision}/model.safetensors",
+                    tmpdir,
                 )
                 model_state = load_file(saftensors_path, device="cpu")
             else:
@@ -572,14 +637,23 @@ def load_model_optimizer_gradient_averager(
                     num_training_steps=88000,
                 )
 
+            # optimizer_state = torch.load(
+            #     hf_hub_download(
+            #         repo_id=local_model_name,
+            #         filename=f"inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
+            #         revision=revision,
+            #     ),
+            #     weights_only=True,
+            #     map_location="cpu",
+            # )
+            optimizer_state_path = r2_download(
+                self,
+                local_model_name,
+                f"checkpoints/run-{revision}/inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
+                tmpdir,
+            )
             optimizer_state = torch.load(
-                hf_hub_download(
-                    repo_id=local_model_name,
-                    filename=f"inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
-                    revision=revision,
-                ),
-                weights_only=True,
-                map_location="cpu",
+                optimizer_state_path, map_location="cpu", weights_only=True
             )
             self.logger.info(f"Donwloaded State")
 
@@ -694,6 +768,16 @@ def load_model_optimizer_gradient_averager(
                     ),
                     weights_only=True,
                     map_location="cpu",
+                )
+
+                optimizer_state_path = r2_download(
+                    self,
+                    "llama-1b-ws-2",
+                    f"checkpoints/run-{revision}/outer_optimizer.pt",
+                    tmpdir,
+                )
+                optimizer_state = torch.load(
+                    optimizer_state_path, map_location="cpu", weights_only=True
                 )
 
                 # Load optimizer state if available

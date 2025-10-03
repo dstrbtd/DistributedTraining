@@ -343,7 +343,7 @@ class Miner(BaseMinerNeuron):
 
                 if (
                     # self.local_progress.inner_step % self.config.neuron.upload_steps
-                    self.local_progress.inner_step % 20
+                    self.local_progress.inner_step % 1
                     == 0
                 ):
                     # # Upload model every x steps
@@ -377,20 +377,20 @@ class Miner(BaseMinerNeuron):
     ):
         # self.pause_training()
         bt.logging.info("Upload Model Start")
-        """Unified function to save and upload both model and optimizer state"""
-        if not repo_exists(self.config.neuron.local_model_name, repo_type="model"):
-            try:
-                create_repo(
-                    self.config.neuron.local_model_name,
-                    repo_type="model",
-                    private=False,
-                )
-                self.logger.info(
-                    f"Created new repository: {self.config.neuron.local_model_name}"
-                )
-            except Exception as e:
-                self.logger.error(f"Failed to create repository: {str(e)}")
-                raise
+        # """Unified function to save and upload both model and optimizer state"""
+        # if not repo_exists(self.config.neuron.local_model_name, repo_type="model"):
+        #     try:
+        #         create_repo(
+        #             self.config.neuron.local_model_name,
+        #             repo_type="model",
+        #             private=False,
+        #         )
+        #         self.logger.info(
+        #             f"Created new repository: {self.config.neuron.local_model_name}"
+        #         )
+        #     except Exception as e:
+        #         self.logger.error(f"Failed to create repository: {str(e)}")
+        #         raise
 
         attempt = 0
         while attempt < self.model_upload_retry_limit:
@@ -454,9 +454,10 @@ class Miner(BaseMinerNeuron):
                                 "neurons/miner.py",
                                 "distributed_training/utils/upload_worker.py",
                             ),
-                            self.config.neuron.local_model_name,
+                            self.config.neuron.local_model_name.split("/")[-1],
                             self.output_dir,
-                            commit_message,
+                            # commit_message,
+                            f"{__run__}.{epoch}.{self.model.config.inner_step}",
                         ]
                     )
                     while self.upload_process.poll() is None:
