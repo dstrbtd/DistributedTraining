@@ -126,11 +126,7 @@ def r2_download(self, bucket, key, dst=None):
         os.close(fd)
     else:
         dst_path = dst
-        # if self.master:
-        #     breakpoint()
-        # dist.barrier()
-        if os.path.isdir(dst_path):
-            dst_path = os.path.join(dst_path, os.path.basename(key))
+        dst_path = os.path.join(dst_path, os.path.basename(key.split("/")[-1]))
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
     self.r2.download_file(bucket, key, dst_path)
     return dst_path
@@ -529,6 +525,7 @@ def load_model_optimizer_gradient_averager(
             #     trust_remote_code=False,
             # )
             tmpdir = tempfile.mkdtemp()  # create an ephemeral folder
+            tmpdir = f"/root/{local_model_name}"
             model_path = r2_download(
                 self,
                 local_model_name,

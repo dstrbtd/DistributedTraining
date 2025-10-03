@@ -473,40 +473,40 @@ class Miner(BaseMinerNeuron):
                         else:
                             time.sleep(5)
 
-                    refs = list_repo_refs(
-                        self.config.neuron.local_model_name, repo_type="model"
-                    )
-                    for tag in refs.tags:
-                        if (tag.name == "None") or (
-                            tag.name
-                            == f"{__run__}.{epoch}.{self.model.config.inner_step}"
-                        ):
-                            # Update tag for this version
-                            delete_tag(
-                                self.config.neuron.local_model_name,
-                                repo_type="model",
-                                tag=tag.name,
-                            )
-                            time.sleep(30)
-                        elif (
-                            (len(tag.name.split(".")) == 3)
-                            and (tag.name.split(".")[0] == __run__)
-                            and (int(tag.name.split(".")[1]) > epoch)
-                        ):
-                            self.tag_deletion_queue.put(tag.name)
-                    # Create new tag for this version
-                    create_tag(
-                        self.config.neuron.local_model_name,
-                        repo_type="model",
-                        tag=f"{__run__}.{epoch}.{self.model.config.inner_step}",
-                        tag_message=commit_message,
-                    )
-                    # Cleanup old cache
-                    cleanup_old_cache(
-                        self,
-                        repo_id=self.config.neuron.local_model_name,
-                        current_revision=None,
-                    )
+                    # refs = list_repo_refs(
+                    #     self.config.neuron.local_model_name, repo_type="model"
+                    # )
+                    # for tag in refs.tags:
+                    #     if (tag.name == "None") or (
+                    #         tag.name
+                    #         == f"{__run__}.{epoch}.{self.model.config.inner_step}"
+                    #     ):
+                    #         # Update tag for this version
+                    #         delete_tag(
+                    #             self.config.neuron.local_model_name,
+                    #             repo_type="model",
+                    #             tag=tag.name,
+                    #         )
+                    #         time.sleep(30)
+                    #     elif (
+                    #         (len(tag.name.split(".")) == 3)
+                    #         and (tag.name.split(".")[0] == __run__)
+                    #         and (int(tag.name.split(".")[1]) > epoch)
+                    #     ):
+                    #         self.tag_deletion_queue.put(tag.name)
+                    # # Create new tag for this version
+                    # create_tag(
+                    #     self.config.neuron.local_model_name,
+                    #     repo_type="model",
+                    #     tag=f"{__run__}.{epoch}.{self.model.config.inner_step}",
+                    #     tag_message=commit_message,
+                    # )
+                    # # Cleanup old cache
+                    # cleanup_old_cache(
+                    #     self,
+                    #     repo_id=self.config.neuron.local_model_name,
+                    #     current_revision=None,
+                    # )
 
                     self.logger.info(
                         f"Successfully pushed new model state with tag {__run__}.{epoch}.{self.model.config.inner_step} to repo: {self.config.neuron.local_model_name}"
