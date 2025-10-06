@@ -221,7 +221,10 @@ class Miner(BaseMinerNeuron):
             #     # time.sleep(self.allreduce_timeout+self.upload_state_duration)
             else:
                 # TODO convert 2nd if statement to listener
-                self.sync()
+                try:
+                    self.sync()
+                except Exception as e:
+                    self.logger.error(f"Error during sync: {e}")
                 if (self.last_allreduce_block is not None) and (
                     (time.perf_counter() - self.all_reduce_start_time)
                     > (self.allreduce_timeout + self.upload_state_duration)
