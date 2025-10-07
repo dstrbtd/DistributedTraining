@@ -15,7 +15,7 @@ import shutil
 import json
 import torch.distributed as dist
 from distributed_training import __run__
-from distributed_training.data.dataset import DatasetLoader
+from distributed_training.data.dataset_loader import DatasetLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.constants import HF_HUB_CACHE
@@ -256,26 +256,21 @@ async def fetch_training_data(tokenizer):
     # print(SELF.local_rank, f"Fetched block {current_block} with uid {uid}")
     while attempt < retry_limit:
         try:
-            pages = await DatasetLoader.next_pages(
-                offset=current_block,
-                n_pages=5,
-                seed=uid,
-            )
-            random.seed(uid)
-            random.shuffle(pages)
-
-            dataset = await DatasetLoader.create(
-                batch_size=local_batch_size_train,
-                sequence_length=1024,
-                pages_info=pages,
+            loader = DatasetLoader(
                 tokenizer=tokenizer,
+                uid=uid,
+                current_block=current_block,
             )
 
-            dataset_length = torch.tensor(len(dataset.buffer))
-            dist.all_reduce(dataset_length, op=dist.ReduceOp.MIN, group=SELF.gloo_group)
-            dataset.buffer = dataset.buffer[:dataset_length]
+            await loader.load_bucket_data_to_buffer()
 
-            return dataset
+            dataset_length = torch.tensor(len(loader.buffer))
+            dist.all_reduce(dataset_length, op=dist.ReduceOp.MIN, group=SELF.gloo_group)
+            loader.buffer = loader.buffer[:dataset_length]
+
+            loader.prepare_batches()
+
+            return loader
         except Exception as e:
             print(f"Error fetching training data: {str(e)}")
             attempt += 1
@@ -393,7 +388,8 @@ def evaluate_fineweb(
     logger.info(f"{SELF.local_rank},{score}")
 
     if SELF.master:
-        log_score(tag, "fineweb", score)
+        # log_score(tag, "fineweb", score)
+        pass
     dist.barrier(device_ids=[SELF.local_rank])
     return score
 
@@ -435,7 +431,8 @@ def evaluate_with_lm_harness(
     # exit_code = 0
     # breakpoint()
     if exit_code == 0:
-        log_score(tag, "lm_eval", score, output_dir)
+        # log_score(tag, "lm_eval", score, output_dir)
+        pass
     # breakpoint()
     benchmark_runtime = time.time() - start_time
     # breakpoint()

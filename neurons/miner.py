@@ -76,7 +76,7 @@ from distributed_training import __run__
 
 # from distributed_training.averaging.avg_handler import AllReduceError
 from distributed_training.base.miner import BaseMinerNeuron, TrainingStatus
-from distributed_training.data.dataset import DatasetLoader
+from distributed_training.data.dataset_loader import DatasetLoader
 from distributed_training.utils.chain import log_r2_to_chain
 from distributed_training.utils.misc import (
     init_dht,
@@ -571,31 +571,27 @@ class Miner(BaseMinerNeuron):
         attempt = 0
         while attempt < self.retry_limit:
             try:
-                pages = await DatasetLoader.next_pages(
-                    offset=block,
-                    n_pages=5,
-                    seed=self.uid + self.local_rank,
-                )
-                rng = np.random.default_rng(hash(self.uid) & 0xFFFFFFFF)
-                rng.shuffle(pages)
-
-                self.logger.debug(pages)
-
-                dataset = await DatasetLoader.create(
-                    batch_size=self.config.neuron.local_batch_size_train,
-                    sequence_length=1024,
-                    pages_info=pages,
+                self.set_current_block_across_ranks()
+                
+                loader = DatasetLoader(
                     tokenizer=self.tokenizer,
+                    uid=self.uid + self.local_rank,
+                    current_block=self.current_block,
+                    max_configs=1, # REMOVE BECAUSE JUT FOR DEBUGGING
                 )
+            
+                await loader.load_bucket_data_to_buffer()
 
-                dataset_length = torch.tensor(len(dataset.buffer))
+                dataset_length = torch.tensor(len(loader.buffer))
                 dist.all_reduce(
                     dataset_length, op=dist.ReduceOp.MIN, group=self.gloo_group
                 )
-                dataset.buffer = dataset.buffer[:dataset_length]
-                self.logger.debug("Dataset Buffer Length", len(dataset.buffer))
+                loader.buffer = loader.buffer[:dataset_length]
+                self.logger.debug("Dataset Buffer Length", len(loader.buffer))                
 
-                return dataset
+                loader.prepare_batches()                
+
+                return loader
             except Exception as e:
                 self.logger.error(f"Error fetching training data: {str(e)}")
                 attempt += 1
@@ -1180,6 +1176,64 @@ class Miner(BaseMinerNeuron):
             self.logger.info(
                 ":white_heavy_check_mark: Starting continuous training worker"
             )
+
+    def pause_training(self):
+        """Pauses the continuous training loop"""
+        self.training_active.clear()
+        time.sleep(1)
+        self.training_status = TrainingStatus.PAUSED
+        self.logger.info(":warning:  Pausing continuous training.")
+
+    def resume_training(self):
+        """Resumes the continuous training loop"""
+        self.training_active.set()
+        self.training_status = TrainingStatus.RUNNING
+        self.logger.info(":white_heavy_check_mark: Resuming continuous training.")
+
+    async def fetch_training_data(self):
+        """Async function to fetch training data"""
+        attempt = 0
+        while attempt < self.retry_limit:
+            try:
+                debug = True
+                randomness = True
+                sequence_length = 1024
+
+                max_configs = 3
+                max_rows_per_group = 100
+
+                batch_size = 4
+
+                loader = DatasetLoader(
+                    debug=debug,
+                    randomness=randomness,
+                    sequence_length=sequence_length,
+                    tokenizer=self.tokenizer,
+                    uid=self.uid,
+                    current_block=self.current_block,
+                )
+
+                await loader.load_bucket_data_to_buffer(
+                    max_configs=max_configs,
+                    max_rows_per_group=max_rows_per_group
+                )
+
+                loader.prepare_batches(batch_size=batch_size)
+
+                return loader
+            except Exception as e:
+                self.logger.error(f"Error fetching training data: {str(e)}")
+                attempt += 1
+                self.logger.warning(
+                    f"Failed to fetch data, retrying. Attempt {attempt}/{self.retry_limit}"
+                )
+                if attempt < self.retry_limit:
+                    time.sleep(self.retry_delay * attempt)  # Wait before the next retry
+                else:
+                    self.logger.error(
+                        "Maximum retry limit reached. Unable to fetch data."
+                    )
+                    raise
 
     def _training_worker(self):
         """Worker function that runs in the ThreadPoolExecutor"""

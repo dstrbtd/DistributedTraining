@@ -36,7 +36,7 @@ from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundErro
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from distributed_training import __run__
-from distributed_training.data.dataset import DatasetLoader
+from distributed_training.data.dataset_loader import DatasetLoader
 from distributed_training.utils.progress_tracker import get_progress, get_r2_client
 from distributed_training.utils.state_loader import (
     cleanup_old_cache,
@@ -83,29 +83,28 @@ async def fetch_training_data(
     attempt = 0
     while attempt < self.retry_limit:
         try:
-            pages = await DatasetLoader.next_pages(
-                offset=block,
-                n_pages=n_pages,
-                seed=uid + self.local_rank,
-            )
-            rng = np.random.default_rng(hash(self.uid) & 0xFFFFFFFF)
-            rng.shuffle(pages)
-
-            self.logger.debug(pages)
-
-            dataset = await DatasetLoader.create(
-                batch_size=self.config.neuron.local_batch_size_train,
-                sequence_length=1024,
-                pages_info=pages,
+            loader = DatasetLoader(
                 tokenizer=self.tokenizer,
+                uid=uid + self.local_rank, # Assuming self.local_rank (1-4) is also what miner provided. 
+                current_block=block,              
             )
+ 
+            await loader.load_bucket_data_to_buffer()
+     
+            # 1) add method="truncate" for debugging
+            # 2) default buffer quantity is 2300000 so we set to small quantity of 460000 (20%)
+            #    similar to how old code used n_pages=1
+            loader.reduce_buffer_size(target_size=460000)
 
-            dataset_length = torch.tensor(len(dataset.buffer))
+            dataset_length = torch.tensor(len(loader.buffer))
             dist.all_reduce(dataset_length, op=dist.ReduceOp.MIN, group=self.gloo_group)
-            dataset.buffer = dataset.buffer[:dataset_length]
-            self.logger.debug("Dataset Buffer Length", len(dataset.buffer))
+            loader.buffer = loader.buffer[:dataset_length]
+            self.logger.debug("Dataset Buffer Length", len(loader.buffer))
 
-            return dataset
+            loader.prepare_batches()    
+
+            return loader
+
         except Exception as e:
             self.logger.error(f"Error fetching training data: {str(e)}")
             attempt += 1

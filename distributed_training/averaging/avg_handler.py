@@ -10,7 +10,7 @@ import numpy as np
 from typing import Any, Dict, List, Tuple
 from distributed_training.averaging.exceptions import AllReduceError, ModelStateError
 from distributed_training.protocol import AllReduce
-from distributed_training.data.dataset import DatasetLoader
+from distributed_training.data.dataset_loader import DatasetLoader
 from distributed_training.utils.dendrite import (
     async_dendrite_forward,
 )
@@ -85,22 +85,22 @@ class AveragingHandler:
         attempt = 0
         while attempt < self.retry_limit:
             try:
-                pages = await DatasetLoader.next_pages(
-                    offset=block,
-                    n_pages=5,
-                    seed=self.uid,
-                )
-                random.seed(self.uid)
-                random.shuffle(pages)
-
-                dataset = await DatasetLoader.create(
-                    batch_size=4,
-                    sequence_length=1024,
-                    pages_info=pages,
+                loader = DatasetLoader(
                     tokenizer=self.tokenizer,
+                    uid=self.uid,
+                    current_block=block,
                 )
 
-                return dataset
+                await loader.load_bucket_data_to_buffer()
+
+                # 1) add method="truncate" for debugging
+                # 2) default buffer quantity is 2300000 so we set to small quantity of 460000 (20%) 
+                #    cause here we only verify
+                loader.reduce_buffer_size(target_size=460000)                 
+
+                loader.prepare_batches()       
+        
+                return loader                
             except Exception as e:
                 self.logger.error(f"Error fetching training data: {str(e)}")
                 attempt += 1
