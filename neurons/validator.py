@@ -104,11 +104,18 @@ class Validator(BaseValidatorNeuron):
         while commitment == None:
             try:
                 if self.master:
-                    commitment = [
-                        self.subtensor.get_commitment(
-                            self.config.netuid, self.master_uid
-                        )
-                    ]
+                    if self.uid == self.master_uid:
+                        commitment = [
+                            self.config.r2.account_id
+                            + self.config.r2.write.access_key_id
+                            + self.config.r2.write.secret_access_key
+                        ]
+                    else:
+                        commitment = [
+                            self.subtensor.get_commitment(
+                                self.config.netuid, self.master_uid
+                            )
+                        ]
                 else:
                     commitment = [
                         self.config.r2.account_id

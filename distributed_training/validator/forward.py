@@ -112,6 +112,7 @@ async def forward(self):
                         k=sample_size,
                         epoch=self.local_progress.epoch,
                     )
+                    self.miner_uids = [0, 2]
                     if min_sample_size > 1:
                         min_sample_size = min_sample_size - 1
             dist.barrier()
@@ -160,7 +161,7 @@ async def forward(self):
                 if top_uid_index < len(self.miner_uids):
                     top_uid = self.miner_uids[top_uid_index]
                 else:
-                    top_uid = 170
+                    top_uid = 1
                 self.local_progress.epoch = self.global_progress.epoch
 
                 if self.master:

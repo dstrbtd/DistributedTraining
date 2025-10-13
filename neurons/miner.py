@@ -482,7 +482,6 @@ class Miner(BaseMinerNeuron):
                     self.logger.info(
                         f":upload: Uploading model and optimizer states to r2 bucket: {self.config.r2.bucket_name}"
                     )
-                    commit_message = f"Run {__run__}. Outer Step {epoch}. Inner Step {self.local_progress.inner_step}."
                     self.upload_process = subprocess.Popen(
                         [
                             "python",

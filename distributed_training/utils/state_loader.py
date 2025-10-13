@@ -1,6 +1,5 @@
 import copy
 import gc
-from botocore.client import BaseClient
 from botocore.exceptions import ClientError
 import os
 import requests
@@ -46,6 +45,10 @@ from distributed_training.utils.progress_tracker import (
     get_min_local_inner_Step,
     get_r2_client,
 )
+from distributed_training.utils.upload_worker import (
+    archive_root_bucket,
+    upload_folder_to_r2,
+)
 from distributed_training.averaging.avg_handler import AveragingHandler
 from huggingface_hub import list_repo_commits
 
@@ -63,6 +66,7 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
 )
 import time
+import filelock
 
 hivemind_logger = get_logger(__name__)
 
@@ -104,11 +108,6 @@ from safetensors.torch import save_file, load_file
 from botocore.client import BaseClient
 import json
 
-import boto3
-from botocore.config import Config
-from s3transfer.manager import TransferManager
-from boto3.s3.transfer import TransferConfig, S3Transfer
-
 torch.serialization.add_safe_globals([DTensorSpec])
 torch.serialization.add_safe_globals([DTensor])
 torch.serialization.add_safe_globals([DM])
@@ -145,7 +144,9 @@ def r2_download(self, r2, bucket, key, multiple_ranks=True, destination=None):
             self.logger.info(bucket)
             self.logger.info(key)
             self.logger.info(destination_path)
-            r2.download_file(bucket, key, destination_path)
+            lock_path = destination_path + ".lock"
+            with filelock.FileLock(lock_path):
+                r2.download_file(bucket, key, destination_path)
             success = torch.tensor([1], dtype=torch.int, device="cuda")
         except Exception as e:
             self.logger.info(f"Download failed due to error: {e}")
@@ -999,44 +1000,6 @@ def cleanup_old_cache(self):
     return
 
 
-def archive_root_bucket(r2: BaseClient, bucket: str, epoch: int):
-    # multipart thresholds/chunks; tune as needed
-    tcfg = TransferConfig(
-        multipart_threshold=8 * 1024 * 1024,  # 8MB
-        multipart_chunksize=64 * 1024 * 1024,  # 64MB
-        max_concurrency=4,
-        use_threads=True,
-    )
-
-    archive_prefix = f"epoch-{epoch}/"
-    paginator = r2.get_paginator("list_objects_v2")
-    with TransferManager(r2, config=tcfg) as tm:
-        futures = []
-        for page in paginator.paginate(Bucket=bucket):
-            for obj in page.get("Contents", []):
-                key = obj["Key"]
-
-                # ✅ skip pseudo-folders or empty keys
-                if (not key) or ("epoch-" in key) or (obj["Size"] == 0):
-                    continue
-
-                dest_key = f"{archive_prefix}{key}"
-
-                futures.append(
-                    tm.copy(
-                        copy_source={"Bucket": bucket, "Key": key},
-                        bucket=bucket,
-                        key=dest_key,
-                        extra_args={"MetadataDirective": "COPY"},
-                    )
-                )
-
-        # wait for all copies to finish (raises on failure)
-        for f in futures:
-            f.result()
-    r2.close()
-
-
 def upload_new_state(
     self,
     epoch: int,
@@ -1200,6 +1163,17 @@ def save_and_upload_state(
                     )
                     self.logger.info("Save optimizer")
 
+                    # Save metadata
+                    metadata = {
+                        "run": int(__run__),
+                        "outer_step": int(self.local_progress.epoch),
+                        "inner_step": int(self.local_progress.inner_step),
+                    }
+                    with open(
+                        os.path.join(self.output_dir, f"metadata.json"), "w"
+                    ) as f:
+                        json.dump(metadata, f, indent=4, sort_keys=True)
+
                 # Save inner optimizer state
                 inner_optimizer_state = {
                     "optimizer_state_dict": inner_optimizer_state,
@@ -1220,20 +1194,15 @@ def save_and_upload_state(
                 )
 
                 # Upload everything in one go
-                commit_message = f"Run {__run__}. Outer Step {epoch}. Inner Step {0}. Peers {len(participating_peers) - len(failed_peers)}."
-                upload_folder(
-                    folder_path=tmp_folder,
-                    repo_id=self.config.neuron.global_model_name,
-                    repo_type="model",
-                    commit_message=commit_message,
+                upload_folder_to_r2(
+                    r2=self.r2["global"],
+                    bucket=self.config.r2.bucket_name,
                 )
 
-                # Create a tag for this version
-                create_tag(
-                    self.config.neuron.global_model_name,
-                    repo_type="model",
-                    tag=f"{__run__}.{epoch}.{0}",
-                    tag_message=commit_message,
+                archive_root_bucket(
+                    r2=self.r2["global"],
+                    bucket=self.config.r2.bucket_name,
+                    epoch=self.local_progress.epoch,
                 )
 
                 self.logger.info(
