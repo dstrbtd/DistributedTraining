@@ -22,9 +22,21 @@ import os
 import bittensor as bt
 import torch
 from distributed_training import __run__, __version__
-from dotenv import load_dotenv
+from dataclasses import dataclass
 
-load_dotenv()
+
+@dataclass
+class R2Access:
+    access_key_id: str | None = None
+    secret_access_key: str | None = None
+
+
+@dataclass
+class R2Config:
+    bucket_name: str | None = None
+    account_id: str | None = None
+    read: R2Access = R2Access()
+    write: R2Access = R2Access()
 
 
 def check_config(cls, config: "bt.Config"):
@@ -54,7 +66,6 @@ def add_args(cls, parser, prefix=None):
     parser.add_argument("--netuid", type=int, help="Subnet netuid", default=1)
 
     neuron_type = "validator" if "miner" not in cls.__name__.lower() else "miner"
-
     prefix_str = "" if prefix == None else prefix + "."
     try:
         default_name = os.getenv("BT_WALLET_NAME") or "default"
@@ -157,7 +168,14 @@ def add_args(cls, parser, prefix=None):
         "--neuron.global_model_name",
         type=str,
         help="The model to be trained",
-        default="dstrbtd/llama-1b-ws-2",
+        default="llama-1b-ws-2",
+    )
+
+    parser.add_argument(
+        "--neuron.global_tokenizer_name",
+        type=str,
+        help="The HF repo_id of the tokenizer to be used for training",
+        default="dstrbtd/llama-1b",
     )
 
     parser.add_argument(

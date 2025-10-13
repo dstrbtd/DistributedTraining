@@ -28,8 +28,7 @@ from distributed_training.base.neuron import BaseNeuron
 from distributed_training.utils.chain import log_peerid_to_chain
 from distributed_training.utils.misc import get_bandwidth
 from distributed_training.utils.state_loader import load_state_from_peer
-from distributed_training.utils.progress_tracker import get_global_epoch
-import torch.distributed.rpc as rpc
+from distributed_training.utils.progress_tracker import get_progress
 
 
 class TrainingStatus(Enum):
@@ -191,8 +190,7 @@ class BaseMinerNeuron(BaseNeuron):
             self.logger.error(traceback.format_exc())
 
     def load_state(self, reset_last_allreduce_block=False):
-        # TODO Need to sync this across rnaks
-        self.global_progress.epoch = get_global_epoch(self)
+        self.global_progress.epoch = get_progress(self, "global")[0]
         if self.local_progress.epoch != self.global_progress.epoch:
             self.logger.info(
                 f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
@@ -209,7 +207,7 @@ class BaseMinerNeuron(BaseNeuron):
             else:
                 load_state_from_peer(
                     self,
-                    repo_id=self.config.neuron.local_model_name,
+                    uid=self.uid,
                     epoch=self.global_progress.epoch,
                 )
             self.model.config.block_list = []

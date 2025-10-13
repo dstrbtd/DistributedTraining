@@ -1,6 +1,7 @@
 import copy
 import gc
-import boto3
+from botocore.client import BaseClient
+from botocore.exceptions import ClientError
 import os
 import requests
 import pytz
@@ -41,9 +42,9 @@ from distributed_training import __run__
 from distributed_training.averaging.averagers import DTGradAverager, DTStateAverager
 
 from distributed_training.utils.progress_tracker import (
-    get_global_epoch,
-    get_local_inner_step,
+    get_progress,
     get_min_local_inner_Step,
+    get_r2_client,
 )
 from distributed_training.averaging.avg_handler import AveragingHandler
 from huggingface_hub import list_repo_commits
@@ -100,6 +101,13 @@ from torch.distributed.device_mesh import DeviceMesh as DM
 from torch.distributed.tensor.placement_types import Shard
 import hivemind
 from safetensors.torch import save_file, load_file
+from botocore.client import BaseClient
+import json
+
+import boto3
+from botocore.config import Config
+from s3transfer.manager import TransferManager
+from boto3.s3.transfer import TransferConfig, S3Transfer
 
 torch.serialization.add_safe_globals([DTensorSpec])
 torch.serialization.add_safe_globals([DTensor])
@@ -120,16 +128,40 @@ OptimizerFactory = Callable[[Union[Parameters, ParamGroups]], TorchOptimizer]
 SchedulerFactory = Callable[[TorchOptimizer], LRSchedulerBase]
 
 
-def r2_download(self, bucket, key, dst=None):
-    if dst is None:
-        fd, dst_path = tempfile.mkstemp()
+def r2_download(self, r2, bucket, key, multiple_ranks=True, destination=None):
+    if destination is None:
+        fd, destination_path = tempfile.mkstemp()
         os.close(fd)
     else:
-        dst_path = dst
-        dst_path = os.path.join(dst_path, os.path.basename(key.split("/")[-1]))
-    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-    self.r2.download_file(bucket, key, dst_path)
-    return dst_path
+        destination_path = destination
+        destination_path = os.path.join(
+            destination_path, os.path.basename(key.split("/")[-1])
+        )
+
+    # Let only the master perform the actual download
+    if (self.master) or (multiple_ranks):
+        try:
+            os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+            self.logger.info(bucket)
+            self.logger.info(key)
+            self.logger.info(destination_path)
+            r2.download_file(bucket, key, destination_path)
+            success = torch.tensor([1], dtype=torch.int, device="cuda")
+        except Exception as e:
+            self.logger.info(f"Download failed due to error: {e}")
+            success = torch.tensor([0], dtype=torch.int, device="cuda")
+    else:
+        success = torch.tensor([0], dtype=torch.int, device="cuda")
+
+    if multiple_ranks:
+        # Broadcast success flag from master to everyone
+        dist.broadcast(success, src=0)
+
+        # If master failed, all ranks raise the same error
+        if success.item() == 0:
+            raise RuntimeError("Master rank failed during r2_download().")
+
+    return destination_path
 
 
 @staticmethod
@@ -316,13 +348,21 @@ def initialize_optimizer_state_(opt: torch.optim.Optimizer):
         param.grad = old_grad
 
 
-def check_model_exists(self, repo_id: str, revision: Optional[str] = None) -> bool:
+def check_model_exists(
+    self, r2: BaseClient, bucket_name: str, revision: Optional[str] = None
+) -> bool:
     try:
-        if revision and revision != "None":
-            list_repo_files(repo_id, revision=revision)
+        obj = r2.get_object(Bucket=bucket_name, Key="metadata.json")
+        data = obj["Body"].read()
+        metadata = json.loads(data)
+        meatadata_revision = (
+            f"{metadata['run']}.{metadata['outer_step']}.{metadata['inner_step']}"
+        )
+        if revision and revision != "None" and revision != meatadata_revision:
+            return False
         else:
-            list_repo_files(repo_id)
-        return True
+            return True
+
     except Exception as e:
         self.logger.info(f"Model or revision check failed with error: {e}")
         return False
@@ -402,7 +442,7 @@ def cuda_mem(logger, tag):
 
 def load_model_optimizer_gradient_averager(
     self,
-    local_model_name,
+    uid,
     epoch,
     reload_inner_optimizer=True,
     reload_outer_optimizer=True,
@@ -418,15 +458,34 @@ def load_model_optimizer_gradient_averager(
     self.logger.debug(
         f"CPU Memory Before Loading State {psutil.virtual_memory().available / 10**9} GB"
     )
-    global_model_name = self.config.neuron.global_model_name
-    self.global_model_config = AutoConfig.from_pretrained(
-        global_model_name, trust_remote_code=True
-    )
+    r2 = get_r2_client(self, uid, multiple_ranks=True)
 
-    if (revision is None) and (local_model_name != global_model_name):
+    global_model_name = self.config.neuron.global_model_name
+    global_model_revision = f"{__run__}.{epoch}.0"
+    global_model_output_dir = os.path.join(os.getcwd(), global_model_name)
+    global_config_path = r2_download(
+        self,
+        r2=r2,
+        bucket=global_model_name,
+        key=f"epoch-{epoch}/config.json",
+        multiple_ranks=True,
+        destination=global_model_output_dir,
+    )
+    # self.global_model_config = AutoConfig.from_pretrained(global_config_path)
+    with open(global_config_path, "r") as file:
+        self.global_model_config = json.load(file)
+
+    if (revision is None) and (uid != self.master_uid):
         revision = f"{__run__}.{epoch}.{self.local_progress.inner_step}"
-    elif (revision is None) and (local_model_name == global_model_name):
+    elif (revision is None) and (uid == self.master_uid):
         revision = f"{__run__}.{epoch}.0"
+
+    local_model_name = (
+        f"{self.config.neuron.global_model_name.split('/')[-1]}-{self.uid:03d}"
+        if uid != self.master_uid
+        else self.config.neuron.global_model_name
+    )
+    output_dir = os.path.join(os.getcwd(), local_model_name)
 
     # # Delete existing outer optimizer
     # if hasattr(self, "outer_optimizer"):
@@ -491,57 +550,37 @@ def load_model_optimizer_gradient_averager(
 
         if not check_model_exists(
             self,
+            r2,
             local_model_name,
             revision=revision,
         ):
             raise Exception(f"Failed to load model. Check model exists failed.")
 
-        R2_DATASET_ACCOUNT_ID = "b8ef6a12e4c28b77ecda126d6f02ab07"
-        R2_DATASET_BUCKET_NAME = "llama-1b-ws-2"
-        R2_DATASET_READ_ACCESS_KEY_ID = "c838304b4d1d11a387dc2220bbe6bd8b"
-        R2_DATASET_READ_SECRET_ACCESS_KEY = (
-            "59076c96a54e53b35f7d61d4feef32881e005c5a9d18371e0977c40432118384"
-        )
-
-        self.r2 = boto3.client(
-            "s3",
-            endpoint_url=f"https://{R2_DATASET_ACCOUNT_ID}.r2.cloudflarestorage.com",
-            aws_access_key_id=R2_DATASET_READ_ACCESS_KEY_ID,
-            aws_secret_access_key=R2_DATASET_READ_SECRET_ACCESS_KEY,
-            region_name="auto",
-        )
-        revision = "0.0.0"
-        local_model_name = "llama-1b-ws-2"
-        # TODO change this to global_model_name
-        config_path = r2_download(
-            self, local_model_name, f"checkpoints/run-{revision}/config.json"
-        )
-        self.global_model_config = AutoConfig.from_pretrained(config_path)
-
         if not hasattr(self, "model"):
-            # self.model = AutoModelForCausalLM.from_pretrained(
-            #     local_model_name,
-            #     revision=revision,
-            #     trust_remote_code=False,
-            # )
-            tmpdir = tempfile.mkdtemp()  # create an ephemeral folder
-            tmpdir = f"/root/{local_model_name}"
+            self.logger.info("START MODEL STATE LOAD")
             model_path = r2_download(
                 self,
-                local_model_name,
-                f"checkpoints/run-{revision}/model.safetensors",
-                tmpdir,
+                r2=r2,
+                bucket=local_model_name,
+                key=f"epoch-{epoch}/model.safetensors",
+                multiple_ranks=True,
+                destination=output_dir,
             )
             self.logger.info(model_path)
             config_path = r2_download(
                 self,
-                local_model_name,
-                f"checkpoints/run-{revision}/config.json",
-                tmpdir,
+                r2=r2,
+                bucket=local_model_name,
+                key=f"epoch-{epoch}/config.json",
+                multiple_ranks=True,
+                destination=output_dir,
             )
             self.logger.info(config_path)
+            # dist.barrier(device_ids=[torch.cuda.current_device()])
+            dist.barrier()
+            self.logger.info("END MODEL STATE LOAD")
             self.model = AutoModelForCausalLM.from_pretrained(
-                os.path.dirname(model_path),  # directory containing model files
+                output_dir,  # directory containing model files
                 trust_remote_code=False,
             )
 
@@ -562,16 +601,13 @@ def load_model_optimizer_gradient_averager(
             fully_shard(self.model, mesh=self.mesh, mp_policy=mp_policy)
         else:
             if self.master:
-                saftensors_path = hf_hub_download(
-                    repo_id=local_model_name,
-                    filename="model.safetensors",
-                    revision=revision,
-                )
                 saftensors_path = r2_download(
                     self,
-                    local_model_name,
-                    f"checkpoints/run-{revision}/model.safetensors",
-                    tmpdir,
+                    r2=r2,
+                    bucket=local_model_name,
+                    key=f"epoch-{epoch}/model.safetensors",
+                    multiple_ranks=False,
+                    destination=output_dir,
                 )
                 model_state = load_file(saftensors_path, device="cpu")
             else:
@@ -634,20 +670,13 @@ def load_model_optimizer_gradient_averager(
                     num_training_steps=88000,
                 )
 
-            # optimizer_state = torch.load(
-            #     hf_hub_download(
-            #         repo_id=local_model_name,
-            #         filename=f"inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
-            #         revision=revision,
-            #     ),
-            #     weights_only=True,
-            #     map_location="cpu",
-            # )
             optimizer_state_path = r2_download(
                 self,
-                local_model_name,
-                f"checkpoints/run-{revision}/inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
-                tmpdir,
+                r2=r2,
+                bucket=local_model_name,
+                key=f"epoch-{epoch}/inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
+                multiple_ranks=True,
+                destination=output_dir,
             )
             optimizer_state = torch.load(
                 optimizer_state_path, map_location="cpu", weights_only=True
@@ -757,21 +786,13 @@ def load_model_optimizer_gradient_averager(
         if reload_outer_optimizer:
             optimizer_state = None
             try:
-                optimizer_state = torch.load(
-                    hf_hub_download(
-                        repo_id=global_model_name,
-                        filename="outer_optimizer.pt",
-                        revision=".".join(revision.split(".")[:-1] + ["0"]),
-                    ),
-                    weights_only=True,
-                    map_location="cpu",
-                )
-
                 optimizer_state_path = r2_download(
                     self,
-                    "llama-1b-ws-2",
-                    f"checkpoints/run-{revision}/outer_optimizer.pt",
-                    tmpdir,
+                    r2=r2,
+                    bucket=global_model_name,
+                    key=f"epoch-{epoch}/outer_optimizer.pt",
+                    multiple_ranks=False,
+                    destination=output_dir,
                 )
                 optimizer_state = torch.load(
                     optimizer_state_path, map_location="cpu", weights_only=True
@@ -819,25 +840,25 @@ def load_model_optimizer_gradient_averager(
             self.device,
             # parameters_list,
         )
-
-        if (
-            (self.master)
-            and (self.local_progress.inner_step != 0)
-            and ("." in revision)
-        ):
-            self.avg_handler.reset_main_parameters(
-                local_model_name,
-                revision=".".join(
-                    revision.split(".")[:-1]
-                    + [
-                        str(
-                            get_min_local_inner_Step(
-                                self, local_model_name, epoch=epoch
-                            )
-                        )
-                    ]
-                ),
-            )
+        # TODO
+        # if (
+        #     (self.master)
+        #     and (self.local_progress.inner_step != 0)
+        #     and ("." in revision)
+        # ):
+        #     self.avg_handler.reset_main_parameters(
+        #         local_model_name,
+        #         revision=".".join(
+        #             revision.split(".")[:-1]
+        #             + [
+        #                 str(
+        #                     get_min_local_inner_Step(
+        #                         self, local_model_name, epoch=epoch
+        #                     )
+        #                 )
+        #             ]
+        #         ),
+        #     )
 
     self.logger.info(
         f"CPU Memory After Loading State {psutil.virtual_memory().available / 10**9} GB"
@@ -847,7 +868,7 @@ def load_model_optimizer_gradient_averager(
 
 def load_state_from_peer(
     self,
-    repo_id=None,
+    uid=None,
     epoch=None,
     reload_inner_optimizer=True,
     reload_outer_optimizer=True,
@@ -857,13 +878,13 @@ def load_state_from_peer(
     try:
         state_loaded = False
         if epoch is None:
-            self.global_progress.epoch = get_global_epoch(self)
+            self.global_progress.epoch = get_progress(self, "global")[0]
             epoch = self.global_progress.epoch
-        if repo_id is None:
-            repo_id = self.config.neuron.global_model_name
-        self.local_progress.inner_step = get_local_inner_step(
-            self, repo_id, epoch=self.global_progress.epoch
-        )
+        if uid is None:
+            uid = self.master_uid
+        self.local_progress.inner_step = get_progress(
+            self, "local", self.config.r2.bucket_name, epoch=self.global_progress.epoch
+        )[1]
 
         # self.logger.debug("Model Weights Before Loading State")
         # current_model_weights_sample = copy.copy(
@@ -888,7 +909,7 @@ def load_state_from_peer(
                         [
                             load_model_optimizer_gradient_averager(
                                 self,
-                                local_model_name=repo_id,
+                                uid=uid,
                                 epoch=epoch,
                                 reload_inner_optimizer=reload_inner_optimizer,
                                 reload_outer_optimizer=reload_outer_optimizer,
@@ -896,16 +917,18 @@ def load_state_from_peer(
                             )
                         ]
                     )
+                    self.logger.info(f"Loading success: {loading_success}")
                     dist.all_reduce(loading_success, group=self.gloo_group)
+                    self.logger.info(f"Loading success: {loading_success}")
                     if (loading_success[0].item() != self.world_size) and (
-                        repo_id != self.config.neuron.global_model_name
+                        uid != self.master_uid
                     ):
                         self.logger.info(
                             "LOAD GLOBAL MODEL",
                             load_model_optimizer_gradient_averager(
                                 self,
-                                self.config.neuron.global_model_name,
-                                self.global_progress.epoch,
+                                uid=self.master_uid,
+                                epoch=self.global_progress.epoch,
                             ),
                         )
                     break
@@ -919,8 +942,8 @@ def load_state_from_peer(
                                 [
                                     load_model_optimizer_gradient_averager(
                                         self,
-                                        self.config.neuron.global_model_name,
-                                        self.global_progress.epoch,
+                                        uid=self.master_uid,
+                                        epoch=self.global_progress.epoch,
                                     ),
                                 ]
                             )
@@ -945,21 +968,7 @@ def load_state_from_peer(
             self.local_progress.samples_accumulated = 0
             self.logger.info(f"New Model Tag: {self.global_progress.epoch}")
 
-            # Clean up old cache
-            try:
-                cleanup_old_cache(self, repo_id, revision)
-            except Exception as e:
-                self.logger.warning(f"Failed to cleanup cache: {str(e)}")
-
-            if repo_id != self.config.neuron.global_model_name:
-                try:
-                    cleanup_old_cache(
-                        self,
-                        self.config.neuron.global_model_name,
-                        current_revision=None,
-                    )
-                except Exception as e:
-                    self.logger.warning(f"Failed to cleanup cache: {str(e)}")
+            cleanup_old_cache(self)
 
         else:
             self.logger.debug(f"Model With Tag: {epoch} Does Not Exist")
@@ -971,74 +980,61 @@ def load_state_from_peer(
         return False
 
 
-def cleanup_old_cache(self, repo_id=None, current_revision=None):
+def cleanup_old_cache(self):
     """Helper method to clean up old cache files"""
     if self.master:
-        if repo_id is None:
-            repo_id = self.config.neuron.global_model_name
-            current_revision = self.model.config._commit_hash
+        files = [
+            file
+            for file in os.listdir(os.getcwd())
+            if os.path.isdir(file)
+            and (self.config.neuron.global_model_name in file)
+            and (file != self.config.r2.bucket_name)
+        ]
+        for file in files:
+            try:
+                shutil.rmtree(file)
+                self.logger.info(f"Deleting cache for model {file}")
+            except Exception as e:
+                self.logger.info(f"Error deleting cache for model {file}: {e}")
+    return
 
-        cache_info = scan_cache_dir()
-        broken_cache_list = [str(warning) for warning in cache_info.warnings]
-        cache_dir = HF_HUB_CACHE
-        cache_dir = Path(cache_dir).expanduser().resolve()
-        self.logger.info("Cache clearing warnings:")
-        self.logger.info(f"{cache_info.warnings}")
 
-        # Delete cache using preferred huggingface cache clearing method
-        if current_revision is None:
-            for cache in cache_dir.iterdir():
-                if repo_id.replace("/", "--") in str(cache):
-                    self.logger.info(
-                        f"Deleting the entire cache folder for repo {repo_id}."
+def archive_root_bucket(r2: BaseClient, bucket: str, epoch: int):
+    # multipart thresholds/chunks; tune as needed
+    tcfg = TransferConfig(
+        multipart_threshold=8 * 1024 * 1024,  # 8MB
+        multipart_chunksize=64 * 1024 * 1024,  # 64MB
+        max_concurrency=4,
+        use_threads=True,
+    )
+
+    archive_prefix = f"epoch-{epoch}/"
+    paginator = r2.get_paginator("list_objects_v2")
+    with TransferManager(r2, config=tcfg) as tm:
+        futures = []
+        for page in paginator.paginate(Bucket=bucket):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+
+                # ✅ skip pseudo-folders or empty keys
+                if (not key) or ("epoch-" in key) or (obj["Size"] == 0):
+                    continue
+
+                dest_key = f"{archive_prefix}{key}"
+
+                futures.append(
+                    tm.copy(
+                        copy_source={"Bucket": bucket, "Key": key},
+                        bucket=bucket,
+                        key=dest_key,
+                        extra_args={"MetadataDirective": "COPY"},
                     )
-                    try:
-                        shutil.rmtree(str(cache))
-                    except OSError as e:
-                        self.logger.info(
-                            "Error: %s - %s deleting the entire cache folder for the repo: %s"
-                            % (e.filename, e.strerror, repo_id)
-                        )
+                )
 
-        else:
-            for repo in cache_info.repos:
-                if repo.repo_id == repo_id:
-                    revisions = sorted(
-                        repo.revisions, key=lambda r: r.last_modified, reverse=True
-                    )
-
-                    self.logger.info(
-                        f"Found {len(revisions)} model revisions in .cache folder. Proceeding to delete all non-current revision."
-                    )
-                    for revision in revisions:
-                        if (current_revision is not None) and (
-                            revision.commit_hash == current_revision
-                        ):
-                            self.logger.info(
-                                f"Skipping cache for current revision {revision.commit_hash}"
-                            )
-                            continue
-                        else:
-                            self.logger.info(
-                                f"Deleting cache for revision {revision.commit_hash}"
-                            )
-                            cache_info.delete_revisions(revision.commit_hash).execute()
-                    break
-
-        # Forcefully remove the entire cache folder for a model if it's corrupted
-        if len(broken_cache_list) > 1:
-            for cache in cache_dir.iterdir():
-                if str(cache) in str(broken_cache_list):
-                    self.logger.info(
-                        f"Found repo {repo_id} in HF cache warning message. Proceeding to delete the entire cache folder."
-                    )
-                    try:
-                        shutil.rmtree(str(cache))
-                    except OSError as e:
-                        self.logger.info(
-                            "Error: %s - %s deleting the entire cache folder for the repo: %s"
-                            % (e.filename, e.strerror, repo_id)
-                        )
+        # wait for all copies to finish (raises on failure)
+        for f in futures:
+            f.result()
+    r2.close()
 
 
 def upload_new_state(
@@ -1259,41 +1255,3 @@ def save_and_upload_state(
                 # raise
                 return False
     return False
-
-
-def get_top_uid(self):
-    all_reduce_scores_uids = [
-        k
-        for k, v in self.allreduce_status_dict.items()
-        if (v == "SUCCESS")
-        and (self.uid_tracker[int(k)]["model_huggingface_id"] is not None)
-        and (
-            requests.head(
-                f"https://huggingface.co/api/models/{self.uid_tracker[int(k)]['model_huggingface_id']}"
-            ).status_code
-            == 200
-        )
-        and (
-            (
-                datetime.now(pytz.utc)
-                - list_repo_commits(
-                    self.uid_tracker[int(k)]["model_huggingface_id"], repo_type="model"
-                )[0].created_at
-            ).seconds
-            < (60 * 60)
-        )
-    ]
-    top_uid_list = [
-        k
-        for k, v in sorted(
-            {
-                u: self.metagraph.incentive[int(u)].item()
-                for u in all_reduce_scores_uids
-            }.items(),
-            key=lambda item: item[1],
-        )
-    ]
-    if top_uid_list != []:
-        top_uid = top_uid_list[-1]
-    self.logger.info(f"Top UID Identified As {top_uid}")
-    return top_uid

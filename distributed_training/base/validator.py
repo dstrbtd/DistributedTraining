@@ -32,7 +32,7 @@ from distributed_training.utils.weight_utils import (
     convert_weights_and_uids_for_emit,
     process_weights_for_netuid,
 )
-from distributed_training.utils.progress_tracker import UidTracker, get_global_epoch
+from distributed_training.utils.progress_tracker import UidTracker, get_progress
 from distributed_training.utils.state_loader import load_state_from_peer
 from distributed_training.validator.reward import update_total_scores
 from openskill.models import PlackettLuce
@@ -176,7 +176,7 @@ class BaseValidatorNeuron(BaseNeuron):
                         self.event = {}
 
                     # current_global_epoch = self.global_progress.epoch
-                    # self.global_progress.epoch = get_global_epoch(self)
+                    # self.global_progress.epoch = get_progress(self, "local")[0]
                     # if (
                     #     self.blocks_since_allreduce
                     #     > (self.config.neuron.blocks_per_allreduce / 2)

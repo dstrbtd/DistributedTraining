@@ -15,6 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import os
 import copy
 from abc import ABC, abstractmethod
 
@@ -23,11 +24,20 @@ import bittensor as bt
 from distributed_training import __spec_version__ as spec_version
 
 # Sync calls set weights and also resyncs the metagraph.
-from distributed_training.utils.config import add_args, check_config, config
+from distributed_training.utils.config import (
+    add_args,
+    check_config,
+    config,
+    R2Access,
+    R2Config,
+)
 from distributed_training.utils.misc import ttl_get_block
+from dotenv import load_dotenv
 
 import torch, torch.distributed as dist
 import datetime as dt
+
+load_dotenv()
 
 
 class BaseNeuron(ABC):
@@ -100,6 +110,7 @@ class BaseNeuron(ABC):
                     init_method="tcp://127.0.0.1:29500",
                     rank=self.local_rank,
                     world_size=self.world_size,
+                    # device_id=torch.device(f"cuda:{self.local_rank}")
                 )
             if not hasattr(self, "gloo_group"):
                 self.gloo_group = dist.new_group(
@@ -131,6 +142,41 @@ class BaseNeuron(ABC):
         dist.broadcast(sync, src=0, group=self.gloo_group)
         dist.barrier(group=self.gloo_group)
         self.uid = sync[0].item()
+
+        master_uid = (
+            torch.tensor(
+                [
+                    self.metagraph.hotkeys.index(
+                        self.config.neuron.master_ss58_address,
+                    )
+                ]
+            )
+            if self.master
+            else torch.tensor([0])
+        )
+        dist.broadcast(master_uid, src=0, group=self.gloo_group)
+        self.master_uid = master_uid[0].item()
+
+        # --- Attach the R2 data model ---
+        r2 = R2Config(
+            bucket_name=f"{self.config.neuron.global_model_name.split('/')[-1]}-{self.uid:03d}"
+            if "miner" in self.__class__.__name__.lower()
+            else self.config.neuron.global_model_name,
+            account_id=os.getenv("R2_ACCOUNT_ID"),
+            read=R2Access(
+                access_key_id=os.getenv("R2_READ_ACCESS_KEY_ID"),
+                secret_access_key=os.getenv("R2_READ_SECRET_ACCESS_KEY"),
+            ),
+            write=R2Access(
+                access_key_id=os.getenv("R2_WRITE_ACCESS_KEY_ID"),
+                secret_access_key=os.getenv("R2_WRITE_SECRET_ACCESS_KEY"),
+            ),
+        )
+
+        self.config.r2 = r2
+
+        # Save directory
+        self.output_dir = os.path.join(os.getcwd(), self.config.r2.bucket_name)
 
         self.step = 0
 
