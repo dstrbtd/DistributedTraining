@@ -110,7 +110,6 @@ class BaseNeuron(ABC):
                     init_method="tcp://127.0.0.1:29500",
                     rank=self.local_rank,
                     world_size=self.world_size,
-                    # device_id=torch.device(f"cuda:{self.local_rank}")
                 )
             if not hasattr(self, "gloo_group"):
                 self.gloo_group = dist.new_group(

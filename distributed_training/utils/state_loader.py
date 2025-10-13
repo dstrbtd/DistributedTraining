@@ -1134,81 +1134,78 @@ def save_and_upload_state(
         attempt = 0
     while attempt < self.model_upload_retry_limit:
         try:
-            with tempfile.TemporaryDirectory() as tmp_folder:
-                if self.master:
-                    self.logger.info(
-                        f"Preparing model and optimizer state for epoch {epoch}"
-                    )
-                    if block is not None:
-                        self.model.config.last_allreduce_block = block
-                    self.model.config.inner_step = 0
-                    self.model.config.save_pretrained(tmp_folder)
-                    self.logger.info("Save config")
-                    save_file(
-                        model_state,
-                        os.path.join(tmp_folder, "model.safetensors"),
-                        metadata={"format": "pt"},
-                    )
-                    self.logger.info("Save model")
+            if self.master:
+                self.logger.info(
+                    f"Preparing model and optimizer state for epoch {epoch}"
+                )
+                if block is not None:
+                    self.model.config.last_allreduce_block = block
+                self.model.config.inner_step = 0
+                self.model.config.save_pretrained(self.output_dir)
+                self.logger.info("Save config")
+                save_file(
+                    model_state,
+                    os.path.join(self.output_dir, "model.safetensors"),
+                    metadata={"format": "pt"},
+                )
+                self.logger.info("Save model")
 
-                    # Save outer optimizer state
-                    outer_optimizer_state = {
-                        "optimizer_state_dict": self.outer_optimizer.state_dict(),
-                        "learning_rate": self.outer_optimizer.param_groups[0]["lr"],
-                        "epoch": epoch,
-                    }
-                    torch.save(
-                        outer_optimizer_state,
-                        os.path.join(tmp_folder, "outer_optimizer.pt"),
-                    )
-                    self.logger.info("Save optimizer")
-
-                    # Save metadata
-                    metadata = {
-                        "run": int(__run__),
-                        "outer_step": int(self.local_progress.epoch),
-                        "inner_step": int(self.local_progress.inner_step),
-                    }
-                    with open(
-                        os.path.join(self.output_dir, f"metadata.json"), "w"
-                    ) as f:
-                        json.dump(metadata, f, indent=4, sort_keys=True)
-
-                # Save inner optimizer state
-                inner_optimizer_state = {
-                    "optimizer_state_dict": inner_optimizer_state,
-                    "learning_rate": inner_optimizer_lr,
-                    "scheduler_state": self.scheduler.state_dict(),
+                # Save outer optimizer state
+                outer_optimizer_state = {
+                    "optimizer_state_dict": self.outer_optimizer.state_dict(),
+                    "learning_rate": self.outer_optimizer.param_groups[0]["lr"],
                     "epoch": epoch,
                 }
                 torch.save(
-                    inner_optimizer_state,
-                    os.path.join(
-                        tmp_folder,
-                        f"inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
-                    ),
+                    outer_optimizer_state,
+                    os.path.join(self.output_dir, "outer_optimizer.pt"),
                 )
+                self.logger.info("Save optimizer")
 
-                self.logger.info(
-                    f"Uploading model and optimizer states to repo: {self.config.neuron.global_model_name}"
-                )
+                # Save metadata
+                metadata = {
+                    "run": int(__run__),
+                    "outer_step": int(self.local_progress.epoch),
+                    "inner_step": int(self.local_progress.inner_step),
+                }
+                with open(os.path.join(self.output_dir, f"metadata.json"), "w") as f:
+                    json.dump(metadata, f, indent=4, sort_keys=True)
 
-                # Upload everything in one go
-                upload_folder_to_r2(
-                    r2=self.r2["global"],
-                    bucket=self.config.r2.bucket_name,
-                )
+            # Save inner optimizer state
+            inner_optimizer_state = {
+                "optimizer_state_dict": inner_optimizer_state,
+                "learning_rate": inner_optimizer_lr,
+                "scheduler_state": self.scheduler.state_dict(),
+                "epoch": epoch,
+            }
+            torch.save(
+                inner_optimizer_state,
+                os.path.join(
+                    self.output_dir,
+                    f"inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
+                ),
+            )
 
-                archive_root_bucket(
-                    r2=self.r2["global"],
-                    bucket=self.config.r2.bucket_name,
-                    epoch=self.local_progress.epoch,
-                )
+            self.logger.info(
+                f"Uploading model and optimizer states to repo: {self.config.neuron.global_model_name}"
+            )
 
-                self.logger.info(
-                    f"Successfully pushed new model and optimizer state with tag {epoch} to repo: {self.config.neuron.global_model_name}"
-                )
-                return True
+            # Upload everything in one go
+            upload_folder_to_r2(
+                r2=self.r2["global"],
+                bucket=self.config.r2.bucket_name,
+            )
+
+            archive_root_bucket(
+                r2=self.r2["global"],
+                bucket=self.config.r2.bucket_name,
+                epoch=self.local_progress.epoch,
+            )
+
+            self.logger.info(
+                f"Successfully pushed new model and optimizer state with tag {epoch} to repo: {self.config.neuron.global_model_name}"
+            )
+            return True
 
         except Exception as e:
             attempt += 1
