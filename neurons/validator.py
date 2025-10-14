@@ -16,7 +16,9 @@
 # DEALINGS IN THE SOFTWARE.
 
 
+import boto3
 import os
+import time
 
 os.environ["NEST_ASYNCIO"] = "0"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
@@ -56,7 +58,7 @@ from distributed_training.utils.logger import setup_logging
 from distributed_training.utils.progress_tracker import (
     GlobalTrainingProgress,
     LocalTrainingProgress,
-    get_global_epoch,
+    get_progress,
 )
 from random import randrange
 from distributed_training.utils.state_loader import (
@@ -77,7 +79,6 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     StateDictOptions,
-    get_optimizer_state_dict,
 )
 
 
@@ -88,6 +89,54 @@ class Validator(BaseValidatorNeuron):
         torch.cuda.set_device(self.local_rank)
         self.master = self.local_rank == 0
         super(Validator, self).__init__(config=config)
+
+        self.session = boto3.session.Session()
+        self.r2 = {
+            "local": self.session.client(
+                "s3",
+                endpoint_url=f"https://{self.config.r2.account_id}.r2.cloudflarestorage.com",
+                aws_access_key_id=self.config.r2.read.access_key_id,
+                aws_secret_access_key=self.config.r2.read.secret_access_key,
+                region_name="auto",
+            )
+        }
+        commitment = None
+        while commitment == None:
+            try:
+                if self.master:
+                    if self.uid == self.master_uid:
+                        commitment = [
+                            self.config.r2.account_id
+                            + self.config.r2.write.access_key_id
+                            + self.config.r2.write.secret_access_key
+                        ]
+                    else:
+                        commitment = [
+                            self.subtensor.get_commitment(
+                                self.config.netuid, self.master_uid
+                            )
+                        ]
+                else:
+                    commitment = [
+                        self.config.r2.account_id
+                        + self.config.r2.read.access_key_id
+                        + self.config.r2.read.secret_access_key
+                    ]
+                dist.broadcast_object_list(commitment, src=0, group=self.gloo_group)
+                global_account_id = commitment[0][:32]
+                global_access_key_id = commitment[0][32:64]
+                global_asecret_access_key = commitment[0][64:]
+                self.r2["global"] = self.session.client(
+                    "s3",
+                    endpoint_url=f"https://{global_account_id}.r2.cloudflarestorage.com",
+                    aws_access_key_id=global_access_key_id,
+                    aws_secret_access_key=global_asecret_access_key,
+                    region_name="auto",
+                )
+            except Exception as e:
+                self.logger.info(f"Error getting commitment: {str(e)}")
+                time.sleep(15)
+
         self.set_current_block_across_ranks()
         self._update_wandb_project()
         self._init_basic_components()
@@ -259,7 +308,7 @@ class Validator(BaseValidatorNeuron):
             loss=0.0,
         )
         self.global_progress = GlobalTrainingProgress(epoch=0, samples_accumulated=0)
-        self.global_progress.epoch = get_global_epoch(self)
+        self.global_progress.epoch = get_progress(self, "global")[0]
         self.local_progress.epoch = self.global_progress.epoch
 
         if self.global_progress.epoch is None:
@@ -295,7 +344,7 @@ class Validator(BaseValidatorNeuron):
 
     def _init_tokenizer(self):
         self.tokenizer = AutoTokenizer.from_pretrained(
-            self.config.neuron.global_model_name, use_fast=True
+            self.config.neuron.global_tokenizer_name, use_fast=True
         )
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -303,9 +352,7 @@ class Validator(BaseValidatorNeuron):
         self.learning_rate = self.get_learning_rate()
         self.average_loss = None
 
-        load_state_from_peer(
-            self, self.config.neuron.global_model_name, self.global_progress.epoch
-        )
+        load_state_from_peer(self, self.master_uid, self.global_progress.epoch)
         cleanup_old_cache(self)
 
         if self.local_progress.epoch < self.global_progress.epoch:
@@ -336,19 +383,6 @@ class Validator(BaseValidatorNeuron):
         self._setup_allreduce_block()
 
     def _setup_uids(self):
-        master_uid = (
-            torch.tensor(
-                [
-                    self.metagraph.hotkeys.index(
-                        self.config.neuron.master_ss58_address,
-                    )
-                ]
-            )
-            if self.master
-            else torch.tensor([0])
-        )
-        dist.broadcast(master_uid, src=0, group=self.gloo_group)
-        self.master_uid = master_uid[0].item()
         if self.master:
             self.failed_is_alive_counter = {
                 uid: 0 for uid in self.metagraph.uids.tolist()

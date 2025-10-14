@@ -16,6 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 # Set seed and enable deterministic settings to ensure reproducibility
+import boto3
 import os
 import numpy as np
 import random
@@ -49,6 +50,7 @@ from queue import Queue
 import bittensor as bt
 import psutil
 import torch
+import json
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     LocalOptimStateDictConfig,
@@ -88,12 +90,13 @@ from distributed_training.utils.logger import setup_logging
 from distributed_training.utils.progress_tracker import (
     GlobalTrainingProgress,
     LocalTrainingProgress,
-    get_global_epoch,
-    get_local_inner_step,
+    get_progress,
 )
 from distributed_training.utils.state_loader import (
     cleanup_old_cache,
     load_state_from_peer,
+    r2_download,
+    archive_root_bucket,
 )
 from distributed_training.utils.compression import TransformDCT, CompressDCT
 import torch.distributed as dist
@@ -115,10 +118,6 @@ faulthandler.register(signal.SIGUSR1)
 import datetime
 import os
 
-# os.environ['NCCL_ASYNC_ERROR_HANDLING']="1"
-# os.environ['NCCL_DEBUG']="INFO"
-# os.environ['TORCH_DISTRIBUTED_DEBUG']="INFO"
-
 
 def cuda_mem(logger, tag):
     torch.cuda.synchronize()
@@ -135,6 +134,46 @@ class Miner(BaseMinerNeuron):
         torch.cuda.set_device(self.local_rank)
         self.master = self.local_rank == 0
         super(Miner, self).__init__(config=config)
+
+        self.session = boto3.session.Session()
+        self.r2 = {
+            "local": self.session.client(
+                "s3",
+                endpoint_url=f"https://{self.config.r2.account_id}.r2.cloudflarestorage.com",
+                aws_access_key_id=self.config.r2.read.access_key_id,
+                aws_secret_access_key=self.config.r2.read.secret_access_key,
+                region_name="auto",
+            )
+        }
+        commitment = None
+        while commitment == None:
+            try:
+                if self.master:
+                    commitment = [
+                        self.subtensor.get_commitment(
+                            self.config.netuid, self.master_uid
+                        )
+                    ]
+                else:
+                    commitment = [
+                        self.config.r2.account_id
+                        + self.config.r2.read.access_key_id
+                        + self.config.r2.read.secret_access_key
+                    ]
+                dist.broadcast_object_list(commitment, src=0, group=self.gloo_group)
+                global_account_id = commitment[0][:32]
+                global_access_key_id = commitment[0][32:64]
+                global_asecret_access_key = commitment[0][64:]
+                self.r2["global"] = self.session.client(
+                    "s3",
+                    endpoint_url=f"https://{global_account_id}.r2.cloudflarestorage.com",
+                    aws_access_key_id=global_access_key_id,
+                    aws_secret_access_key=global_asecret_access_key,
+                    region_name="auto",
+                )
+            except Exception as e:
+                self.logger.info(f"Error getting commitment: {str(e)}")
+                time.sleep(15)
 
         self._update_wandb_project()
         self._init_basic_components()
@@ -179,8 +218,6 @@ class Miner(BaseMinerNeuron):
             )
             self.reload_state_checker_thread.start()
 
-        # self.load_state(reset_last_allreduce_block=False)
-
     def reload_state_watcher(self):
         """Background thread on every rank; only sets a local flag on rank 0."""
         while not self.stop_event.is_set():
@@ -198,7 +235,7 @@ class Miner(BaseMinerNeuron):
                     # Wait for the master validator to upload new global model
                     time.sleep(wait_time)
                 # Check if master validator has failed to all_reduce
-                self.global_progress.epoch = get_global_epoch(self)
+                self.global_progress.epoch = get_progress(self, "global")[0]
                 self.reload_state_event.set()
             # elif (
             #     (self.local_progress.epoch == 0 and self.local_progress.inner_step > 20)
@@ -283,7 +320,7 @@ class Miner(BaseMinerNeuron):
             else:
                 load_state_from_peer(
                     self,
-                    repo_id=self.config.neuron.local_model_name,
+                    uid=self.uid,
                     epoch=self.global_progress.epoch,
                 )
             self.model.config.block_list = []
@@ -345,11 +382,10 @@ class Miner(BaseMinerNeuron):
                 self.inner_optimizer_step()
 
                 if (
-                    # self.local_progress.inner_step % self.config.neuron.upload_steps
-                    self.local_progress.inner_step % 20
+                    self.local_progress.inner_step % self.config.neuron.upload_steps
                     == 0
                 ):
-                    # # Upload model every x steps
+                    # Upload model every x steps
                     self.start_background_upload(epoch=self.global_progress.epoch)
                     self.logger.info("start_background_upload compeleted")
 
@@ -380,21 +416,7 @@ class Miner(BaseMinerNeuron):
     ):
         # self.pause_training()
         bt.logging.info("Upload Model Start")
-        """Unified function to save and upload both model and optimizer state"""
-        if not repo_exists(self.config.neuron.local_model_name, repo_type="model"):
-            try:
-                create_repo(
-                    self.config.neuron.local_model_name,
-                    repo_type="model",
-                    private=False,
-                )
-                self.logger.info(
-                    f"Created new repository: {self.config.neuron.local_model_name}"
-                )
-            except Exception as e:
-                self.logger.error(f"Failed to create repository: {str(e)}")
-                raise
-
+        # """Unified function to save and upload both model and optimizer state"""
         attempt = 0
         while attempt < self.model_upload_retry_limit:
             try:
@@ -424,6 +446,17 @@ class Miner(BaseMinerNeuron):
                     )
                     del gradient_state
 
+                    # Save metadata
+                    metadata = {
+                        "run": int(__run__),
+                        "outer_step": int(self.local_progress.epoch),
+                        "inner_step": int(self.local_progress.inner_step),
+                    }
+                    with open(
+                        os.path.join(self.output_dir, f"metadata.json"), "w"
+                    ) as f:
+                        json.dump(metadata, f, indent=4, sort_keys=True)
+
                 # Save optimizer state
                 optimizer_state = {
                     "optimizer_state_dict": optim_sd,
@@ -447,9 +480,8 @@ class Miner(BaseMinerNeuron):
 
                 if self.master:
                     self.logger.info(
-                        f":upload: Uploading model and optimizer states to repo: {self.config.neuron.local_model_name}"
+                        f":upload: Uploading model and optimizer states to r2 bucket: {self.config.r2.bucket_name}"
                     )
-                    commit_message = f"Run {__run__}. Outer Step {epoch}. Inner Step {self.local_progress.inner_step}."
                     self.upload_process = subprocess.Popen(
                         [
                             "python",
@@ -457,9 +489,11 @@ class Miner(BaseMinerNeuron):
                                 "neurons/miner.py",
                                 "distributed_training/utils/upload_worker.py",
                             ),
-                            self.config.neuron.local_model_name,
-                            self.output_dir,
-                            commit_message,
+                            self.config.r2.bucket_name,
+                            self.config.r2.account_id,
+                            self.config.r2.write.access_key_id,
+                            self.config.r2.write.secret_access_key,
+                            f"{__run__}.{self.local_progress.epoch}.{self.local_progress.inner_step}",
                         ]
                     )
                     while self.upload_process.poll() is None:
@@ -475,40 +509,7 @@ class Miner(BaseMinerNeuron):
                         else:
                             time.sleep(5)
 
-                    refs = list_repo_refs(
-                        self.config.neuron.local_model_name, repo_type="model"
-                    )
-                    for tag in refs.tags:
-                        if (tag.name == "None") or (
-                            tag.name
-                            == f"{__run__}.{epoch}.{self.model.config.inner_step}"
-                        ):
-                            # Update tag for this version
-                            delete_tag(
-                                self.config.neuron.local_model_name,
-                                repo_type="model",
-                                tag=tag.name,
-                            )
-                            time.sleep(30)
-                        elif (
-                            (len(tag.name.split(".")) == 3)
-                            and (tag.name.split(".")[0] == __run__)
-                            and (int(tag.name.split(".")[1]) > epoch)
-                        ):
-                            self.tag_deletion_queue.put(tag.name)
-                    # Create new tag for this version
-                    create_tag(
-                        self.config.neuron.local_model_name,
-                        repo_type="model",
-                        tag=f"{__run__}.{epoch}.{self.model.config.inner_step}",
-                        tag_message=commit_message,
-                    )
-                    # Cleanup old cache
-                    cleanup_old_cache(
-                        self,
-                        repo_id=self.config.neuron.local_model_name,
-                        current_revision=None,
-                    )
+                    log_peerid_to_chain(self)
 
                     self.logger.info(
                         f"Successfully pushed new model state with tag {__run__}.{epoch}.{self.model.config.inner_step} to repo: {self.config.neuron.local_model_name}"
@@ -860,9 +861,9 @@ class Miner(BaseMinerNeuron):
             loss=0.0,
         )
         self.global_progress = GlobalTrainingProgress(epoch=0, samples_accumulated=0)
-        self.global_progress.epoch = get_global_epoch(self)
+        self.global_progress.epoch = get_progress(self, "global")[0]
         self.local_progress.epoch = self.global_progress.epoch
-        self.local_progress.inner_step = get_local_inner_step(self)
+        self.local_progress.inner_step = get_progress(self, "local")[1]
 
         if self.global_progress.epoch is None:
             self.logger.error(
@@ -890,9 +891,6 @@ class Miner(BaseMinerNeuron):
         # Status tracking
         self.training_status = TrainingStatus.STOPPED
         self.training_error = None
-
-        # Save directory
-        self.output_dir = self.config.neuron.local_model_name.split("/")[-1]
 
         # Create Tag Deletion Queue & Thread
         self.tag_deletion_queue = Queue()
@@ -927,7 +925,7 @@ class Miner(BaseMinerNeuron):
 
     def _init_tokenizer(self):
         self.tokenizer = AutoTokenizer.from_pretrained(
-            self.config.neuron.global_model_name, use_fast=True
+            self.config.neuron.global_tokenizer_name, use_fast=True
         )
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -944,11 +942,9 @@ class Miner(BaseMinerNeuron):
 
     def _load_model(self):
         # Load model and components
-        load_state_from_peer(
-            self, self.config.neuron.local_model_name, self.local_progress.epoch
-        )
+        load_state_from_peer(self, self.uid, self.local_progress.epoch)
         self.model.config.block_list = []
-        cleanup_old_cache(self, repo_id=self.config.neuron.local_model_name)
+        cleanup_old_cache(self)
 
         # Setup upload executor
         self.upload_executor = ThreadPoolExecutor(
@@ -1017,9 +1013,27 @@ class Miner(BaseMinerNeuron):
         log_peerid_to_chain(self)
 
     def _sync_with_global_model(self):
+        global_model_output_dir = os.path.join(
+            os.getcwd(), self.config.neuron.global_model_name
+        )
+        global_model_path = r2_download(
+            self,
+            r2=self.r2["global"],
+            bucket=self.config.neuron.global_model_name,
+            key=f"epoch-{self.global_progress.epoch}/model.safetensors",
+            multiple_ranks=True,
+            destination=global_model_output_dir,
+        )
+        global_config_path = r2_download(
+            self,
+            r2=self.r2["global"],
+            bucket=self.config.neuron.global_model_name,
+            key=f"epoch-{self.global_progress.epoch}/config.json",
+            multiple_ranks=True,
+            destination=global_model_output_dir,
+        )
         global_model = AutoModelForCausalLM.from_pretrained(
-            self.config.neuron.global_model_name,
-            revision=f"{__run__}.{self.global_progress.epoch}.0",
+            global_model_output_dir,  # directory containing model files
             trust_remote_code=False,
         )
 

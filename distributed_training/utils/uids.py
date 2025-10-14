@@ -1,5 +1,5 @@
 import asyncio
-import datetime as dt
+import hashlib
 import random
 import requests
 import traceback
@@ -11,7 +11,6 @@ import numpy as np
 from bittensor.core.chain_data import decode_account_id
 from hivemind.p2p import PeerID
 from hivemind.utils.timed_storage import ValueWithExpiration
-from huggingface_hub import list_repo_commits
 from distributed_training.utils.state_loader import check_model_exists
 
 
@@ -216,6 +215,11 @@ def decode_metadata(encoded_ss58: tuple, metadata: dict) -> tuple[str, str]:
     return decoded_key, bytes(bytes_tuple).decode()
 
 
+def hash_r2_creds(account_id, access_key_id, secret_key):
+    concat = f"{account_id}:{access_key_id}:{secret_key}"
+    return hashlib.sha256(concat.encode()).hexdigest()
+
+
 def map_uid_to_peerid(self):
     result = {}
     try:
@@ -240,33 +244,39 @@ def map_uid_to_peerid(self):
             last_updated_block = value.value.get("block", 0)
             if last_updated_block is None:
                 last_updated_block = 0
-            concatenated = eval(metadata)
 
-            if "peer_id" not in concatenated:
-                self.logger.debug(
-                    f"Invalid commitment for UID {uid}: peer_id not in commitment metadata"
+            concatenated = metadata
+
+            if len(concatenated) != 128:
+                raise ValueError(
+                    f"Commitment {concatenated} is of length {len(concatenated)} but should be of length 128."
                 )
-                continue
-            if "model_huggingface_id" not in concatenated:
-                self.logger.debug(
-                    f"Invalid commitment for UID {uid}: model_huggingface_id not in commitment metadata"
-                )
-            if concatenated["peer_id"] != self.uid_tracker[uid].all_reduce.peer_id:
-                uid_peerid_metadata = [
-                    metadata.all_reduce.peer_id
-                    for key, metadata in self.uid_tracker.items()
-                    if key != uid
+
+            account_id = concatenated[:32]
+            access_key_id = concatenated[32:64]
+            secret_access_key = concatenated[64:]
+            r2_hash = hash_r2_creds(account_id, access_key_id, secret_access_key)
+
+            if r2_hash != self.uid_tracker[uid].train.r2_hash:
+                r2_hashes = [
+                    metadata.train.r2_hash
+                    for other_uid, metadata in self.uid_tracker.items()
+                    if other_uid != uid
                 ]
-                if concatenated["peer_id"] not in uid_peerid_metadata:
-                    self.uid_tracker[uid].all_reduce.peer_id = concatenated["peer_id"]
-                    self.uid_tracker[
-                        uid
-                    ].chaindata.last_updated_block = last_updated_block
-                else:
+                if r2_hash in r2_hashes:
+                    self.logger.warning(
+                        f"Duplicate R2 credentials detected for UID {uid}"
+                    )
+                    # Optionally invalidate or flag
+                    self.uid_tracker[uid].chaindata.last_updated_block = 0
+                    self.uid_tracker[uid].train.r2_hash = None
+                    self.uid_tracker[uid].train.account_id = None
+                    self.uid_tracker[uid].train.access_key_id = None
+                    self.uid_tracker[uid].train.secret_access_key = None
                     uid_list = [
                         uid
                         for uid, metadata in self.uid_tracker.items()
-                        if metadata.all_reduce.peer_id == concatenated["peer_id"]
+                        if self.uid_tracker[uid].train.r2_hash == r2_hash
                     ]
                     for uid_i in uid_list:
                         if (
@@ -276,54 +286,29 @@ def map_uid_to_peerid(self):
                             self.uid_tracker[uid_i].chaindata.last_updated_block
                             > last_updated_block
                         ):
-                            self.uid_tracker[uid_i].chaindata.last_updated_block = 0
-                            self.uid_tracker[uid_i].train.model_id = None
-                            self.uid_tracker[uid_i].all_reduce.peer_id = None
-                        else:
                             self.uid_tracker[uid].chaindata.last_updated_block = 0
-                            self.uid_tracker[uid].train.model_id = None
-                            self.uid_tracker[uid].all_reduce.peer_id = None
-            if (
-                concatenated["model_huggingface_id"]
-                != self.uid_tracker[uid].train.model_id
-            ):
-                self.uid_tracker[uid].train.model_id = concatenated[
-                    "model_huggingface_id"
-                ]
-                uid_peerid_metadata = [
-                    metadata.train.model_id
-                    for key, metadata in self.uid_tracker.items()
-                    if key != uid
-                ]
-                if concatenated["model_huggingface_id"] not in uid_peerid_metadata:
-                    self.uid_tracker[uid].train.model_id = concatenated[
-                        "model_huggingface_id"
-                    ]
+                            self.uid_tracker[uid].train.r2_hash = None
+                            self.uid_tracker[uid].train.account_id = None
+                            self.uid_tracker[uid].train.access_key_id = None
+                            self.uid_tracker[uid].train.secret_access_key = None
+                        else:
+                            self.uid_tracker[
+                                uid
+                            ].chaindata.last_updated_block = last_updated_block
+                            self.uid_tracker[uid].train.r2_hash = r2_hash
+                            self.uid_tracker[uid].train.account_id = account_id
+                            self.uid_tracker[uid].train.access_key_id = access_key_id
+                            self.uid_tracker[
+                                uid
+                            ].train.secret_access_key = secret_access_key
+                else:
                     self.uid_tracker[
                         uid
                     ].chaindata.last_updated_block = last_updated_block
-                else:
-                    uid_list = [
-                        uid
-                        for uid, metadata in self.uid_tracker.items()
-                        if metadata.train.model_id
-                        == concatenated["model_huggingface_id"]
-                    ]
-                    for uid_i in uid_list:
-                        if (
-                            self.uid_tracker[uid_i].chaindata.last_updated_block
-                            is not None
-                        ) and (
-                            self.uid_tracker[uid_i].chaindata.last_updated_block
-                            > last_updated_block
-                        ):
-                            self.uid_tracker[uid_i].chaindata.last_updated_block = 0
-                            self.uid_tracker[uid_i].train.model_id = None
-                            self.uid_tracker[uid_i].all_reduce.peer_id = None
-                        else:
-                            self.uid_tracker[uid].chaindata.last_updated_block = 0
-                            self.uid_tracker[uid].train.model_id = None
-                            self.uid_tracker[uid].all_reduce.peer_id = None
+                    self.uid_tracker[uid].train.r2_hash = r2_hash
+                    self.uid_tracker[uid].train.account_id = account_id
+                    self.uid_tracker[uid].train.access_key_id = access_key_id
+                    self.uid_tracker[uid].train.secret_access_key = secret_access_key
 
             self.logger.debug(f"Retrieved commitment for UID {uid}: {metadata}")
 

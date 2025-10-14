@@ -20,24 +20,21 @@ import time
 import bittensor as bt
 import numpy as np
 import torch
+import torch.distributed as dist
 
 from distributed_training import __run__
 from distributed_training.averaging.exceptions import GradientAveragingError
 from distributed_training.utils.misc import get_bandwidth
 from distributed_training.utils.progress_tracker import (
-    get_global_epoch,
-    get_local_epoch,
-    get_local_inner_step,
+    get_progress,
 )
 from distributed_training.utils.state_loader import (
-    get_top_uid,
     load_state_from_peer,
     upload_new_state,
 )
 from distributed_training.utils.uids import (
     get_next_uid_api,
     post_next_uid_api,
-    get_next_uids_manual,
     get_random_uids,
     map_uid_to_peerid,
 )
@@ -51,14 +48,11 @@ from distributed_training.averaging.averagers import (
     compute_and_load_pseudo_grad_into_averager,
     apply_optimizer_parameters,
 )
-
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     StateDictOptions,
     get_optimizer_state_dict,
 )
-
-import torch.distributed as dist
 
 
 async def forward(self):
@@ -118,6 +112,7 @@ async def forward(self):
                         k=sample_size,
                         epoch=self.local_progress.epoch,
                     )
+                    self.miner_uids = [0, 2]
                     if min_sample_size > 1:
                         min_sample_size = min_sample_size - 1
             dist.barrier()
@@ -166,7 +161,7 @@ async def forward(self):
                 if top_uid_index < len(self.miner_uids):
                     top_uid = self.miner_uids[top_uid_index]
                 else:
-                    top_uid = 170
+                    top_uid = 1
                 self.local_progress.epoch = self.global_progress.epoch
 
                 if self.master:
@@ -177,13 +172,13 @@ async def forward(self):
                 self.logger.info("REPO ID LIST", repo_id_list)
                 repo_id = repo_id_list[0]
 
-                self.local_progress.inner_step = get_local_inner_step(
-                    self, repo_id=repo_id
-                )
+                self.local_progress.inner_step = get_progress(
+                    self, local_or_global="local", uid=top_uid
+                )[1]
                 top_uid_revision = f"{__run__}.{self.local_progress.epoch}.{self.local_progress.inner_step}"
                 load_state_from_peer(
                     self,
-                    repo_id=repo_id,
+                    uid=top_uid,
                     revision=top_uid_revision,
                 )
                 if self.scheduler.__dict__["_step_count"] != 0:
@@ -342,7 +337,7 @@ async def forward(self):
                 "Synapse Completion " + str(all_reduce_completion[0].item())
             )
             if all_reduce_completion[0].item() != 1:
-                self.global_progress.epoch = get_global_epoch(self)
+                self.global_progress.epoch = get_progress(self)[0]
                 self.all_reduce_success_status = False
                 self.last_allreduce_block += int(
                     self.config.neruon.blocks_per_allreduce / 10

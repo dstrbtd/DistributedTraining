@@ -37,21 +37,20 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 from distributed_training import __run__
 from distributed_training.data.dataset import DatasetLoader
-from distributed_training.utils.progress_tracker import (
-    get_local_epoch,
-    get_local_inner_step,
-)
+from distributed_training.utils.progress_tracker import get_progress, get_r2_client
 from distributed_training.utils.state_loader import (
-    check_model_exists,
     cleanup_old_cache,
     load_state_from_peer,
+    r2_download,
 )
 
-from huggingface_hub import hf_hub_download
 from rich.console import Console
 from rich.table import Table
 
 import torch.distributed as dist
+import email.utils
+from datetime import datetime, timezone
+from botocore.session import get_session
 
 # Set scoring weights
 TRAIN_SCORE_WEIGHT = 0.75
@@ -173,7 +172,7 @@ async def evaluate_model(
     return total_loss, n_batches_total, n_batches_sampled
 
 
-async def evaluate_with_gradient(self, uid, model_base, blocks, revision, repo_id):
+async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
     """
     Apply pseudo gradient for a UID and evaluate loss before and after.
 
@@ -203,24 +202,29 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, repo_i
     # 2. Load and apply pseudo gradient
     self.logger.info(f"UID {uid:03d}: Applying pseudo gradient")
 
-    # TODO maybe reset this with the offloaded state
+    # TODO Reset this with an offloaded state
     # model_t1 = copy.deepcopy(model_base)
     model_t1 = model_base
 
+    r2 = get_r2_client(self, uid, multiple_ranks=True)
+    self.logger.info(f"UID {uid:03d}: Got r2 client")
+    gradient_path = r2_download(
+        self,
+        r2=r2,
+        bucket=f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
+        key=f"checkpoints/run-{revision}/gradients.pt",
+        multiple_ranks=True,
+        destination=f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
+    )
+
     gradient = torch.load(
-        hf_hub_download(
-            repo_id=repo_id,
-            filename="gradients.pt",
-            revision=revision,
-        ),
+        gradient_path,
         weights_only=True,
         map_location="cpu",
     )
     gradient.pop("metadata")
 
-    self.logger.info(
-        f"UID {uid:03d}: Gradient loaded from {repo_id} " f"with revision {revision}"
-    )
+    self.logger.info(f"UID {uid:03d}: Gradient loaded with revision {revision}")
     self.update_model_with_pseudo_gradient(model=model_t1, uid=uid, state_dict=gradient)
     self.logger.info(f"UID {uid:03d}: Model updated with current gradient")
 
@@ -245,7 +249,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, repo_i
     torch.cuda.empty_cache()
 
     # Remove repo from cache
-    cleanup_old_cache(self, repo_id=repo_id)
+    cleanup_old_cache(self)
 
     return average_loss_before, average_loss_after
 
@@ -262,20 +266,23 @@ def compute_loss_improvement(before: float, after: float) -> dict:
     }
 
 
-def get_uids_blocks(self, uid: int, revision: str, repo_id: str) -> list[int]:
+def get_uids_blocks(self, uid: int, revision: str) -> list[int]:
     """"""
-    uid_blocks = json.load(
-        open(
-            hf_hub_download(
-                repo_id=repo_id,
-                filename="config.json",
-                revision=revision,
-            )
-        )
-    )["block_list"]
-    if (self.current_block - max(uid_blocks)) > (
-        self.config.neuron.blocks_per_allreduce / 2
-    ):
+    bucket_name = f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}"
+    r2 = get_r2_client(self, uid, multiple_ranks=True)
+    config_path = r2_download(
+        self,
+        r2=r2,
+        bucket=bucket_name,
+        key=f"checkpoints/run-{revision}/config.json",
+        multiple_ranks=True,
+        destination=bucket_name,
+    )
+    uid_blocks = json.load(open(config_path))["block_list"]
+    if False:
+        # if (self.current_block - max(uid_blocks)) > (
+        #     self.config.neuron.blocks_per_allreduce / 2
+        # ):
         raise Exception(
             f"Uploaded datatset block older than {((self.config.neuron.blocks_per_allreduce / 2) *12) / 60} minutes"
         )
@@ -326,7 +333,6 @@ async def score_uids(self, uids: list):
         epoch = self.global_progress.epoch - 1
     else:
         epoch = self.global_progress.epoch
-    model_huggingface_id = self.config.neuron.global_model_name
     test_time = time.time()
 
     if self.master:
@@ -344,13 +350,13 @@ async def score_uids(self, uids: list):
         for uid in uids:
             self.uid_tracker[
                 uid
-            ].train.revision = f"{__run__}.{epoch}.{get_local_inner_step(self, repo_id=self.uid_tracker[uid].train.model_id, epoch=epoch)}"
+            ].train.revision = f"{__run__}.{epoch}.{get_progress(self, 'local', uid=uid, multiple_ranks=False)[1]}"
 
     # Sync global model if behind
     if self.local_progress.epoch != epoch:
         load_state_from_peer(
             self,
-            repo_id=model_huggingface_id,
+            uid=self.master_uid,
             epoch=epoch,
             reload_inner_optimizer=True,
             reload_outer_optimizer=False,
@@ -371,14 +377,6 @@ async def score_uids(self, uids: list):
             if revision.split(".")[-1] == 0:
                 raise Exception(f"Revision {revision} has 0 inner steps")
 
-            if self.master:
-                repo_id_list = [self.uid_tracker[uid].train.model_id]
-            else:
-                repo_id_list = [self.config.neuron.global_model_name]
-            dist.broadcast_object_list(repo_id_list, src=0, group=self.gloo_group)
-            self.logger.info("REPO ID LIST", repo_id_list)
-            repo_id = repo_id_list[0]
-
             # ──────────────────────────────────────────────────────────────────────────
             # Step 1: Evaluate on random unseen data
             # ──────────────────────────────────────────────────────────────────────────
@@ -390,7 +388,6 @@ async def score_uids(self, uids: list):
                     model_base=self.model,
                     blocks=random_blocks,
                     revision=revision,
-                    repo_id=repo_id,
                 )
             )
 
@@ -410,14 +407,8 @@ async def score_uids(self, uids: list):
             # ──────────────────────────────────────────────────────────────────────────
 
             self.logger.info(f"UID {uid:03d}: Sampling dataset indices for testing")
-            # if self.master:
-            #     assigned_block = get_uids_blocks(self, uid, revision, repo_id)
-            # else:
-            #     assigned_block = [self.current_block]
-            # dist.broadcast_object_list(assigned_block, src=0, group=self.gloo_group)
-            # self.logger.info(assigned_block)
             self.set_current_block_across_ranks()
-            assigned_block = get_uids_blocks(self, uid, revision, repo_id)
+            assigned_block = get_uids_blocks(self, uid, revision)
             self.logger.info(assigned_block)
 
             loss_scores = compute_loss_improvement(
@@ -427,7 +418,6 @@ async def score_uids(self, uids: list):
                     model_base=self.model,
                     blocks=assigned_block,
                     revision=revision,
-                    repo_id=repo_id,
                 )
             )
 
@@ -459,37 +449,29 @@ async def score_uids(self, uids: list):
     cleanup_old_cache(self)
 
 
-def score_repo(self, repo_id: str) -> bool:
+def score_repo(self, uid: int, revision: str) -> bool:
     """
-    Check if the model repository is valid and udpated in the last 20 minutes.
-
-    Args:
-        repo_id (str): huggingface repository ID of the model.
-
-    Returns:
-        bool: True if the model is valid and up-to-date, False otherwise.
+    Check if the miner's R2 manifest exists and is recent enough.
     """
-    local_config = AutoConfig.from_pretrained(repo_id, trust_remote_code=True)
-    if (
-        (self.global_model_config.hidden_size != local_config.hidden_size)
-        or (
-            self.global_model_config.num_attention_heads
-            != local_config.num_attention_heads
+    bucket_name = f"{self.config.neuron.global_model_name}-{uid:03d}"
+    r2 = get_r2_client(self, uid, multiple_ranks=False)
+    try:
+        response = r2.head_object(
+            Bucket=bucket_name, Key=f"checkpoints/run-{revision}/gradients.pt"
         )
-        or (
-            self.global_model_config.num_hidden_layers != local_config.num_hidden_layers
+        last_modified = (
+            email.utils.parsedate_to_datetime(
+                response["LastModified"].strftime("%a, %d %b %Y %H:%M:%S GMT")
+            )
+            if isinstance(response["LastModified"], datetime)
+            else email.utils.parsedate_to_datetime(response["LastModified"])
         )
-        or (
-            self.global_model_config.num_key_value_heads
-            != local_config.num_key_value_heads
-        )
-    ):
-        return False
-    latest_commit = api.repo_info(repo_id).lastModified
 
-    if (datetime.now(pytz.utc) - latest_commit).seconds > MAX_UPLOAD_INTERVAL:
+        age_seconds = (datetime.now(timezone.utc) - last_modified).total_seconds()
+        return age_seconds < MAX_UPLOAD_INTERVAL
+    except Exception as e:
+        self.logger.info(f"UID {uid:03d}: Manifest check failed — {e}")
         return False
-    return True
 
 
 def benchmark_uids(self):
@@ -499,7 +481,7 @@ def benchmark_uids(self):
     for uid in self.uid_tracker:
         try:
             self.uid_tracker[uid].train.is_valid = score_repo(
-                self, self.uid_tracker[uid].train.model_id
+                self, uid, self.uid_tracker[uid].train.revision
             )
         except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
             # self.logger.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
