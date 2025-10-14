@@ -356,10 +356,10 @@ def check_model_exists(
         obj = r2.get_object(Bucket=bucket_name, Key="metadata.json")
         data = obj["Body"].read()
         metadata = json.loads(data)
-        meatadata_revision = (
+        metadata_revision = (
             f"{metadata['run']}.{metadata['outer_step']}.{metadata['inner_step']}"
         )
-        if revision and revision != "None" and revision != meatadata_revision:
+        if revision and revision != "None" and revision != metadata_revision:
             return False
         else:
             return True
@@ -564,7 +564,7 @@ def load_model_optimizer_gradient_averager(
                 r2=r2,
                 bucket=local_model_name,
                 key=f"epoch-{epoch}/model.safetensors",
-                multiple_ranks=True,
+                multiple_ranks=False,
                 destination=output_dir,
             )
             self.logger.info(model_path)
@@ -573,7 +573,7 @@ def load_model_optimizer_gradient_averager(
                 r2=r2,
                 bucket=local_model_name,
                 key=f"epoch-{epoch}/config.json",
-                multiple_ranks=True,
+                multiple_ranks=False,
                 destination=output_dir,
             )
             self.logger.info(config_path)

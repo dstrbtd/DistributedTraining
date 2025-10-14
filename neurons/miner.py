@@ -1013,52 +1013,64 @@ class Miner(BaseMinerNeuron):
         log_peerid_to_chain(self)
 
     def _sync_with_global_model(self):
-        global_model_output_dir = os.path.join(
-            os.getcwd(), self.config.neuron.global_model_name
-        )
-        global_model_path = r2_download(
-            self,
-            r2=self.r2["global"],
-            bucket=self.config.neuron.global_model_name,
-            key=f"epoch-{self.global_progress.epoch}/model.safetensors",
-            multiple_ranks=True,
-            destination=global_model_output_dir,
-        )
-        global_config_path = r2_download(
-            self,
-            r2=self.r2["global"],
-            bucket=self.config.neuron.global_model_name,
-            key=f"epoch-{self.global_progress.epoch}/config.json",
-            multiple_ranks=True,
-            destination=global_model_output_dir,
-        )
-        global_model = AutoModelForCausalLM.from_pretrained(
-            global_model_output_dir,  # directory containing model files
-            trust_remote_code=False,
-        )
-
-        if self.config.neuron.global_model_name == self.config.neuron.local_model_name:
-            self.logger.warning(
-                "Your local miner_hf_repo_id set to the global model_name. This will harm your incentive. Set miner_hf_repo_id to a unique huggingface repo id."
+        if self.master:
+            global_model_output_dir = os.path.join(
+                os.getcwd(), self.config.neuron.global_model_name
+            )
+            global_model_path = r2_download(
+                self,
+                r2=self.r2["global"],
+                bucket=self.config.neuron.global_model_name,
+                key=f"epoch-{self.global_progress.epoch}/model.safetensors",
+                multiple_ranks=False,
+                destination=global_model_output_dir,
+            )
+            global_config_path = r2_download(
+                self,
+                r2=self.r2["global"],
+                bucket=self.config.neuron.global_model_name,
+                key=f"epoch-{self.global_progress.epoch}/config.json",
+                multiple_ranks=False,
+                destination=global_model_output_dir,
+            )
+            global_model = AutoModelForCausalLM.from_pretrained(
+                global_model_output_dir,  # directory containing model files
+                trust_remote_code=False,
             )
 
-        self.model.to("cpu")
-        self.should_sync_model = (
-            (self.local_progress.epoch is None)
-            or (self.local_progress.epoch != self.global_progress.epoch)
-            # or (
-            #     compute_schema_hash(global_model.parameters())
-            #     != compute_schema_hash(full_state.values())
-            # )
-        )
-        self.model.to(self.device)
+            if (
+                self.config.neuron.global_model_name
+                == self.config.neuron.local_model_name
+            ):
+                self.logger.warning(
+                    "Your local miner_hf_repo_id set to the global model_name. This will harm your incentive. Set miner_hf_repo_id to a unique huggingface repo id."
+                )
 
-        if self.should_sync_model:
+            # self.model.to("cpu")
+            self.should_sync_model = (
+                (self.local_progress.epoch is None)
+                or (self.local_progress.epoch != self.global_progress.epoch)
+                # or (
+                #     compute_schema_hash(global_model.parameters())
+                #     != compute_schema_hash(full_state.values())
+                # )
+            )
+            # self.model.to(self.device)
+
+        should_sync_model = (
+            torch.tensor([1])
+            if (self.master and self.should_sync_model)
+            else torch.tensor([0])
+        )
+        dist.broadcast(should_sync_model, src=0, group=self.gloo_group)
+        self.should_sync_model = True if should_sync_model == 0 else False
+
+        if self.should_sync_model and self.master:
             del global_model
             gc.collect()
             torch.cuda.empty_cache()
             load_state_from_peer(self, epoch=self.global_progress.epoch)
-        else:
+        elif self.master:
             del global_model
             gc.collect()
             torch.cuda.empty_cache()
