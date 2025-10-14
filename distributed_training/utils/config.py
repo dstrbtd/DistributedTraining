@@ -179,14 +179,6 @@ def add_args(cls, parser, prefix=None):
     )
 
     parser.add_argument(
-        "--neuron.local_model_name",
-        type=str,
-        help="The model to be trained",
-        default=None,
-        required=neuron_type != "validator",
-    )
-
-    parser.add_argument(
         "--neuron.master_ss58_address",
         type=str,
         help="The ss58 address for the master validator UID",
