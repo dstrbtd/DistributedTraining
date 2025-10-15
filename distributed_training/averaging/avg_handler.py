@@ -14,7 +14,7 @@ from distributed_training.data.dataset import DatasetLoader
 from distributed_training.utils.dendrite import (
     async_dendrite_forward,
 )
-from distributed_training.utils.state_loader import r2_download
+from distributed_training.utils.r2 import r2_download
 from transformers import AutoModelForCausalLM
 
 

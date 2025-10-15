@@ -41,8 +41,8 @@ from distributed_training.utils.progress_tracker import get_progress, get_r2_cli
 from distributed_training.utils.state_loader import (
     cleanup_old_cache,
     load_state_from_peer,
-    r2_download,
 )
+from distributed_training.utils.r2 import r2_download
 
 from rich.console import Console
 from rich.table import Table

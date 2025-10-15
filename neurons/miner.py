@@ -95,6 +95,8 @@ from distributed_training.utils.progress_tracker import (
 from distributed_training.utils.state_loader import (
     cleanup_old_cache,
     load_state_from_peer,
+)
+from distributed_training.utils.r2 import (
     r2_download,
     archive_root_bucket,
 )

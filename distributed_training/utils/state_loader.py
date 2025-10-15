@@ -26,9 +26,10 @@ from distributed_training.utils.progress_tracker import (
     get_min_local_inner_Step,
     get_r2_client,
 )
-from distributed_training.utils.upload_worker import (
+from distributed_training.utils.r2 import (
     archive_root_bucket,
     upload_folder_to_r2,
+    r2_download,
 )
 from distributed_training.averaging.avg_handler import AveragingHandler
 from torch.distributed._tensor import DeviceMesh
@@ -87,41 +88,6 @@ else:
     LRSchedulerBase = torch.optim.lr_scheduler._LRScheduler
 OptimizerFactory = Callable[[Union[Parameters, ParamGroups]], TorchOptimizer]
 SchedulerFactory = Callable[[TorchOptimizer], LRSchedulerBase]
-
-
-def r2_download(self, r2, bucket, key, multiple_ranks=True, destination=None):
-    if destination is None:
-        fd, destination_path = tempfile.mkstemp()
-        os.close(fd)
-    else:
-        destination_path = destination
-        destination_path = os.path.join(
-            destination_path, os.path.basename(key.split("/")[-1])
-        )
-
-    # Let only the master perform the actual download
-    if (self.master) or (multiple_ranks):
-        try:
-            os.makedirs(os.path.dirname(destination_path), exist_ok=True)
-            lock_path = destination_path + ".lock"
-            with filelock.FileLock(lock_path):
-                r2.download_file(bucket, key, destination_path)
-            success = torch.tensor([1], dtype=torch.int, device="cuda")
-        except Exception as e:
-            self.logger.info(f"Download failed due to error: {e}")
-            success = torch.tensor([0], dtype=torch.int, device="cuda")
-    else:
-        success = torch.tensor([0], dtype=torch.int, device="cuda")
-
-    if multiple_ranks:
-        # Broadcast success flag from master to everyone
-        dist.broadcast(success, src=0)
-
-        # If master failed, all ranks raise the same error
-        if success.item() == 0:
-            raise RuntimeError("Master rank failed during r2_download().")
-
-    return destination_path
 
 
 @staticmethod
