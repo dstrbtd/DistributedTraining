@@ -438,7 +438,7 @@ def load_model_optimizer_gradient_averager(
     if (revision is None) and (uid != self.master_uid):
         revision = f"{__run__}.{epoch}.{self.local_progress.inner_step}"
     elif (revision is None) and (uid == self.master_uid):
-        revision = f"{__run__}.{epoch}.0"
+        revision = global_model_revision
 
     local_model_name = (
         f"{self.config.neuron.global_model_name.split('/')[-1]}-{self.uid:03d}"
@@ -506,7 +506,7 @@ def load_model_optimizer_gradient_averager(
     # Load Model & Inner Optimizer
     try:
         if local_model_name == global_model_name:
-            revision = ".".join(revision.split(".")[:-1] + ["0"])
+            revision = global_model_revision
 
         if not check_model_exists(
             self,
@@ -790,24 +790,15 @@ def load_model_optimizer_gradient_averager(
             # parameters_list,
         )
         # TODO
-        # if (
-        #     (self.master)
-        #     and (self.local_progress.inner_step != 0)
-        #     and ("." in revision)
-        # ):
-        #     self.avg_handler.reset_main_parameters(
-        #         local_model_name,
-        #         revision=".".join(
-        #             revision.split(".")[:-1]
-        #             + [
-        #                 str(
-        #                     get_min_local_inner_Step(
-        #                         self, local_model_name, epoch=epoch
-        #                     )
-        #                 )
-        #             ]
-        #         ),
-        #     )
+        if (
+            (self.master)
+            and (self.local_progress.inner_step != 0)
+            and ("." in revision)
+        ):
+            self.avg_handler.reset_main_parameters(
+                r2,
+                local_model_name,
+            )
 
     self.logger.info(
         f"CPU Memory After Loading State {psutil.virtual_memory().available / 10**9} GB"
@@ -831,9 +822,14 @@ def load_state_from_peer(
             epoch = self.global_progress.epoch
         if uid is None:
             uid = self.master_uid
-        self.local_progress.inner_step = get_progress(
-            self, "local", self.config.r2.bucket_name, epoch=self.global_progress.epoch
-        )[1]
+        if uid == self.master_uid:
+            self.local_progress.inner_step = get_progress(
+                self, "global", self.config.global_model_name, epoch=epoch
+            )[1]
+        else:
+            self.local_progress.inner_step = get_progress(
+                self, "local", self.config.r2.bucket_name, epoch=epoch
+            )[1]
 
         # self.logger.debug("Model Weights Before Loading State")
         # current_model_weights_sample = copy.copy(

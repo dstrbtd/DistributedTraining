@@ -117,7 +117,8 @@ if __name__ == "__main__":
 
     upload_folder_to_r2(r2_write, bucket)
     # Only archive on the miner side after an AllReduce
-    if archive:
+    # Variable has to be fed as a string in subprocess
+    if archive == "True":
         archive_root_bucket(r2_write, bucket, epoch)
 
     # local_folder = pathlib.Path(f"{bucket}/metadata.json")

@@ -1,33 +1,20 @@
 import asyncio
+import random
 import time
 import math
-from typing import Any, Dict, List, Tuple
-
+import torch
+import distributed_training
 import bittensor as bt
 import numpy as np
-import torch
 
-import distributed_training
+from typing import Any, Dict, List, Tuple
 from distributed_training.averaging.exceptions import AllReduceError, ModelStateError
 from distributed_training.protocol import AllReduce
 from distributed_training.data.dataset import DatasetLoader
 from distributed_training.utils.dendrite import (
     async_dendrite_forward,
 )
-import random
-from torch.distributed.fsdp import (
-    FullyShardedDataParallel as FSDP,
-    StateDictType,
-    FullStateDictConfig,
-)
-from torch.distributed.checkpoint.state_dict import (
-    get_model_state_dict,
-    StateDictOptions,
-)
-from torch.distributed.checkpoint.state_dict import (
-    set_model_state_dict,
-)
-import torch.distributed as dist
+from distributed_training.utils.state_loader import r2_download
 from transformers import AutoModelForCausalLM
 
 
@@ -486,11 +473,28 @@ class AveragingHandler:
         ):
             main_param.data.copy_(opt_param.data, non_blocking=True)
 
-    def reset_main_parameters(self, model_name, revision):
+    def reset_main_parameters(self, r2, model_name, revision):
         """Reset the optimizer parameteres to the parameters at the start of the epoch"""
         try:
+            model_path = r2_download(
+                self,
+                r2=r2,
+                bucket=model_name,
+                key=f"epoch-{self.local_progress.epoch-1}/model.safetensors",
+                multiple_ranks=False,
+                destination=self.output_dir,
+            )
+            config_path = r2_download(
+                self,
+                r2=r2,
+                bucket=model_name,
+                key=f"epoch-{self.local_progress.epoch-1}/config.json",
+                multiple_ranks=False,
+                destination=self.output_dir,
+            )
             main_parameters = AutoModelForCausalLM.from_pretrained(
-                model_name, revision=revision, trust_remote_code=True
+                self.output_dir,  # directory containing model files
+                trust_remote_code=False,
             )
             opt_parameters = [
                 param

@@ -11,7 +11,7 @@ import numpy as np
 from bittensor.core.chain_data import decode_account_id
 from hivemind.p2p import PeerID
 from hivemind.utils.timed_storage import ValueWithExpiration
-from distributed_training.utils.state_loader import check_model_exists
+from distributed_training.utils.state_loader import get_progress
 
 
 async def check_uid(self, dendrite, axon, uid, epoch=None):
@@ -187,7 +187,9 @@ def post_next_uid_api(self):
             headers={"Authorization": self.uid_api_post_token},
         )
         if response.status_code != 200:
-            raise Exception(f"UID post request failed with error: {e}")
+            raise Exception(
+                f"UID post request failed with error: Resp {response.status_code}"
+            )
     except Exception as e:
         self.logger.info(
             f"Error {e} getting UID from: {self.uid_api_url}. Attempting to get UID manually."
@@ -310,7 +312,42 @@ def map_uid_to_peerid(self):
                     self.uid_tracker[uid].train.access_key_id = access_key_id
                     self.uid_tracker[uid].train.secret_access_key = secret_access_key
 
-            self.logger.debug(f"Retrieved commitment for UID {uid}: {metadata}")
+            peer_id = get_progress(self, "local", uid=uid, multiple_ranks=False)[1]
+
+            if peer_id != self.uid_tracker[uid].all_reduce.peer_id:
+                uid_peerid_metadata = [
+                    metadata.all_reduce.peer_id
+                    for key, metadata in self.uid_tracker.items()
+                    if key != uid
+                ]
+                if peer_id in uid_peerid_metadata:
+                    uid_list = [
+                        uid
+                        for uid, metadata in self.uid_tracker.items()
+                        if metadata.all_reduce.peer_id == peer_id
+                    ]
+                    for uid_i in uid_list:
+                        if (
+                            self.uid_tracker[uid_i].chaindata.last_updated_block
+                            is not None
+                        ) and (
+                            self.uid_tracker[uid_i].chaindata.last_updated_block
+                            > last_updated_block
+                        ):
+                            self.uid_tracker[uid_i].chaindata.last_updated_block = 0
+                            self.uid_tracker[uid_i].all_reduce.peer_id = None
+                        else:
+                            self.uid_tracker[uid].all_reduce.peer_id = peer_id
+                            self.uid_tracker[
+                                uid
+                            ].chaindata.last_updated_block = last_updated_block
+                else:
+                    self.uid_tracker[uid].all_reduce.peer_id = peer_id
+                    self.uid_tracker[
+                        uid
+                    ].chaindata.last_updated_block = last_updated_block
+
+                self.logger.debug(f"Retrieved commitment for UID {uid}: {metadata}")
 
         except Exception as e:
             self.logger.debug(f"Failed to decode commitment for UID {uid}: {e}")

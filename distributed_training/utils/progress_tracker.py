@@ -152,10 +152,11 @@ def get_progress(
         metadata = json.loads(data)
         local_epoch = metadata["outer_step"]
         local_inner_step = metadata["inner_step"]
-        return local_epoch, local_inner_step
+        local_peer_id = metadata["peer_id"]
+        return local_epoch, local_inner_step, local_peer_id
     except Exception as e:
         self.logger.warning(f"Error in get_progress: {str(e)}")
-        return None, 0
+        return None, 0, None
 
 
 def get_min_local_inner_Step(self, repo_id: str = None, epoch: int = None):

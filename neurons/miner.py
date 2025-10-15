@@ -452,6 +452,7 @@ class Miner(BaseMinerNeuron):
                         "run": int(__run__),
                         "outer_step": int(self.local_progress.epoch),
                         "inner_step": int(self.local_progress.inner_step),
+                        "peer_id": str(self.dht.peer_id.to_base58()),
                     }
                     with open(
                         os.path.join(self.output_dir, f"metadata.json"), "w"
@@ -495,7 +496,7 @@ class Miner(BaseMinerNeuron):
                             self.config.r2.write.access_key_id,
                             self.config.r2.write.secret_access_key,
                             f"{__run__}.{self.local_progress.epoch}.{self.local_progress.inner_step}",
-                            archive,
+                            str(archive),
                         ]
                     )
                     while self.upload_process.poll() is None:
@@ -1066,14 +1067,14 @@ class Miner(BaseMinerNeuron):
             else torch.tensor([0])
         )
         dist.broadcast(should_sync_model, src=0, group=self.gloo_group)
-        self.should_sync_model = True if should_sync_model == 0 else False
+        self.should_sync_model = True if should_sync_model[0].item() == 1 else False
 
-        if self.should_sync_model and self.master:
-            del global_model
-            gc.collect()
-            torch.cuda.empty_cache()
-            load_state_from_peer(self, epoch=self.global_progress.epoch)
-        elif self.master:
+        if self.should_sync_model:
+            self.logger.info("Local model out of sync. Loading global model")
+            load_state_from_peer(
+                self, uid=self.master_uid, epoch=self.global_progress.epoch
+            )
+        if self.master:
             del global_model
             gc.collect()
             torch.cuda.empty_cache()

@@ -55,7 +55,7 @@ from botocore.session import get_session
 # Set scoring weights
 TRAIN_SCORE_WEIGHT = 0.75
 ALL_REDUCE_SCORE_WEIGHT = 0.25
-MAX_UPLOAD_INTERVAL = 1800  # Seconds
+MAX_UPLOAD_INTERVAL = 2400  # Seconds
 
 api = HfApi()
 
@@ -478,8 +478,18 @@ def benchmark_uids(self):
     """
     Benchmark each UID by checking if their model is valid and up-to-date.
     """
+    if (
+        self.blocks_since_allreduce < (self.config.neuron.blocks_per_allreduce / 2)
+    ) and (self.global_progress.epoch != 0):
+        epoch = self.global_progress.epoch - 1
+    else:
+        epoch = self.global_progress.epoch
+
     for uid in self.uid_tracker:
         try:
+            self.uid_tracker[
+                uid
+            ].train.revision = f"{__run__}.{epoch}.{get_progress(self, 'local', uid=uid, multiple_ranks=False)[1]}"
             self.uid_tracker[uid].train.is_valid = score_repo(
                 self, uid, self.uid_tracker[uid].train.revision
             )
