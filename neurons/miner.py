@@ -413,6 +413,7 @@ class Miner(BaseMinerNeuron):
         gradient_state=None,
         scheduler_state_dict=None,
         inner_optimizer_lr=None,
+        archive=False,
     ):
         # self.pause_training()
         bt.logging.info("Upload Model Start")
@@ -494,6 +495,7 @@ class Miner(BaseMinerNeuron):
                             self.config.r2.write.access_key_id,
                             self.config.r2.write.secret_access_key,
                             f"{__run__}.{self.local_progress.epoch}.{self.local_progress.inner_step}",
+                            archive,
                         ]
                     )
                     while self.upload_process.poll() is None:
@@ -535,7 +537,7 @@ class Miner(BaseMinerNeuron):
 
         return False
 
-    def start_background_upload(self, epoch):
+    def start_background_upload(self, epoch, archive=False):
         """Starts a background upload of the model state, managing ongoing uploads."""
         # Check if upload_future is already being executed
         uploading = (
@@ -597,6 +599,7 @@ class Miner(BaseMinerNeuron):
                 gradient_state,
                 self.scheduler.state_dict(),
                 self.inner_optimizer.param_groups[0]["lr"],
+                archive,
             )
 
             # Optional: Add callback to handle completion
@@ -1439,6 +1442,20 @@ class Miner(BaseMinerNeuron):
             dist.broadcast(synapse_completion, src=0, group=self.gloo_group)
             self.logger.info("Synapse Completion" + str(synapse_completion[0].item()))
             if synapse_completion[0].item() == 1:
+                # Archive before updating the epoch
+                r2_write = boto3.client(
+                    "s3",
+                    endpoint_url=f"https://{self.config.r2.account_id}.r2.cloudflarestorage.com",
+                    aws_access_key_id=self.config.r2.write.access_key_id,
+                    aws_secret_access_key=self.config.r2.write.secret_access_key,
+                    region_name="auto",
+                )
+                archive_root_bucket(
+                    r2_write,
+                    self.config.r2.bucket_name,
+                    epoch=self.local_progress.epoch,
+                )
+
                 self.logger.info(f"Apply opt params")
                 self.apply_optimizer_parameters()
 
@@ -1467,6 +1484,7 @@ class Miner(BaseMinerNeuron):
                 self.logger.info("AllReduce Operation Finished Succesfully")
                 self.start_background_upload(
                     epoch=self.local_progress.epoch,
+                    archive=True,
                 )
                 self.all_reduce_flag = 0
                 # Resume training when done

@@ -73,6 +73,7 @@ async def forward(self):
         # Benchmark UIDs
         benchmark_uids(self)
 
+    self.logger.info("self.set_current_block_across_ranks()")
     # Get number of blocks since last allreduce
     self.set_current_block_across_ranks()
     self.blocks_since_allreduce = self.current_block - self.last_allreduce_block
@@ -201,14 +202,15 @@ async def forward(self):
                     min_group_size=self.config.neuron.min_group_size,
                 )
 
-            synapse_completion = (
+            all_reduce_success_status_tensor = (
                 torch.tensor([1])
                 if self.master and all_reduce_success_status
                 else torch.tensor([0])
             )
-            dist.broadcast(synapse_completion, src=0, group=self.gloo_group)
-            self.logger.info("Synapse Completion" + str(synapse_completion[0].item()))
-            if synapse_completion[0].item() == 1:
+            dist.broadcast(
+                all_reduce_success_status_tensor, src=0, group=self.gloo_group
+            )
+            if all_reduce_success_status_tensor[0].item() == 1:
                 self.logger.info(f"Apply opt params")
                 apply_optimizer_parameters(self)
 
@@ -275,7 +277,7 @@ async def forward(self):
                 upload_new_state(
                     self,
                     self.local_progress.epoch,
-                    results,
+                    results if self.master else {},
                     model_state,
                     inner_optimizer_state,
                     self.inner_optimizer.param_groups[0]["lr"],
@@ -318,34 +320,39 @@ async def forward(self):
                         self.logger.info(
                             f"Error reporting allreduce metrics to dashboard {e}"
                         )
-                self.all_reduce_success_status = all_reduce_success_status
+                self.all_reduce_success_status = (
+                    True if all_reduce_success_status_tensor[0].item() == 1 else False
+                )
             else:
                 raise GradientAveragingError("Unsuccessful AllReduce Step")
 
         except Exception as e:
             self.all_reduce_success_status = False
+            self.logger.error(f"All Reduce failed with error {e}")
             return
 
         finally:
-            all_reduce_completion = (
+            upload_update_completion_tensor = (
                 torch.tensor([1])
-                if self.all_reduce_success_status
+                if self.all_reduce_success_status is True
                 else torch.tensor([0])
             )
-            dist.broadcast(all_reduce_completion, src=0, group=self.gloo_group)
-            self.logger.info(
-                "Synapse Completion " + str(all_reduce_completion[0].item())
+            dist.broadcast(
+                upload_update_completion_tensor, src=0, group=self.gloo_group
             )
-            if all_reduce_completion[0].item() != 1:
-                self.global_progress.epoch = get_progress(self)[0]
+            if upload_update_completion_tensor[0].item() != 1:
+                self.logger.info("Failed to completed allreduce & upload process")
+                self.global_progress.epoch = get_progress(self, "global")[0]
                 self.all_reduce_success_status = False
                 self.last_allreduce_block += int(
                     self.config.neruon.blocks_per_allreduce / 10
                 )
+                return
             else:
+                self.logger.info("Succesfully completed allreduce & upload process")
                 self.all_reduce_success_status = True
-                self.config.neuron.blocks_per_allreduce = 500
-        dist.barrier()
+                self.config.neuron.blocks_per_allreduce = 250
+
     else:
         if self.master:
             # If running HF validation round, only call one UID each step
@@ -373,9 +380,6 @@ async def forward(self):
         self.logger.info(f"UIDs:  {self.miner_uids}")
 
         await score_uids(self, self.miner_uids)
-
-        # if self.master:
-        #     breakpoint()
 
         if self.master:
             # Update train.scores for each UID

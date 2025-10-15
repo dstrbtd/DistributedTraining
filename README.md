@@ -36,9 +36,20 @@ wandb login <your_wandb_api_key>
 huggingface-cli login <your_hf_write_api_key>
 ```
 
-4. Create a unique huggignface repo_id via the following link: https://huggingface.co/new and note the repo_id to provide it under the config neuron.local_model_name in the startup command
+4. Register your hotkey
+```bash
+btcli subnets register --subtensor.network finney --netuid $NETUID --wallet.name $WALLET_NAME --wallet.hotkey $HOTKEY_NAME
+```
 
-5. Install [PM2](https://pm2.io/docs/runtime/guide/installation/) and the [`jq` package](https://jqlang.github.io/jq/) on your system.
+5. Create a R2 bucket which follows the below format.
+```bash
+f"{self.config.neuron.global_model_name}-{uid:03d}"
+```
+For example uid `1` under a global_model_name `llama-4b-ws-8` this bucket would have the name `llama-1b-ws-2-001`.
+
+6. Create READ, WRITE and ADMIN R2 Access tokens to all your applciable R2 buckets. Add them to `.env.example` and rename the file `.env`. 
+
+7. Install [PM2](https://pm2.io/docs/runtime/guide/installation/) and the [`jq` package](https://jqlang.github.io/jq/) on your system.
 
 **On Linux**:
 ```bash
@@ -47,11 +58,6 @@ sudo apt update && sudo apt install jq && sudo apt install npm && sudo npm insta
 **On Mac OS**
 ```bash
 brew update && brew install jq && brew install npm && sudo npm install pm2 -g && pm2 update
-```
-
-6. Register your hotkey
-```bash
-btcli subnets register --subtensor.network finney --netuid $NETUID --wallet.name $WALLET_NAME --wallet.hotkey $HOTKEY_NAME
 ```
 
 ---

@@ -1,45 +1,26 @@
 import copy
+import hivemind
+import bittensor as bt
+import logging
+import json
 import gc
-from botocore.exceptions import ClientError
 import os
-import requests
-import pytz
 import shutil
-import tempfile
-import time
-from functools import partial
-from pathlib import Path
-from typing import Optional
-
 import tempfile
 import psutil
 import torch
-from datetime import datetime
-import datetime as dt
+import time
+import filelock
 
-from hivemind.utils import get_logger
-from huggingface_hub import (
-    create_tag,
-    hf_hub_download,
-    snapshot_download,
-    list_repo_refs,
-    list_repo_files,
-    scan_cache_dir,
-    upload_folder,
-)
-from huggingface_hub.utils import (
-    HfHubHTTPError,
-)
-from huggingface_hub.constants import HF_HUB_CACHE
+from functools import partial
+from typing import Optional
 from transformers import (
     AutoModelForCausalLM,
-    AutoConfig,
     get_cosine_schedule_with_warmup,
 )
 
 from distributed_training import __run__
-from distributed_training.averaging.averagers import DTGradAverager, DTStateAverager
-
+from distributed_training.averaging.averagers import DTGradAverager
 from distributed_training.utils.progress_tracker import (
     get_progress,
     get_min_local_inner_Step,
@@ -50,32 +31,22 @@ from distributed_training.utils.upload_worker import (
     upload_folder_to_r2,
 )
 from distributed_training.averaging.avg_handler import AveragingHandler
-from huggingface_hub import list_repo_commits
-
 from torch.distributed._tensor import DeviceMesh
 from torch.distributed._composable.fsdp import (
     fully_shard,
     MixedPrecisionPolicy,
 )
-import torch.distributed as dist
 from torch.distributed.checkpoint.state_dict import (
-    get_model_state_dict,
     StateDictOptions,
-    get_optimizer_state_dict,
     set_optimizer_state_dict,
     set_model_state_dict,
 )
-import time
-import filelock
-
-hivemind_logger = get_logger(__name__)
-
+import torch.distributed as dist
 from typing import (
     Any,
     Callable,
     Dict,
     Iterable,
-    Iterator,
     Optional,
     Sequence,
     Tuple,
@@ -83,19 +54,10 @@ from typing import (
 )
 from itertools import chain
 from hivemind.utils import (
-    DHTExpiration,
-    PerformanceEMA,
     get_logger,
     nested_flatten,
-    nested_pack,
 )
-import bittensor as bt
 from packaging.version import Version
-import logging
-
-import pickle, hashlib, torch, torch.distributed as dist
-from muon import MuonWithAuxAdam, SingleDeviceMuonWithAuxAdam
-
 from torch.distributed.tensor._dtensor_spec import (
     DTensorSpec,
     TensorMeta,
@@ -103,10 +65,10 @@ from torch.distributed.tensor._dtensor_spec import (
 from torch.distributed.tensor import DTensor
 from torch.distributed.device_mesh import DeviceMesh as DM
 from torch.distributed.tensor.placement_types import Shard
-import hivemind
 from safetensors.torch import save_file, load_file
 from botocore.client import BaseClient
-import json
+
+hivemind_logger = get_logger(__name__)
 
 torch.serialization.add_safe_globals([DTensorSpec])
 torch.serialization.add_safe_globals([DTensor])
@@ -141,9 +103,6 @@ def r2_download(self, r2, bucket, key, multiple_ranks=True, destination=None):
     if (self.master) or (multiple_ranks):
         try:
             os.makedirs(os.path.dirname(destination_path), exist_ok=True)
-            self.logger.info(bucket)
-            self.logger.info(key)
-            self.logger.info(destination_path)
             lock_path = destination_path + ".lock"
             with filelock.FileLock(lock_path):
                 r2.download_file(bucket, key, destination_path)
@@ -558,7 +517,6 @@ def load_model_optimizer_gradient_averager(
             raise Exception(f"Failed to load model. Check model exists failed.")
 
         if not hasattr(self, "model"):
-            self.logger.info("START MODEL STATE LOAD")
             model_path = r2_download(
                 self,
                 r2=r2,
@@ -567,7 +525,6 @@ def load_model_optimizer_gradient_averager(
                 multiple_ranks=False,
                 destination=output_dir,
             )
-            self.logger.info(model_path)
             config_path = r2_download(
                 self,
                 r2=r2,
@@ -576,14 +533,12 @@ def load_model_optimizer_gradient_averager(
                 multiple_ranks=False,
                 destination=output_dir,
             )
-            self.logger.info(config_path)
-            # dist.barrier(device_ids=[torch.cuda.current_device()])
             dist.barrier()
-            self.logger.info("END MODEL STATE LOAD")
             self.model = AutoModelForCausalLM.from_pretrained(
                 output_dir,  # directory containing model files
                 trust_remote_code=False,
             )
+            self.logger.info("Loaded Model State")
 
             need_full_state = self.master and not hasattr(self, "outer_optimizer")
             if need_full_state:
@@ -600,6 +555,7 @@ def load_model_optimizer_gradient_averager(
 
             # Keep a plain HF module and enable FSDP2 on it
             fully_shard(self.model, mesh=self.mesh, mp_policy=mp_policy)
+            self.logger.info("Sharded Model State")
         else:
             if self.master:
                 saftensors_path = r2_download(
@@ -618,19 +574,15 @@ def load_model_optimizer_gradient_averager(
             dist.broadcast_object_list(objs, src=0, group=self.gloo_group)
             m_blob = objs[0]
             self.logger.info("Downloaded Model State")
-            opts = StateDictOptions(
+            model_loading_options = StateDictOptions(
                 full_state_dict=True, cpu_offload=True, broadcast_from_rank0=False
             )
             dist.barrier()
-            set_model_state_dict(self.model, m_blob, options=opts)
+            set_model_state_dict(self.model, m_blob, options=model_loading_options)
+            self.logger.info("Sharded Model State")
 
             need_full_state = not hasattr(self, "outer_optimizer")
-            self.logger.info("Full state start")
             if need_full_state:
-                opts = StateDictOptions(
-                    full_state_dict=True,  # gather a full (HF-style) state dict
-                    cpu_offload=True,  # offload to host RAM (no GPU OOM)
-                )
                 full_state = m_blob
             del objs, model_state, m_blob
 
@@ -682,23 +634,19 @@ def load_model_optimizer_gradient_averager(
             optimizer_state = torch.load(
                 optimizer_state_path, map_location="cpu", weights_only=True
             )
-            self.logger.info(f"Donwloaded State")
+            self.logger.info(f"Donwloaded Optimizer State")
 
-            opts = StateDictOptions(full_state_dict=False, cpu_offload=True)
-
-            # `optim_sd` is the dict loaded from HF
-            self.logger.info(
-                f"[r{dist.get_rank()}] before set_optimizer_state_dict (NCCL) {opts}"
+            inner_optimizer_loading_options = StateDictOptions(
+                full_state_dict=False, cpu_offload=True
             )
+
             set_optimizer_state_dict(
                 model=self.model,
                 optimizers=self.inner_optimizer,
                 optim_state_dict=optimizer_state["optimizer_state_dict"],
-                options=opts,
+                options=inner_optimizer_loading_options,
             )
-            self.logger.info(
-                f"[r{dist.get_rank()}] after set_optimizer_state_dict (NCCL)"
-            )
+            self.logger.info(f"Set Inner Optimizer State Dict")
 
             if "scheduler_state" in optimizer_state:
                 self.scheduler.load_state_dict(optimizer_state["scheduler_state"])
@@ -918,12 +866,13 @@ def load_state_from_peer(
                             )
                         ]
                     )
-                    self.logger.info(f"Loading success: {loading_success}")
                     dist.all_reduce(loading_success, group=self.gloo_group)
-                    self.logger.info(f"Loading success: {loading_success}")
                     if (loading_success[0].item() != self.world_size) and (
                         uid != self.master_uid
                     ):
+                        self.logger.info(
+                            "Failed to load local model. Loading global model"
+                        )
                         self.logger.info(
                             "LOAD GLOBAL MODEL",
                             load_model_optimizer_gradient_averager(
@@ -993,7 +942,7 @@ def cleanup_old_cache(self):
         ]
         for file in files:
             try:
-                shutil.rmtree(file)
+                shutil.rmtree(file, ignore_errors=True)
                 self.logger.info(f"Deleting cache for model {file}")
             except Exception as e:
                 self.logger.info(f"Error deleting cache for model {file}: {e}")
@@ -1019,33 +968,16 @@ def upload_new_state(
         inner_optimizer_lr=inner_optimizer_lr,
         block=block,
     )
-
     upload_success_status = torch.tensor([1]) if upload_success else torch.tensor([0])
     dist.all_reduce(upload_success_status, group=self.gloo_group)
-    if (upload_success[0].item() == self.world_size) and self.master:
-        # Verify the upload
-        updated_refs = list_repo_refs(
-            self.config.neuron.global_model_name,
-            repo_type="model",
+    if (upload_success_status[0].item() == self.world_size) and self.master:
+        self.logger.info(
+            f"Successfully pushed new model with tag {self.local_progress.epoch}"
         )
-        new_tag = (
-            max(
-                [
-                    int(tag.name.split(".")[1])
-                    for tag in updated_refs.tags
-                    if (
-                        (len(tag.name.split(".")) == 3)
-                        and (tag.name.split(".")[0] == __run__)
-                    )
-                ]
-            )
-            if updated_refs.tags
-            else 0
-        )
-        self.logger.info(f"Successfully pushed new model with tag {new_tag}")
+
         # Wait to allow out of sync miners to download new model state
         time.sleep(self.load_state_timeout)
-    else:
+    elif upload_success_status[0].item() != self.world_size:
         self.logger.error(
             "Maximum Retry Limit Reached. Unable To Upload Model To HF Hub."
         )
@@ -1131,7 +1063,8 @@ def save_and_upload_state(
         )
         participating_peers = results["participating_peers"]
         failed_peers = results["failed_peers"]
-        attempt = 0
+
+    attempt = 0
     while attempt < self.model_upload_retry_limit:
         try:
             if self.master:
@@ -1162,7 +1095,7 @@ def save_and_upload_state(
                 )
                 self.logger.info("Save optimizer")
 
-                # Save metadata
+                # # Save metadata
                 metadata = {
                     "run": int(__run__),
                     "outer_step": int(self.local_progress.epoch),
@@ -1186,21 +1119,21 @@ def save_and_upload_state(
                 ),
             )
 
-            self.logger.info(
-                f"Uploading model and optimizer states to repo: {self.config.neuron.global_model_name}"
-            )
+            if self.master:
+                self.logger.info(
+                    f"Uploading model and optimizer states to repo: {self.config.neuron.global_model_name}"
+                )
+                # Upload everything in one go
+                upload_folder_to_r2(
+                    r2=self.r2["global"],
+                    bucket=self.config.r2.bucket_name,
+                )
 
-            # Upload everything in one go
-            upload_folder_to_r2(
-                r2=self.r2["global"],
-                bucket=self.config.r2.bucket_name,
-            )
-
-            archive_root_bucket(
-                r2=self.r2["global"],
-                bucket=self.config.r2.bucket_name,
-                epoch=self.local_progress.epoch,
-            )
+                archive_root_bucket(
+                    r2=self.r2["global"],
+                    bucket=self.config.r2.bucket_name,
+                    epoch=self.local_progress.epoch,
+                )
 
             self.logger.info(
                 f"Successfully pushed new model and optimizer state with tag {epoch} to repo: {self.config.neuron.global_model_name}"

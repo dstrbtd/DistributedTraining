@@ -17,7 +17,7 @@ def upload_folder_to_r2(r2, bucket, prefix="", max_workers=14):
     local_folder = pathlib.Path(bucket)
 
     files = [p for p in local_folder.rglob("*") if p.is_file()]
-    print(f"Uploading {len(files)} files with {max_workers} threads...")
+    # print(f"Uploading {len(files)} files with {max_workers} threads...")
 
     pbar = tqdm.tqdm(total=len(files))
 
@@ -46,9 +46,6 @@ def upload_folder_to_r2(r2, bucket, prefix="", max_workers=14):
             max_concurrency=workers,
             use_threads=True,
         )
-
-        print(str(path))
-        print(key)
         r2.upload_file(str(path), bucket, key, Config=cfg)
         pbar.update(1)
         return key
@@ -56,10 +53,11 @@ def upload_folder_to_r2(r2, bucket, prefix="", max_workers=14):
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         for i, key in enumerate(ex.map(_upload, files), 1):
             if i % 10 == 0 or i == len(files):
-                print(f"Uploaded {i}/{len(files)}")
+                pass
+                # print(f"Uploaded {i}/{len(files)}")
 
-    print("✅ Upload complete")
-    print(datetime.datetime.now())
+    # print("✅ Upload complete")
+    # print(datetime.datetime.now())
 
 
 def archive_root_bucket(r2: BaseClient, bucket: str, epoch: int):
@@ -106,6 +104,7 @@ if __name__ == "__main__":
     r2_write_access_access_key_id = sys.argv[3]
     r2_write_access_secret_access_key = sys.argv[4]
     tag = sys.argv[5]
+    archive = sys.argv[6]
     epoch = tag.split(".")[1]
 
     r2_write = boto3.client(
@@ -117,7 +116,11 @@ if __name__ == "__main__":
     )
 
     upload_folder_to_r2(r2_write, bucket)
-    archive_root_bucket(r2_write, bucket, epoch)
+    # Only archive on the miner side after an AllReduce
+    if archive:
+        archive_root_bucket(r2_write, bucket, epoch)
 
-    # local_folder = pathlib.Path(f"{r2_bucket_id}/metadata.json")
-    # r2_write.upload_file(str(local_folder), r2_bucket_id, f"metadata.json")
+    # local_folder = pathlib.Path(f"{bucket}/metadata.json")
+    # r2_write.upload_file(
+    #     str("/root/llama-1b-ws-2/metadata.json"), bucket, f"metadata.json"
+    # )
