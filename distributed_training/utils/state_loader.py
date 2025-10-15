@@ -6,11 +6,9 @@ import json
 import gc
 import os
 import shutil
-import tempfile
 import psutil
 import torch
 import time
-import filelock
 
 from functools import partial
 from typing import Optional
@@ -23,7 +21,6 @@ from distributed_training import __run__
 from distributed_training.averaging.averagers import DTGradAverager
 from distributed_training.utils.progress_tracker import (
     get_progress,
-    get_min_local_inner_Step,
     get_r2_client,
 )
 from distributed_training.utils.r2 import (
@@ -755,7 +752,6 @@ def load_model_optimizer_gradient_averager(
             self.device,
             # parameters_list,
         )
-        # TODO
         if (
             (self.master)
             and (self.local_progress.inner_step != 0)
@@ -1062,6 +1058,7 @@ def save_and_upload_state(
                     "run": int(__run__),
                     "outer_step": int(self.local_progress.epoch),
                     "inner_step": int(self.local_progress.inner_step),
+                    "peer_id": str(self.dht.peer_id.to_base58()),
                 }
                 with open(os.path.join(self.output_dir, f"metadata.json"), "w") as f:
                     json.dump(metadata, f, indent=4, sort_keys=True)
@@ -1083,7 +1080,7 @@ def save_and_upload_state(
 
             if self.master:
                 self.logger.info(
-                    f"Uploading model and optimizer states to repo: {self.config.neuron.global_model_name}"
+                    f"Uploading model and optimizer states to bucket: {self.config.r2.bucket_name}"
                 )
                 # Upload everything in one go
                 upload_folder_to_r2(
@@ -1098,7 +1095,7 @@ def save_and_upload_state(
                 )
 
             self.logger.info(
-                f"Successfully pushed new model and optimizer state with tag {epoch} to repo: {self.config.neuron.global_model_name}"
+                f"Successfully pushed new model and optimizer state with tag {epoch} to bucket: {self.config.r2.bucket_name}"
             )
             return True
 

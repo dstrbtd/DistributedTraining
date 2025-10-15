@@ -16,11 +16,10 @@
 # DEALINGS IN THE SOFTWARE.
 
 import time
-
-import bittensor as bt
-import numpy as np
 import torch
 import torch.distributed as dist
+import bittensor as bt
+import numpy as np
 
 from distributed_training import __run__
 from distributed_training.averaging.exceptions import GradientAveragingError
@@ -73,7 +72,6 @@ async def forward(self):
         # Benchmark UIDs
         benchmark_uids(self)
 
-    self.logger.info("self.set_current_block_across_ranks()")
     # Get number of blocks since last allreduce
     self.set_current_block_across_ranks()
     self.blocks_since_allreduce = self.current_block - self.last_allreduce_block
@@ -164,14 +162,7 @@ async def forward(self):
                 else:
                     top_uid = 1
                 self.local_progress.epoch = self.global_progress.epoch
-
-                if self.master:
-                    repo_id_list = [self.uid_tracker[top_uid].train.model_id]
-                else:
-                    repo_id_list = [self.config.neuron.global_model_name]
-                dist.broadcast_object_list(repo_id_list, src=0, group=self.gloo_group)
-                self.logger.info("REPO ID LIST", repo_id_list)
-                repo_id = repo_id_list[0]
+                self.logger.info(f"Top UID identified as: {top_uid}")
 
                 self.local_progress.inner_step = get_progress(
                     self, local_or_global="local", uid=top_uid
@@ -211,7 +202,7 @@ async def forward(self):
                 all_reduce_success_status_tensor, src=0, group=self.gloo_group
             )
             if all_reduce_success_status_tensor[0].item() == 1:
-                self.logger.info(f"Apply opt params")
+                self.logger.info(f"Apply optimizer parameters to model")
                 apply_optimizer_parameters(self)
 
                 bt.logging.info(
@@ -263,7 +254,7 @@ async def forward(self):
                 model_state = get_model_state_dict(
                     self.model, options=model_state_options
                 )
-                self.logger.info("Full State")
+
 
                 inner_optimizer_options = StateDictOptions(
                     full_state_dict=False, cpu_offload=True

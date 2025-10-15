@@ -449,7 +449,7 @@ async def score_uids(self, uids: list):
     cleanup_old_cache(self)
 
 
-def score_repo(self, uid: int, revision: str) -> bool:
+def score_repo(self, uid: int, epoch: int) -> bool:
     """
     Check if the miner's R2 manifest exists and is recent enough.
     """
@@ -457,7 +457,7 @@ def score_repo(self, uid: int, revision: str) -> bool:
     r2 = get_r2_client(self, uid, multiple_ranks=False)
     try:
         response = r2.head_object(
-            Bucket=bucket_name, Key=f"checkpoints/run-{revision}/gradients.pt"
+            Bucket=bucket_name, Key=f"epoch-{epoch}/gradients.pt"
         )
         last_modified = (
             email.utils.parsedate_to_datetime(
@@ -487,11 +487,15 @@ def benchmark_uids(self):
 
     for uid in self.uid_tracker:
         try:
-            self.uid_tracker[
-                uid
-            ].train.revision = f"{__run__}.{epoch}.{get_progress(self, 'local', uid=uid, multiple_ranks=False)[1]}"
+            # if str(uid) == str(0):
+            #     breakpoint()
+            # self.uid_tracker[
+            #     uid
+            # ].train.revision = f"{__run__}.{epoch}.{get_progress(self, 'local', uid=uid, multiple_ranks=False)[1]}"
+            # if str(uid) == str(0):
+            #     breakpoint()
             self.uid_tracker[uid].train.is_valid = score_repo(
-                self, uid, self.uid_tracker[uid].train.revision
+                self, uid, epoch
             )
         except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
             # self.logger.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")

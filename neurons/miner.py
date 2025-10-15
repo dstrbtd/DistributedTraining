@@ -517,7 +517,7 @@ class Miner(BaseMinerNeuron):
                     log_peerid_to_chain(self)
 
                     self.logger.info(
-                        f"Successfully pushed new model state with tag {__run__}.{epoch}.{self.model.config.inner_step} to repo: {self.config.neuron.local_model_name}"
+                        f"Successfully pushed new model state with tag {__run__}.{epoch}.{self.model.config.inner_step} to bucket: {self.config.neuron.bucket_name}"
                     )
 
                 return True
