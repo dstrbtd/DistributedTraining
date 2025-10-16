@@ -561,9 +561,7 @@ def load_model_optimizer_gradient_averager(
                         destination=output_dir,
                     )
                 else:
-                    saftensors_path = (
-                        os.path.join(self.output_dir, "model.safetensors"),
-                    )
+                    saftensors_path = os.path.join(self.output_dir, "model.safetensors")
                 model_state = load_file(saftensors_path, device="cpu")
             else:
                 model_state = None

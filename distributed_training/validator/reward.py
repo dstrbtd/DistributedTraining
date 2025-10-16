@@ -214,9 +214,12 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, epoch)
         bucket=f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
         key=f"epoch-{epoch}/gradients.pt",
         multiple_ranks=False,
-        destination=os.path.join(os.getcwd(), f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}")
+        destination=os.path.join(
+            os.getcwd(),
+            f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
+        ),
     )
-
+    dist.barrier()
     gradient = torch.load(
         gradient_path,
         weights_only=True,
