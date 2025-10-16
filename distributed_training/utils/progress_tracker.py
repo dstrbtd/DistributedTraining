@@ -6,7 +6,6 @@ from distributed_training import __run__
 from pydantic import BaseModel, StrictBool, StrictFloat, confloat, conint
 
 
-
 @dataclass(frozen=False)
 class GlobalTrainingProgress:
     epoch: int

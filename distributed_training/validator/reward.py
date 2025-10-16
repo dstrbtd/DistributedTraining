@@ -172,7 +172,7 @@ async def evaluate_model(
     return total_loss, n_batches_total, n_batches_sampled
 
 
-async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
+async def evaluate_with_gradient(self, uid, model_base, blocks, revision, epoch):
     """
     Apply pseudo gradient for a UID and evaluate loss before and after.
 
@@ -212,8 +212,8 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
         self,
         r2=r2,
         bucket=f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
-        key=f"checkpoints/run-{revision}/gradients.pt",
-        multiple_ranks=True,
+        key=f"epoch-{epoch}/gradients.pt",
+        multiple_ranks=False,
         destination=f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
     )
 
@@ -266,7 +266,7 @@ def compute_loss_improvement(before: float, after: float) -> dict:
     }
 
 
-def get_uids_blocks(self, uid: int, revision: str) -> list[int]:
+def get_uids_blocks(self, uid: int, revision: str, epoch) -> list[int]:
     """"""
     bucket_name = f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}"
     r2 = get_r2_client(self, uid, multiple_ranks=True)
@@ -274,7 +274,7 @@ def get_uids_blocks(self, uid: int, revision: str) -> list[int]:
         self,
         r2=r2,
         bucket=bucket_name,
-        key=f"checkpoints/run-{revision}/config.json",
+        key=f"epoch-{epoch}/config.json",
         multiple_ranks=True,
         destination=bucket_name,
     )
@@ -388,6 +388,7 @@ async def score_uids(self, uids: list):
                     model_base=self.model,
                     blocks=random_blocks,
                     revision=revision,
+                    epoch=epoch,
                 )
             )
 
@@ -408,7 +409,7 @@ async def score_uids(self, uids: list):
 
             self.logger.info(f"UID {uid:03d}: Sampling dataset indices for testing")
             self.set_current_block_across_ranks()
-            assigned_block = get_uids_blocks(self, uid, revision)
+            assigned_block = get_uids_blocks(self, uid, revision, epoch)
             self.logger.info(assigned_block)
 
             loss_scores = compute_loss_improvement(
@@ -418,6 +419,7 @@ async def score_uids(self, uids: list):
                     model_base=self.model,
                     blocks=assigned_block,
                     revision=revision,
+                    epoch=epoch,
                 )
             )
 
@@ -456,9 +458,7 @@ def score_repo(self, uid: int, epoch: int) -> bool:
     bucket_name = f"{self.config.neuron.global_model_name}-{uid:03d}"
     r2 = get_r2_client(self, uid, multiple_ranks=False)
     try:
-        response = r2.head_object(
-            Bucket=bucket_name, Key=f"epoch-{epoch}/gradients.pt"
-        )
+        response = r2.head_object(Bucket=bucket_name, Key=f"epoch-{epoch}/gradients.pt")
         last_modified = (
             email.utils.parsedate_to_datetime(
                 response["LastModified"].strftime("%a, %d %b %Y %H:%M:%S GMT")
@@ -494,9 +494,7 @@ def benchmark_uids(self):
             # ].train.revision = f"{__run__}.{epoch}.{get_progress(self, 'local', uid=uid, multiple_ranks=False)[1]}"
             # if str(uid) == str(0):
             #     breakpoint()
-            self.uid_tracker[uid].train.is_valid = score_repo(
-                self, uid, epoch
-            )
+            self.uid_tracker[uid].train.is_valid = score_repo(self, uid, epoch)
         except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
             # self.logger.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
             self.uid_tracker[uid].train.is_valid = False

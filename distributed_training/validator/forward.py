@@ -255,7 +255,6 @@ async def forward(self):
                     self.model, options=model_state_options
                 )
 
-
                 inner_optimizer_options = StateDictOptions(
                     full_state_dict=False, cpu_offload=True
                 )
@@ -336,7 +335,7 @@ async def forward(self):
                 self.global_progress.epoch = get_progress(self, "global")[0]
                 self.all_reduce_success_status = False
                 self.last_allreduce_block += int(
-                    self.config.neruon.blocks_per_allreduce / 10
+                    self.config.neuron.blocks_per_allreduce / 10
                 )
                 return
             else:
