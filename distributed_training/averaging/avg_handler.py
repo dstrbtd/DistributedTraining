@@ -473,14 +473,14 @@ class AveragingHandler:
         ):
             main_param.data.copy_(opt_param.data, non_blocking=True)
 
-    def reset_main_parameters(self, r2, model_name):
+    def reset_main_parameters(self, r2, model_name, epoch):
         """Reset the optimizer parameteres to the parameters at the start of the epoch"""
         try:
             model_path = r2_download(
                 self,
                 r2=r2,
                 bucket=model_name,
-                key=f"epoch-{self.local_progress.epoch-1}/model.safetensors",
+                key=f"epoch-{epoch}/model.safetensors",
                 multiple_ranks=False,
                 destination=self.output_dir,
             )
@@ -488,7 +488,7 @@ class AveragingHandler:
                 self,
                 r2=r2,
                 bucket=model_name,
-                key=f"epoch-{self.local_progress.epoch-1}/config.json",
+                key=f"epoch-{epoch}/config.json",
                 multiple_ranks=False,
                 destination=self.output_dir,
             )

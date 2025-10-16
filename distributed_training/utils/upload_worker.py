@@ -22,15 +22,15 @@ if __name__ == "__main__":
         region_name="auto",
     )
 
-    # upload_folder_to_r2(r2_write, bucket)
-    # # Only archive on the miner side after an AllReduce
-    # # Variable has to be fed as a string in subprocess
-    # if archive == "True":
-    #     archive_root_bucket(r2_write, bucket, epoch)
+    upload_folder_to_r2(r2_write, bucket)
+    # Only archive on the miner side after an AllReduce
+    # Variable has to be fed as a string in subprocess
+    if archive == "True":
+        archive_root_bucket(r2_write, bucket, epoch)
 
-    r2_write.upload_file(
-        str("/root/llama-1b-ws-2/metadata.json"), bucket, f"metadata.json"
-    )
-    r2_write.upload_file(
-        str("/root/llama-1b-ws-2/metadata.json"), bucket, f"epoch-26/metadata.json"
-    )
+    # r2_write.upload_file(
+    #     str("/root/llama-1b-ws-2/metadata.json"), bucket, f"metadata.json"
+    # )
+    # r2_write.upload_file(
+    #     str("/root/llama-1b-ws-2/metadata.json"), bucket, f"epoch-26/metadata.json"
+    # )

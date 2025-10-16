@@ -760,6 +760,7 @@ def load_model_optimizer_gradient_averager(
             self.avg_handler.reset_main_parameters(
                 r2,
                 local_model_name,
+                self.local_progress.epoch - 1
             )
 
     self.logger.info(
