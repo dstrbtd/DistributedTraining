@@ -111,7 +111,6 @@ async def forward(self):
                         k=sample_size,
                         epoch=self.local_progress.epoch,
                     )
-                    self.miner_uids = [0, 2]
                     if min_sample_size > 1:
                         min_sample_size = min_sample_size - 1
             dist.barrier()
@@ -364,7 +363,6 @@ async def forward(self):
             return responses
 
         self.miner_uids = [i for i in range(10)]
-        # self.miner_uids = [0, 2]
         if self.master:
             self.event.update({"UIDs": self.miner_uids})
         self.logger.info(f"UIDs:  {self.miner_uids}")

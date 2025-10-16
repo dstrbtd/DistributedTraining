@@ -214,7 +214,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, epoch)
         bucket=f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
         key=f"epoch-{epoch}/gradients.pt",
         multiple_ranks=False,
-        destination=f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
+        destination=os.path.join(os.getcwd(), f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}")
     )
 
     gradient = torch.load(
@@ -487,13 +487,6 @@ def benchmark_uids(self):
 
     for uid in self.uid_tracker:
         try:
-            # if str(uid) == str(0):
-            #     breakpoint()
-            # self.uid_tracker[
-            #     uid
-            # ].train.revision = f"{__run__}.{epoch}.{get_progress(self, 'local', uid=uid, multiple_ranks=False)[1]}"
-            # if str(uid) == str(0):
-            #     breakpoint()
             self.uid_tracker[uid].train.is_valid = score_repo(self, uid, epoch)
         except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
             # self.logger.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")

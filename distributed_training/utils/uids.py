@@ -312,7 +312,7 @@ def map_uid_to_peerid(self):
                     self.uid_tracker[uid].train.access_key_id = access_key_id
                     self.uid_tracker[uid].train.secret_access_key = secret_access_key
 
-            peer_id = get_progress(self, "local", uid=uid, multiple_ranks=False)[1]
+            peer_id = get_progress(self, "local", uid=uid, multiple_ranks=False)[2]
 
             if peer_id != self.uid_tracker[uid].all_reduce.peer_id:
                 uid_peerid_metadata = [
