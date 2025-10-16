@@ -750,6 +750,8 @@ def load_model_optimizer_gradient_averager(
             self.config.neuron.local_batch_size_train_effective,
             self.tokenizer,
             self.device,
+            self.output_dir,
+            self.logger,
             # parameters_list,
         )
         if (

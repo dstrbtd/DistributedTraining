@@ -34,6 +34,8 @@ class AveragingHandler:
         local_batch_size_train_effective,
         tokenizer,
         device,
+        output_dir,
+        logger,
         parameters_list=None,
     ):
         self.model = model
@@ -51,7 +53,10 @@ class AveragingHandler:
         self.number_of_local_steps = (
             self.local_batch_size_train_effective // self.local_batch_size_train
         )
+        self.output_dir = output_dir
         self.parameters_list = parameters_list
+        self.master = True
+        self.logger = logger
 
     def _get_weights_sample(self) -> List[float]:
         """Get a sample of model weights for validation."""
@@ -506,4 +511,4 @@ class AveragingHandler:
             ):
                 opt_param.data.copy_(main_param.data, non_blocking=True)
         except Exception as e:
-            bt.logging.info(f"Failed to reset optimizer parameters with error: {e}")
+            self.logger.info(f"Failed to reset optimizer parameters with error: {e}")

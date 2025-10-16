@@ -222,7 +222,7 @@ def init_dht(self):
                                 f"/ip4/0.0.0.0/tcp/{self.config.dht.port}",
                                 f"/ip4/0.0.0.0/udp/{self.config.dht.port}/quic",
                             ],
-                            # initial_peers=[initial_peer],
+                            initial_peers=[initial_peer],
                             announce_maddrs=announce_maddrs,
                             start=True,
                         )
