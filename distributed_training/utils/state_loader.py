@@ -362,21 +362,25 @@ def cuda_mem(logger, tag):
         f"reserved={torch.cuda.memory_reserved()/1e9:.3f} GB"
     )
 
+
 def check_cache_sync(self, r2, local_model_name, epoch, output_dir):
     try:
         metadata_file_path = os.path.join(self.output_dir, "metadata.json")
         if not os.path.exists(metadata_file_path):
             r2_download(
-                    self,
-                    r2=r2,
-                    bucket=local_model_name,
-                    key=f"epoch-{epoch}/metadata.json",
-                    multiple_ranks=False,
-                    destination=output_dir,
+                self,
+                r2=r2,
+                bucket=local_model_name,
+                key=f"epoch-{epoch}/metadata.json",
+                multiple_ranks=False,
+                destination=output_dir,
             )
-        with open(metadata_file_path, 'r') as file:
+        with open(metadata_file_path, "r") as file:
             metadata = json.load(file)
-        if (self.local_progress.epoch, self.local_progress.inner_step) == (metadata["epoch"], metadata["inner_step"]):
+        if (self.local_progress.epoch, self.local_progress.inner_step) == (
+            metadata["outer_step"],
+            metadata["inner_step"],
+        ):
             self.logger.info("Skipping Download Using Local Cache")
             return False
         else:
@@ -385,6 +389,7 @@ def check_cache_sync(self, r2, local_model_name, epoch, output_dir):
     except Exception as e:
         self.logger.info(f"Error {e} checking local cache")
         return False
+
 
 def load_model_optimizer_gradient_averager(
     self,
@@ -432,7 +437,7 @@ def load_model_optimizer_gradient_averager(
         else self.config.neuron.global_model_name
     )
     output_dir = os.path.join(os.getcwd(), local_model_name)
-    use_cache = not check_cache_sync(self, r2, local_model_name, epoch, output_dir):
+    use_cache = not check_cache_sync(self, r2, local_model_name, epoch, output_dir)
 
     # # Delete existing outer optimizer
     # if hasattr(self, "outer_optimizer"):
@@ -556,7 +561,9 @@ def load_model_optimizer_gradient_averager(
                         destination=output_dir,
                     )
                 else:
-                    saftensors_path = os.path.join(self.output_dir, "model.safetensors"),
+                    saftensors_path = (
+                        os.path.join(self.output_dir, "model.safetensors"),
+                    )
                 model_state = load_file(saftensors_path, device="cpu")
             else:
                 model_state = None
@@ -624,7 +631,10 @@ def load_model_optimizer_gradient_averager(
                     destination=output_dir,
                 )
             else:
-                optimizer_state_path = os.path.join(self.output_dir, "inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt")
+                optimizer_state_path = os.path.join(
+                    self.output_dir,
+                    "inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
+                )
             optimizer_state = torch.load(
                 optimizer_state_path, map_location="cpu", weights_only=True
             )
@@ -739,7 +749,9 @@ def load_model_optimizer_gradient_averager(
                         destination=output_dir,
                     )
                 else:
-                    optimizer_state_path = os.path.join(self.output_dir, "outer_optimizer.pt")
+                    optimizer_state_path = os.path.join(
+                        self.output_dir, "outer_optimizer.pt"
+                    )
                 optimizer_state = torch.load(
                     optimizer_state_path, map_location="cpu", weights_only=True
                 )
@@ -794,9 +806,7 @@ def load_model_optimizer_gradient_averager(
             and ("." in revision)
         ):
             self.avg_handler.reset_main_parameters(
-                r2,
-                local_model_name,
-                self.local_progress.epoch - 1
+                r2, local_model_name, self.local_progress.epoch - 1
             )
 
     self.logger.info(
