@@ -394,7 +394,6 @@ async def score_uids(self, uids: list):
                     model_base=self.model,
                     blocks=random_blocks,
                     revision=revision,
-                    epoch=epoch,
                     prefix=prefix,
                 )
             )
@@ -426,7 +425,6 @@ async def score_uids(self, uids: list):
                     model_base=self.model,
                     blocks=assigned_block,
                     revision=revision,
-                    epoch=epoch,
                     prefix=prefix,
                 )
             )
