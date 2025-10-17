@@ -1020,6 +1020,7 @@ class Miner(BaseMinerNeuron):
 
     def _sync_with_global_model(self):
         if self.master:
+            # TODO Test wether this is needed at all
             global_model_output_dir = os.path.join(
                 os.getcwd(), self.config.neuron.global_model_name
             )
@@ -1445,19 +1446,21 @@ class Miner(BaseMinerNeuron):
             dist.broadcast(synapse_completion, src=0, group=self.gloo_group)
             self.logger.info("Synapse Completion" + str(synapse_completion[0].item()))
             if synapse_completion[0].item() == 1:
-                # Archive before updating the epoch
-                r2_write = boto3.client(
-                    "s3",
-                    endpoint_url=f"https://{self.config.r2.account_id}.r2.cloudflarestorage.com",
-                    aws_access_key_id=self.config.r2.write.access_key_id,
-                    aws_secret_access_key=self.config.r2.write.secret_access_key,
-                    region_name="auto",
-                )
-                archive_root_bucket(
-                    r2_write,
-                    self.config.r2.bucket_name,
-                    epoch=self.local_progress.epoch,
-                )
+                if self.master:
+                    # Archive before updating the epoch
+                    r2_write = boto3.client(
+                        "s3",
+                        endpoint_url=f"https://{self.config.r2.account_id}.r2.cloudflarestorage.com",
+                        aws_access_key_id=self.config.r2.write.access_key_id,
+                        aws_secret_access_key=self.config.r2.write.secret_access_key,
+                        region_name="auto",
+                    )
+                    archive_root_bucket(
+                        r2_write,
+                        self.config.r2.bucket_name,
+                        epoch=self.local_progress.epoch,
+                    )
+                dist.barrier()
 
                 self.logger.info(f"Apply opt params")
                 self.apply_optimizer_parameters()

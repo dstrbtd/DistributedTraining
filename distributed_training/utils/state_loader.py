@@ -438,6 +438,11 @@ def load_model_optimizer_gradient_averager(
     )
     output_dir = os.path.join(os.getcwd(), local_model_name)
     use_cache = not check_cache_sync(self, r2, local_model_name, epoch, output_dir)
+    metadata_epoch = get_progress(self, "local", uid)[0]
+    if epoch == metadata_epoch:
+        prefix = ""
+    else:
+        prefix = f"epoch-{epoch}/"
 
     # # Delete existing outer optimizer
     # if hasattr(self, "outer_optimizer"):
@@ -514,7 +519,7 @@ def load_model_optimizer_gradient_averager(
                     self,
                     r2=r2,
                     bucket=local_model_name,
-                    key=f"epoch-{epoch}/model.safetensors",
+                    key=f"{prefix}model.safetensors",
                     multiple_ranks=False,
                     destination=output_dir,
                 )
@@ -522,11 +527,10 @@ def load_model_optimizer_gradient_averager(
                     self,
                     r2=r2,
                     bucket=local_model_name,
-                    key=f"epoch-{epoch}/config.json",
+                    key=f"{prefix}config.json",
                     multiple_ranks=False,
                     destination=output_dir,
                 )
-            dist.barrier()
             self.model = AutoModelForCausalLM.from_pretrained(
                 output_dir,  # directory containing model files
                 trust_remote_code=False,
@@ -556,12 +560,13 @@ def load_model_optimizer_gradient_averager(
                         self,
                         r2=r2,
                         bucket=local_model_name,
-                        key=f"epoch-{epoch}/model.safetensors",
+                        key=f"{prefix}model.safetensors",
                         multiple_ranks=False,
                         destination=output_dir,
                     )
                 else:
                     saftensors_path = os.path.join(self.output_dir, "model.safetensors")
+
                 model_state = load_file(saftensors_path, device="cpu")
             else:
                 model_state = None
@@ -624,7 +629,7 @@ def load_model_optimizer_gradient_averager(
                     self,
                     r2=r2,
                     bucket=local_model_name,
-                    key=f"epoch-{epoch}/inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
+                    key=f"{prefix}inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
                     multiple_ranks=True,
                     destination=output_dir,
                 )
@@ -633,6 +638,7 @@ def load_model_optimizer_gradient_averager(
                     self.output_dir,
                     "inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
                 )
+
             optimizer_state = torch.load(
                 optimizer_state_path, map_location="cpu", weights_only=True
             )
@@ -742,7 +748,7 @@ def load_model_optimizer_gradient_averager(
                         self,
                         r2=r2,
                         bucket=global_model_name,
-                        key=f"epoch-{epoch}/outer_optimizer.pt",
+                        key=f"{prefix}outer_optimizer.pt",
                         multiple_ranks=False,
                         destination=output_dir,
                     )
@@ -750,6 +756,7 @@ def load_model_optimizer_gradient_averager(
                     optimizer_state_path = os.path.join(
                         self.output_dir, "outer_optimizer.pt"
                     )
+
                 optimizer_state = torch.load(
                     optimizer_state_path, map_location="cpu", weights_only=True
                 )

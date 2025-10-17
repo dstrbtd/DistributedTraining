@@ -172,7 +172,7 @@ async def evaluate_model(
     return total_loss, n_batches_total, n_batches_sampled
 
 
-async def evaluate_with_gradient(self, uid, model_base, blocks, revision, epoch):
+async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix):
     """
     Apply pseudo gradient for a UID and evaluate loss before and after.
 
@@ -212,7 +212,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, epoch)
         self,
         r2=r2,
         bucket=f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
-        key=f"epoch-{epoch}/gradients.pt",
+        key=f"{prefix}gradients.pt",
         multiple_ranks=False,
         destination=os.path.join(
             os.getcwd(),
@@ -269,7 +269,7 @@ def compute_loss_improvement(before: float, after: float) -> dict:
     }
 
 
-def get_uids_blocks(self, uid: int, revision: str, epoch) -> list[int]:
+def get_uids_blocks(self, uid: int, prefix=str) -> list[int]:
     """"""
     bucket_name = f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}"
     r2 = get_r2_client(self, uid, multiple_ranks=True)
@@ -277,7 +277,7 @@ def get_uids_blocks(self, uid: int, revision: str, epoch) -> list[int]:
         self,
         r2=r2,
         bucket=bucket_name,
-        key=f"epoch-{epoch}/config.json",
+        key=f"{prefix}config.json",
         multiple_ranks=True,
         destination=bucket_name,
     )
@@ -334,8 +334,11 @@ async def score_uids(self, uids: list):
         self.blocks_since_allreduce < (self.config.neuron.blocks_per_allreduce / 2)
     ) and (self.global_progress.epoch != 0):
         epoch = self.global_progress.epoch - 1
+        prefix = f"epoch-{epoch}/"
     else:
         epoch = self.global_progress.epoch
+        prefix = ""
+
     test_time = time.time()
 
     if self.master:
@@ -392,6 +395,7 @@ async def score_uids(self, uids: list):
                     blocks=random_blocks,
                     revision=revision,
                     epoch=epoch,
+                    prefix=prefix,
                 )
             )
 
@@ -412,7 +416,7 @@ async def score_uids(self, uids: list):
 
             self.logger.info(f"UID {uid:03d}: Sampling dataset indices for testing")
             self.set_current_block_across_ranks()
-            assigned_block = get_uids_blocks(self, uid, revision, epoch)
+            assigned_block = get_uids_blocks(self, uid, prefix)
             self.logger.info(assigned_block)
 
             loss_scores = compute_loss_improvement(
@@ -423,6 +427,7 @@ async def score_uids(self, uids: list):
                     blocks=assigned_block,
                     revision=revision,
                     epoch=epoch,
+                    prefix=prefix,
                 )
             )
 
