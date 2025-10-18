@@ -125,7 +125,7 @@ def get_progress(
     bucket_name: str = None,
     uid: int = None,
     epoch: int = None,
-    multiple_ranks=True,
+    donwload_on_all_ranks=True,
 ):
     # local_or_global is used for miners
     # uid is used for validators to cycle through progress of different uids
@@ -137,7 +137,7 @@ def get_progress(
         bucket_name = self.config.neuron.global_model_name
 
     if uid is not None:
-        r2 = get_r2_client(self, uid, multiple_ranks)
+        r2 = get_r2_client(self, uid, donwload_on_all_ranks)
     else:
         r2 = self.r2[local_or_global]
 

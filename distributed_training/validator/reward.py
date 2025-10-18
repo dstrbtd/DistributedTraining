@@ -43,6 +43,11 @@ from distributed_training.utils.state_loader import (
     load_state_from_peer,
 )
 from distributed_training.utils.r2 import r2_download
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    StateDictOptions,
+    set_model_state_dict,
+)
 
 from rich.console import Console
 from rich.table import Table
@@ -206,7 +211,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
     # model_t1 = copy.deepcopy(model_base)
     model_t1 = model_base
 
-    r2 = get_r2_client(self, uid, multiple_ranks=True)
+    r2 = get_r2_client(self, uid, donwload_on_all_ranks=True)
     self.logger.info(f"UID {uid:03d}: Got r2 client")
     gradient_path = r2_download(
         self,
@@ -369,9 +374,27 @@ async def score_uids(self, uids: list):
             use_fallback_model=False,
         )
 
+    # Extract model state for future resets
+    model_state_dict = get_model_state_dict(
+        self.model,
+        options=StateDictOptions(
+            full_state_dict=False,  # Only save local shards, not full model
+            cpu_offload=True,  # Automatically offload to CPU
+        ),
+    )
     for uid in uids:
         score_status = torch.tensor([0])
         try:
+            # Reset model state dict before an evaluation
+            set_model_state_dict(
+                self.model,
+                dict(model_state_dict),
+                options=StateDictOptions(
+                    full_state_dict=False,  # We saved only local shards, so load them back as such
+                    strict=True,  # Ensure all keys match
+                ),
+            )
+
             if self.master:
                 revision_list = [self.uid_tracker[uid].train.revision]
             else:

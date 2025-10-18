@@ -3,7 +3,11 @@ import sys
 import boto3
 import pathlib
 
-from distributed_training.utils.r2 import upload_folder_to_r2, archive_root_bucket
+from distributed_training.utils.r2 import (
+    upload_folder_to_r2,
+    archive_root_bucket,
+    restore_from_epoch,
+)
 
 if __name__ == "__main__":
     bucket = sys.argv[1]
@@ -13,6 +17,7 @@ if __name__ == "__main__":
     tag = sys.argv[5]
     archive = sys.argv[6]
     epoch = tag.split(".")[1]
+    restore = "True"
 
     r2_write = boto3.client(
         "s3",
@@ -27,6 +32,9 @@ if __name__ == "__main__":
     # Variable has to be fed as a string in subprocess
     if archive == "True":
         archive_root_bucket(r2_write, bucket, epoch)
+
+    # if restore == "True":
+    #     restore_from_epoch(r2_write, bucket, epoch)
 
     # r2_write.upload_file(
     #     str("/root/llama-1b-ws-2/metadata.json"), bucket, f"metadata.json"

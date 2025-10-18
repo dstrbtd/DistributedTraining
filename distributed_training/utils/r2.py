@@ -99,6 +99,52 @@ def archive_root_bucket(r2: BaseClient, bucket: str, epoch: int):
     r2.close()
 
 
+def restore_from_epoch(r2: BaseClient, bucket: str, epoch: int):
+    """
+    Copies all objects from epoch-{epoch}/ back into the main bucket root.
+    """
+    tcfg = TransferConfig(
+        multipart_threshold=8 * 1024 * 1024,  # 8MB
+        multipart_chunksize=64 * 1024 * 1024,  # 64MB
+        max_concurrency=4,
+        use_threads=True,
+    )
+
+    source_prefix = f"epoch-{epoch}/"
+    paginator = r2.get_paginator("list_objects_v2")
+
+    with TransferManager(r2, config=tcfg) as tm:
+        futures = []
+        for page in paginator.paginate(Bucket=bucket, Prefix=source_prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+
+                # skip empty or malformed entries
+                if not key or obj["Size"] == 0:
+                    continue
+
+                # remove the epoch prefix so files go to root
+                dest_key = key[len(source_prefix) :]
+
+                # skip if key would become empty (folder marker)
+                if not dest_key:
+                    continue
+
+                futures.append(
+                    tm.copy(
+                        copy_source={"Bucket": bucket, "Key": key},
+                        bucket=bucket,
+                        key=dest_key,
+                        extra_args={"MetadataDirective": "COPY"},
+                    )
+                )
+
+        for f in futures:
+            f.result()
+
+    r2.close()
+
+
 def r2_download(self, r2, bucket, key, donwload_on_all_ranks=True, destination=None):
     if destination is None:
         fd, destination_path = tempfile.mkstemp()

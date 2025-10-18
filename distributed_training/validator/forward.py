@@ -181,6 +181,7 @@ async def forward(self):
                 (
                     all_reduce_success_status,
                     results,
+                    initial_weights,
                 ) = await self.avg_handler.run_validator_allreduce(
                     timeout=self.allreduce_timeout,
                     wallet=self.wallet,
@@ -210,11 +211,13 @@ async def forward(self):
 
                 if self.master:
                     # TODO Get actaul initial weights
-                    initial_weights = None
+                    # initial_weights = None
+                    self.logger.info("Validate weights")
                     # Validate weight updates
-                    # await self.avg_handler._validate_weight_update(
-                    #     initial_weights, self.current_block
-                    # )
+                    await self.avg_handler._validate_weight_update(
+                        initial_weights, self.current_block
+                    )
+                    self.logger.info("Validate weights Done")
 
                 if self.master:
                     self.last_allreduce_block = self.block

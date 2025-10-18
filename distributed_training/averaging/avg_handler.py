@@ -253,7 +253,7 @@ class AveragingHandler:
                 bt.logging.info("Gradient Step Cleaned Up")
             if all_reduce_success_status:
                 bt.logging.success("Averaging Round Finished Succesfully")
-            return all_reduce_success_status, results
+            return all_reduce_success_status, results, initial_weights
 
     def calculate_allreduce_scores(
         self,
