@@ -259,18 +259,14 @@ class Miner(BaseMinerNeuron):
             #     )
             #     # time.sleep(self.allreduce_timeout+self.upload_state_duration)
             else:
-                # TODO convert 2nd if statement to listener
-                try:
-                    self.sync()
-                except Exception as e:
-                    self.logger.error(f"Error during sync: {e}")
+                # TODO convert this to a listener
                 if (self.last_allreduce_block is not None) and (
                     (time.perf_counter() - self.all_reduce_start_time)
                     > (self.allreduce_timeout + self.upload_state_duration)
                 ):
                     self.reload_state_event.set()
                 elif (self.last_allreduce_block is None) and (
-                    self.current_block - self.starting_block > 5
+                    self.block - self.starting_block > 25
                 ):
                     self.reload_state_event.set()
             time.sleep(1)
@@ -1020,31 +1016,6 @@ class Miner(BaseMinerNeuron):
 
     def _sync_with_global_model(self):
         if self.master:
-            # TODO Test wether this is needed at all
-            global_model_output_dir = os.path.join(
-                os.getcwd(), self.config.neuron.global_model_name
-            )
-            global_model_path = r2_download(
-                self,
-                r2=self.r2["global"],
-                bucket=self.config.neuron.global_model_name,
-                key=f"epoch-{self.global_progress.epoch}/model.safetensors",
-                multiple_ranks=False,
-                destination=global_model_output_dir,
-            )
-            global_config_path = r2_download(
-                self,
-                r2=self.r2["global"],
-                bucket=self.config.neuron.global_model_name,
-                key=f"epoch-{self.global_progress.epoch}/config.json",
-                multiple_ranks=False,
-                destination=global_model_output_dir,
-            )
-            global_model = AutoModelForCausalLM.from_pretrained(
-                global_model_output_dir,  # directory containing model files
-                trust_remote_code=False,
-            )
-
             if (
                 self.config.neuron.global_model_name
                 == self.config.neuron.local_model_name
@@ -1077,10 +1048,6 @@ class Miner(BaseMinerNeuron):
             load_state_from_peer(
                 self, uid=self.master_uid, epoch=self.global_progress.epoch
             )
-        if self.master:
-            del global_model
-            gc.collect()
-            torch.cuda.empty_cache()
 
     @torch.no_grad()
     def compute_and_load_pseudo_grad_into_averager(self):
@@ -1438,8 +1405,6 @@ class Miner(BaseMinerNeuron):
             raise Exception(f"Unexpected error during AllReduce: {str(e)}") from e
 
         finally:
-            # TODO make sure rank 0 and 1 are alligned
-            # Update epoch if all_reduce was succsefull
             synapse_completion = (
                 torch.tensor([1]) if synapse.completion else torch.tensor([0])
             )

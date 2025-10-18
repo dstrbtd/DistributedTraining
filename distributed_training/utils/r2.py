@@ -99,7 +99,7 @@ def archive_root_bucket(r2: BaseClient, bucket: str, epoch: int):
     r2.close()
 
 
-def r2_download(self, r2, bucket, key, multiple_ranks=True, destination=None):
+def r2_download(self, r2, bucket, key, donwload_on_all_ranks=True, destination=None):
     if destination is None:
         fd, destination_path = tempfile.mkstemp()
         os.close(fd)
@@ -110,7 +110,7 @@ def r2_download(self, r2, bucket, key, multiple_ranks=True, destination=None):
         )
 
     # Let only the master perform the actual download
-    if (self.master) or (multiple_ranks):
+    if (self.master) or (donwload_on_all_ranks):
         try:
             os.makedirs(os.path.dirname(destination_path), exist_ok=True)
             lock_path = destination_path + ".lock"
@@ -123,7 +123,7 @@ def r2_download(self, r2, bucket, key, multiple_ranks=True, destination=None):
     else:
         success = torch.tensor([0], dtype=torch.int, device="cuda")
 
-    if multiple_ranks:
+    if donwload_on_all_ranks:
         # Broadcast success flag from master to everyone
         dist.broadcast(success, src=0)
 

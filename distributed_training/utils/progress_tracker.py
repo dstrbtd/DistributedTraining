@@ -80,14 +80,14 @@ class UidTracker(BaseModel):
     chaindata: Chaindata = Field(default_factory=Chaindata)
 
 
-def get_r2_client(self, uid: int, multiple_ranks: bool):
+def get_r2_client(self, uid: int, donwload_on_all_ranks: bool):
     if uid == self.uid:
         account_id = self.config.r2.account_id
         access_key_id = self.config.r2.read.access_key_id
         secret_access_key = self.config.r2.read.secret_access_key
     elif uid == self.master_uid:
         return self.r2["global"]
-    elif multiple_ranks:
+    elif donwload_on_all_ranks:
         if self.master:
             account_id = self.uid_tracker[uid].train.account_id
             access_key_id = self.uid_tracker[uid].train.access_key_id

@@ -272,10 +272,10 @@ def initialize_optimizer_state_(opt: torch.optim.Optimizer):
 
 
 def check_model_exists(
-    self, r2: BaseClient, bucket_name: str, revision: Optional[str] = None
+    self, r2: BaseClient, bucket_name: str, prefix: str = "", revision: Optional[str] = None
 ) -> bool:
     try:
-        obj = r2.get_object(Bucket=bucket_name, Key="metadata.json")
+        obj = r2.get_object(Bucket=bucket_name, Key=f"{prefix}metadata.json")
         data = obj["Body"].read()
         metadata = json.loads(data)
         metadata_revision = (
@@ -365,7 +365,9 @@ def cuda_mem(logger, tag):
 
 def check_cache_sync(self, r2, local_model_name, epoch, output_dir):
     try:
-        metadata_file_path = os.path.join(self.output_dir, "metadata.json")
+        metadata_file_path = os.path.join(
+            os.getcwd(), local_model_name, "metadata.json"
+        )
         if not os.path.exists(metadata_file_path):
             r2_download(
                 self,
@@ -382,13 +384,13 @@ def check_cache_sync(self, r2, local_model_name, epoch, output_dir):
             metadata["inner_step"],
         ):
             self.logger.info("Skipping Download Using Local Cache")
-            return False
+            return True
         else:
             self.logger.info("Local Cache Out Of Sync - Re-Downloading")
-            return True
+            return False
     except Exception as e:
         self.logger.info(f"Error {e} checking local cache")
-        return False
+        return True
 
 
 def load_model_optimizer_gradient_averager(
@@ -409,7 +411,7 @@ def load_model_optimizer_gradient_averager(
     self.logger.debug(
         f"CPU Memory Before Loading State {psutil.virtual_memory().available / 10**9} GB"
     )
-    r2 = get_r2_client(self, uid, multiple_ranks=True)
+    r2 = get_r2_client(self, uid, donwload_on_all_ranks=True)
 
     global_model_name = self.config.neuron.global_model_name
     global_model_revision = f"{__run__}.{epoch}.0"
@@ -419,9 +421,10 @@ def load_model_optimizer_gradient_averager(
         r2=r2,
         bucket=global_model_name,
         key=f"epoch-{epoch}/config.json",
-        multiple_ranks=True,
+        donwload_on_all_ranks=False,
         destination=global_model_output_dir,
     )
+    dist.barrier()
     # self.global_model_config = AutoConfig.from_pretrained(global_config_path)
     with open(global_config_path, "r") as file:
         self.global_model_config = json.load(file)
@@ -437,8 +440,8 @@ def load_model_optimizer_gradient_averager(
         else self.config.neuron.global_model_name
     )
     output_dir = os.path.join(os.getcwd(), local_model_name)
-    use_cache = not check_cache_sync(self, r2, local_model_name, epoch, output_dir)
-    metadata_epoch = get_progress(self, "local", uid)[0]
+    use_cache = check_cache_sync(self, r2, local_model_name, epoch, output_dir)
+    metadata_epoch = get_progress(self, "local", uid=uid)[0]
     if epoch == metadata_epoch:
         prefix = ""
     else:
@@ -509,18 +512,22 @@ def load_model_optimizer_gradient_averager(
             self,
             r2,
             local_model_name,
+            prefix=prefix,
             revision=revision,
         ):
             raise Exception(f"Failed to load model. Check model exists failed.")
 
         if not hasattr(self, "model"):
-            if use_cache:
+            if self.master:
+                breakpoint()
+            dist.barrier()
+            if use_cache is False:
                 model_path = r2_download(
                     self,
                     r2=r2,
                     bucket=local_model_name,
                     key=f"{prefix}model.safetensors",
-                    multiple_ranks=False,
+                    donwload_on_all_ranks=False,
                     destination=output_dir,
                 )
                 config_path = r2_download(
@@ -528,9 +535,10 @@ def load_model_optimizer_gradient_averager(
                     r2=r2,
                     bucket=local_model_name,
                     key=f"{prefix}config.json",
-                    multiple_ranks=False,
+                    donwload_on_all_ranks=False,
                     destination=output_dir,
                 )
+                dist.barrier()
             self.model = AutoModelForCausalLM.from_pretrained(
                 output_dir,  # directory containing model files
                 trust_remote_code=False,
@@ -555,15 +563,16 @@ def load_model_optimizer_gradient_averager(
             self.logger.info("Sharded Model State")
         else:
             if self.master:
-                if use_cache:
+                if use_cache is False:
                     saftensors_path = r2_download(
                         self,
                         r2=r2,
                         bucket=local_model_name,
                         key=f"{prefix}model.safetensors",
-                        multiple_ranks=False,
+                        donwload_on_all_ranks=False,
                         destination=output_dir,
                     )
+                    dist.barrier()
                 else:
                     saftensors_path = os.path.join(self.output_dir, "model.safetensors")
 
@@ -624,19 +633,19 @@ def load_model_optimizer_gradient_averager(
                     num_training_steps=88000,
                 )
 
-            if use_cache:
+            if use_cache is False:
                 optimizer_state_path = r2_download(
                     self,
                     r2=r2,
                     bucket=local_model_name,
                     key=f"{prefix}inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
-                    multiple_ranks=True,
+                    donwload_on_all_ranks=True,
                     destination=output_dir,
                 )
             else:
                 optimizer_state_path = os.path.join(
                     self.output_dir,
-                    "inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
+                    f"inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
                 )
 
             optimizer_state = torch.load(
@@ -743,13 +752,13 @@ def load_model_optimizer_gradient_averager(
         if reload_outer_optimizer:
             optimizer_state = None
             try:
-                if use_cache:
+                if use_cache is False:
                     optimizer_state_path = r2_download(
                         self,
                         r2=r2,
                         bucket=global_model_name,
                         key=f"{prefix}outer_optimizer.pt",
-                        multiple_ranks=False,
+                        donwload_on_all_ranks=False,
                         destination=output_dir,
                     )
                 else:
