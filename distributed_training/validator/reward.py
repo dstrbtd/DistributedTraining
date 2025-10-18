@@ -207,8 +207,6 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
     # 2. Load and apply pseudo gradient
     self.logger.info(f"UID {uid:03d}: Applying pseudo gradient")
 
-    # TODO Reset this with an offloaded state
-    # model_t1 = copy.deepcopy(model_base)
     model_t1 = model_base
 
     r2 = get_r2_client(self, uid, donwload_on_all_ranks=True)
@@ -218,7 +216,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
         r2=r2,
         bucket=f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
         key=f"{prefix}gradients.pt",
-        multiple_ranks=False,
+        donwload_on_all_ranks=False,
         destination=os.path.join(
             os.getcwd(),
             f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
@@ -277,13 +275,13 @@ def compute_loss_improvement(before: float, after: float) -> dict:
 def get_uids_blocks(self, uid: int, prefix=str) -> list[int]:
     """"""
     bucket_name = f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}"
-    r2 = get_r2_client(self, uid, multiple_ranks=True)
+    r2 = get_r2_client(self, uid, donwload_on_all_ranks=True)
     config_path = r2_download(
         self,
         r2=r2,
         bucket=bucket_name,
         key=f"{prefix}config.json",
-        multiple_ranks=True,
+        donwload_on_all_ranks=True,
         destination=bucket_name,
     )
     uid_blocks = json.load(open(config_path))["block_list"]
@@ -361,7 +359,7 @@ async def score_uids(self, uids: list):
         for uid in uids:
             self.uid_tracker[
                 uid
-            ].train.revision = f"{__run__}.{epoch}.{get_progress(self, 'local', uid=uid, multiple_ranks=False)[1]}"
+            ].train.revision = f"{__run__}.{epoch}.{get_progress(self, 'local', uid=uid, donwload_on_all_ranks=False)[1]}"
 
     # Sync global model if behind
     if self.local_progress.epoch != epoch:
@@ -485,7 +483,7 @@ def score_repo(self, uid: int, epoch: int) -> bool:
     Check if the miner's R2 manifest exists and is recent enough.
     """
     bucket_name = f"{self.config.neuron.global_model_name}-{uid:03d}"
-    r2 = get_r2_client(self, uid, multiple_ranks=False)
+    r2 = get_r2_client(self, uid, donwload_on_all_ranks=False)
     try:
         response = r2.head_object(Bucket=bucket_name, Key=f"epoch-{epoch}/gradients.pt")
         last_modified = (

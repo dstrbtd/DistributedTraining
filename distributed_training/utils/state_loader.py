@@ -377,7 +377,7 @@ def check_cache_sync(self, r2, local_model_name, epoch, output_dir):
                 r2=r2,
                 bucket=local_model_name,
                 key=f"epoch-{epoch}/metadata.json",
-                multiple_ranks=False,
+                donwload_on_all_ranks=False,
                 destination=output_dir,
             )
         with open(metadata_file_path, "r") as file:

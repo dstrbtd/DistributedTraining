@@ -486,7 +486,7 @@ class AveragingHandler:
                 r2=r2,
                 bucket=model_name,
                 key=f"epoch-{epoch}/model.safetensors",
-                multiple_ranks=False,
+                donwload_on_all_ranks=False,
                 destination=self.output_dir,
             )
             config_path = r2_download(
@@ -494,7 +494,7 @@ class AveragingHandler:
                 r2=r2,
                 bucket=model_name,
                 key=f"epoch-{epoch}/config.json",
-                multiple_ranks=False,
+                donwload_on_all_ranks=False,
                 destination=self.output_dir,
             )
             main_parameters = AutoModelForCausalLM.from_pretrained(
