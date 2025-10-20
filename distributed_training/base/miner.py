@@ -166,8 +166,6 @@ class BaseMinerNeuron(BaseNeuron):
                     self.model.config.block_list.append(self.current_block)
                     self._process_training_batch(dataset)
 
-                    self.sync()
-
                 except Exception as e:
                     self.logger.warning(f"Training Loop Failed with error: {e}")
                     self.training_status = TrainingStatus.ERROR
