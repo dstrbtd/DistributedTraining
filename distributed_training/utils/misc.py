@@ -150,7 +150,6 @@ def load_wandb(self, config, wallet, neuron_type, peer_id):
 
     run_id = "_".join([run_name] + tags[2:]).lower()
 
-    sanitized_config = sanitize_wandb_config(config)
     wandb_run = wandb.init(
         id=run_id,
         name=run_name,
@@ -159,13 +158,12 @@ def load_wandb(self, config, wallet, neuron_type, peer_id):
         tags=tags,
         project=config.neuron.wandb_project,
         entity=config.neuron.wandb_entity,
-        config=sanitized_config,
+        config={},
         allow_val_change=True,
     )
 
-    signature = wallet.hotkey.sign(config.neuron.run_id.encode()).hex()
-    config.signature = signature
-    wandb_run.config.update(config, allow_val_change=True)
+    sanitized_config = sanitize_wandb_config(config)
+    wandb_run.config.update(sanitized_config, allow_val_change=True)
 
     return wandb_run
 
