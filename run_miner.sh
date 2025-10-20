@@ -8,6 +8,7 @@ proc_name="distributed_training_miner"
 args=()
 version_location="./distributed_training/__init__.py"
 version="__version__"
+NODES=1
 
 old_args=$@
 
@@ -151,6 +152,15 @@ strip_quotes() {
 while [[ $# -gt 0 ]]; do
   arg="$1"
 
+  # Detect node count argument early
+  if [[ "$arg" == "--nodes" || "$arg" == "--nproc_per_node" ]]; then
+    if [[ $# -gt 1 && "$2" != -* ]]; then
+      NODES="$2"
+      shift 2
+      continue
+    fi
+  fi
+
   # Check if the argument starts with a hyphen (flag)
   if [[ "$arg" == -* ]]; then
     # Check if the argument has a value
@@ -210,7 +220,8 @@ echo "module.exports = {
   apps : [{
     name   : '$proc_name',
     script : '$script',
-    interpreter: 'python3',
+    interpreter: 'torchrun',
+    interpreter_args: '--nproc_per_node=' + '$NODES',
     min_uptime: '5m',
     max_restarts: '5',
     args: [$joined_args]
