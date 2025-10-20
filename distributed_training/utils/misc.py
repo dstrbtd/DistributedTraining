@@ -30,6 +30,8 @@ from hivemind import utils
 
 import wandb
 from distributed_training import __run__, __version__
+from copy import deepcopy
+from dataclasses import is_dataclass, asdict
 
 
 # LRU Cache with TTL
@@ -120,6 +122,27 @@ def ttl_get_block(self) -> int:
     return self.subtensor.get_current_block()
 
 
+def to_plain_dict(obj):
+    if isinstance(obj, dict):
+        return deepcopy(obj)
+    if is_dataclass(obj):
+        return asdict(obj)
+    if hasattr(obj, "model_dump"):  # pydantic v2
+        return obj.model_dump()
+    if hasattr(obj, "dict"):  # pydantic v1
+        return obj.dict()
+    if hasattr(obj, "to_dict"):
+        return obj.to_dict()
+    return deepcopy(getattr(obj, "__dict__", {}))
+
+
+def sanitize_wandb_config(cfg):
+    cfg_dict = to_plain_dict(cfg)
+    # remove the entire sensitive subtree
+    cfg_dict.pop("r2", None)
+    return cfg_dict
+
+
 def load_wandb(self, config, wallet, neuron_type, peer_id):
     run_name = f"{neuron_type[0].upper()}{'{:03}'.format(self.uid)}"
 
@@ -127,6 +150,7 @@ def load_wandb(self, config, wallet, neuron_type, peer_id):
 
     run_id = "_".join([run_name] + tags[2:]).lower()
 
+    sanitized_config = sanitize_wandb_config(config)
     wandb_run = wandb.init(
         id=run_id,
         name=run_name,
@@ -135,7 +159,7 @@ def load_wandb(self, config, wallet, neuron_type, peer_id):
         tags=tags,
         project=config.neuron.wandb_project,
         entity=config.neuron.wandb_entity,
-        config=config,
+        config=sanitized_config,
         allow_val_change=True,
     )
 

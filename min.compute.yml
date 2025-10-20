@@ -10,10 +10,16 @@ compute_spec:
 
   miner:
 
+    cpu:
+      min_vcpu: 38
+      min_memory_gb: 200
+      min_disk_gb: 1000 
+
     gpu:
       required: True                       
-      min_vram: 48
-      recommended_gpu: "RTX A6000"  
+      min_vram_gb: 48
+      recommended_gpu: "RTX A6000"
+      min_gpus: 4
 
     os:
       name: "Ubuntu" 
@@ -21,10 +27,16 @@ compute_spec:
 
   validator:
 
+    cpu:
+      min_vcpu: 38
+      min_memory_gb: 200
+      min_disk_gb: 1000 
+
     gpu:
       required: True                       
-      min_vram: 48
+      min_vram_gb: 48
       recommended_gpu: "RTX A6000"
+      min_gpus: 4
 
     os:
       name: "Ubuntu" 
