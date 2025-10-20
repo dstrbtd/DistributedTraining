@@ -83,8 +83,6 @@ async def fetch_training_data(
     attempt = 0
     while attempt < self.retry_limit:
         try:
-            self.logger.info("PAGES")
-
             pages = await DatasetLoader.next_pages(
                 offset=block,
                 n_pages=n_pages,
@@ -93,7 +91,7 @@ async def fetch_training_data(
             rng = np.random.default_rng(hash(self.uid) & 0xFFFFFFFF)
             rng.shuffle(pages)
 
-            self.logger.info(pages)
+            self.logger.debug(pages)
 
             dataset = await DatasetLoader.create(
                 batch_size=self.config.neuron.local_batch_size_train,
@@ -105,7 +103,7 @@ async def fetch_training_data(
             dataset_length = torch.tensor(len(dataset.buffer))
             dist.all_reduce(dataset_length, op=dist.ReduceOp.MIN, group=self.gloo_group)
             dataset.buffer = dataset.buffer[:dataset_length]
-            self.logger.info("DATASET BUFFER LENGTH", len(dataset.buffer))
+            self.logger.debug("Dataset Buffer Length", len(dataset.buffer))
 
             return dataset
         except Exception as e:

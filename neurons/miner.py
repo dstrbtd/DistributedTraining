@@ -652,7 +652,7 @@ class Miner(BaseMinerNeuron):
                 rng = np.random.default_rng(hash(self.uid) & 0xFFFFFFFF)
                 rng.shuffle(pages)
 
-                self.logger.info(pages)
+                self.logger.debug(pages)
 
                 dataset = await DatasetLoader.create(
                     batch_size=self.config.neuron.local_batch_size_train,

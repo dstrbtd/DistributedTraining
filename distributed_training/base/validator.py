@@ -36,6 +36,7 @@ from distributed_training.utils.progress_tracker import UidTracker, get_progress
 from distributed_training.utils.state_loader import load_state_from_peer
 from distributed_training.validator.reward import update_total_scores
 from openskill.models import PlackettLuce
+from torch import distributed as dist
 
 
 class BaseValidatorNeuron(BaseNeuron):
@@ -175,35 +176,38 @@ class BaseValidatorNeuron(BaseNeuron):
                     if self.event != {}:
                         self.event = {}
 
-                    # current_global_epoch = self.global_progress.epoch
-                    # self.global_progress.epoch = get_progress(self, "local")[0]
-                    # if (
-                    #     self.blocks_since_allreduce
-                    #     > (self.config.neuron.blocks_per_allreduce / 2)
-                    # ) and (
-                    #     (self.local_progress.epoch != self.global_progress.epoch)
-                    #     or (not self.all_reduce_success_status)
-                    # ):
-                    #     if self.local_progress.epoch != self.global_progress.epoch:
-                    #         self.logger.info(
-                    #             f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
-                    #         )
-                    #     if not self.all_reduce_success_status:
-                    #         self.logger.info(
-                    #             "All Reduce Failed. Loading Latest Model State."
-                    #         )
-                    #     load_state_from_peer(self, epoch=self.global_progress.epoch)
-                    #     # Reset all_reduce success status
-                    #     if not self.all_reduce_success_status:
-                    #         self.all_reduce_success_status = True
-                    #         self.last_allreduce_block = self.block
-                    #     # Load all_reduce scores if non_master_uid
-                    #     if (
-                    #         (self.uid != self.master_uid)
-                    #         and (self.global_progress.epoch != current_global_epoch)
-                    #         and (self.should_all_reduce)
-                    #     ):
-                    #         update_total_scores(self)
+                current_global_epoch = self.global_progress.epoch
+                self.global_progress.epoch = get_progress(self, "local")[0]
+                if (
+                    self.blocks_since_allreduce
+                    > (self.config.neuron.blocks_per_allreduce / 2)
+                ) and (
+                    (self.local_progress.epoch != self.global_progress.epoch)
+                    or (not self.all_reduce_success_status)
+                ):
+                    self.reload_state_event.set()
+                    if self.local_progress.epoch != self.global_progress.epoch:
+                        self.logger.info(
+                            f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
+                        )
+                    if not self.all_reduce_success_status:
+                        self.logger.info(
+                            "All Reduce Failed. Loading Latest Model State."
+                        )
+                    load_state_from_peer(self, epoch=self.global_progress.epoch)
+                    # Reset all_reduce success status
+                    if not self.all_reduce_success_status:
+                        self.set_current_block_across_ranks()
+                        self.all_reduce_success_status = True
+                        self.last_allreduce_block = self.current_block
+                    # Load all_reduce scores if non_master_uid
+                    if (
+                        self.master
+                        and (self.uid != self.master_uid)
+                        and (self.global_progress.epoch != current_global_epoch)
+                        and (self.should_all_reduce)
+                    ):
+                        update_total_scores(self)
 
                 # Run multiple forwards concurrently.
                 self.loop.run_until_complete(self.concurrent_forward())
@@ -498,8 +502,8 @@ class BaseValidatorNeuron(BaseNeuron):
             )
 
             self.step = state["step"]
-            self.scores = state["scores"]
-            self.hotkeys = state["hotkeys"]
+            self.scores[0 : len(state["scores"])] = state["scores"]
+            self.hotkeys[0 : len(state["hotkeys"])] = state["hotkeys"]
             if "failed_is_alive_counter" in state:
                 self.failed_is_alive_counter = state[
                     "failed_is_alive_counter"

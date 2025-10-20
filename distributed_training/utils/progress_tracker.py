@@ -98,7 +98,7 @@ def get_r2_client(self, uid: int, donwload_on_all_ranks: bool):
             secret_access_key = self.config.r2.read.secret_access_key
         commitment = [account_id + access_key_id + secret_access_key]
         dist.broadcast_object_list(commitment, src=0, group=self.gloo_group)
-        self.logger.info(commitment)
+        self.logger.debug(f"UID {uid:03d}: Commitment - {commitment}")
         account_id = commitment[0][:32]
         access_key_id = commitment[0][32:64]
         secret_access_key = commitment[0][64:]
@@ -107,8 +107,7 @@ def get_r2_client(self, uid: int, donwload_on_all_ranks: bool):
         access_key_id = self.uid_tracker[uid].train.access_key_id
         secret_access_key = self.uid_tracker[uid].train.secret_access_key
 
-    # if account_id is None or access_key_id is None or secret_access_key is None:
-    #     raise Exception(f"One of {account_id},{access_key_id},{secret_access_key} is None. Can't connect to R2")
+    self.logger.debug(account_id, access_key_id, secret_access_key)
 
     return self.session.client(
         "s3",

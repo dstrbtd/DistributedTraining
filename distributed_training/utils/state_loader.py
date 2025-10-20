@@ -455,7 +455,7 @@ def load_model_optimizer_gradient_averager(
         revision = global_model_revision
 
     local_model_name = (
-        f"{self.config.neuron.global_model_name.split('/')[-1]}-{self.uid:03d}"
+        f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}"
         if uid != self.master_uid
         else self.config.neuron.global_model_name
     )
@@ -771,7 +771,9 @@ def load_model_optimizer_gradient_averager(
                 if use_cache is False:
                     optimizer_state_path = r2_download(
                         self,
-                        r2=r2,
+                        r2=get_r2_client(
+                            self, uid=self.master_uid, donwload_on_all_ranks=True
+                        ),
                         bucket=global_model_name,
                         key=f"{prefix}outer_optimizer.pt",
                         donwload_on_all_ranks=False,

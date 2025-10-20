@@ -78,6 +78,7 @@ async def forward(self):
     self.should_all_reduce = (
         self.blocks_since_allreduce >= self.config.neuron.blocks_per_allreduce
     )
+    self.should_all_reduce = False
     self.logger.info(
         f"Current block {self.current_block} | Blocks Since Last AllReduce: {self.blocks_since_allreduce} | Should AllReduce: {self.should_all_reduce}"
     )
@@ -98,7 +99,6 @@ async def forward(self):
                 sample_size = int(self.metagraph.n)
 
                 min_sample_size = self.config.neuron.min_group_size * 2
-                min_sample_size = 2
                 self.miner_uids = []
                 # Get active miners
                 while len(self.miner_uids) < min_sample_size:
@@ -121,7 +121,9 @@ async def forward(self):
             )
             time.sleep(self.allreduce_timeout + self.upload_state_duration)
             self.miner_uids = []
-            self.last_allreduce_block = self.block
+            self.set_current_block_across_ranks()
+            # Reset allreduce block tracker
+            self.last_allreduce_block = self.current_block
             return responses
 
         compute_and_load_pseudo_grad_into_averager(self)
@@ -218,9 +220,6 @@ async def forward(self):
                         initial_weights, self.current_block
                     )
                     self.logger.info("Validate weights Done")
-
-                if self.master:
-                    self.last_allreduce_block = self.block
 
                 self.set_current_block_across_ranks()
                 # Reset allreduce block tracker

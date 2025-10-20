@@ -259,58 +259,64 @@ def map_uid_to_peerid(self):
             secret_access_key = concatenated[64:]
             r2_hash = hash_r2_creds(account_id, access_key_id, secret_access_key)
 
-            if r2_hash != self.uid_tracker[uid].train.r2_hash:
-                r2_hashes = [
-                    metadata.train.r2_hash
-                    for other_uid, metadata in self.uid_tracker.items()
-                    if other_uid != uid
-                ]
-                if r2_hash in r2_hashes:
-                    self.logger.warning(
-                        f"Duplicate R2 credentials detected for UID {uid}"
-                    )
-                    # Optionally invalidate or flag
-                    self.uid_tracker[uid].chaindata.last_updated_block = 0
-                    self.uid_tracker[uid].train.r2_hash = None
-                    self.uid_tracker[uid].train.account_id = None
-                    self.uid_tracker[uid].train.access_key_id = None
-                    self.uid_tracker[uid].train.secret_access_key = None
-                    uid_list = [
-                        uid
-                        for uid, metadata in self.uid_tracker.items()
-                        if self.uid_tracker[uid].train.r2_hash == r2_hash
-                    ]
-                    for uid_i in uid_list:
-                        if (
-                            self.uid_tracker[uid_i].chaindata.last_updated_block
-                            is not None
-                        ) and (
-                            self.uid_tracker[uid_i].chaindata.last_updated_block
-                            > last_updated_block
-                        ):
-                            self.uid_tracker[uid].chaindata.last_updated_block = 0
-                            self.uid_tracker[uid].train.r2_hash = None
-                            self.uid_tracker[uid].train.account_id = None
-                            self.uid_tracker[uid].train.access_key_id = None
-                            self.uid_tracker[uid].train.secret_access_key = None
-                        else:
-                            self.uid_tracker[
-                                uid
-                            ].chaindata.last_updated_block = last_updated_block
-                            self.uid_tracker[uid].train.r2_hash = r2_hash
-                            self.uid_tracker[uid].train.account_id = account_id
-                            self.uid_tracker[uid].train.access_key_id = access_key_id
-                            self.uid_tracker[
-                                uid
-                            ].train.secret_access_key = secret_access_key
-                else:
-                    self.uid_tracker[
-                        uid
-                    ].chaindata.last_updated_block = last_updated_block
-                    self.uid_tracker[uid].train.r2_hash = r2_hash
-                    self.uid_tracker[uid].train.account_id = account_id
-                    self.uid_tracker[uid].train.access_key_id = access_key_id
-                    self.uid_tracker[uid].train.secret_access_key = secret_access_key
+            self.uid_tracker[uid].chaindata.last_updated_block = last_updated_block
+            self.uid_tracker[uid].train.r2_hash = r2_hash
+            self.uid_tracker[uid].train.account_id = account_id
+            self.uid_tracker[uid].train.access_key_id = access_key_id
+            self.uid_tracker[uid].train.secret_access_key = secret_access_key
+
+            # if r2_hash != self.uid_tracker[uid].train.r2_hash:
+            #     r2_hashes = [
+            #         metadata.train.r2_hash
+            #         for other_uid, metadata in self.uid_tracker.items()
+            #         if other_uid != uid
+            #     ]
+            #     if r2_hash in r2_hashes:
+            #         self.logger.warning(
+            #             f"Duplicate R2 credentials detected for UID {uid}"
+            #         )
+            #         # Optionally invalidate or flag
+            #         self.uid_tracker[uid].chaindata.last_updated_block = 0
+            #         self.uid_tracker[uid].train.r2_hash = "x" * 64
+            #         self.uid_tracker[uid].train.account_id = "x" * 32
+            #         self.uid_tracker[uid].train.access_key_id = "x" * 32
+            #         self.uid_tracker[uid].train.secret_access_key = "x" * 64
+            #         uid_list = [
+            #             uid
+            #             for uid, metadata in self.uid_tracker.items()
+            #             if self.uid_tracker[uid].train.r2_hash == r2_hash
+            #         ]
+            #         for uid_i in uid_list:
+            #             if (
+            #                 self.uid_tracker[uid_i].chaindata.last_updated_block
+            #                 is not None
+            #             ) and (
+            #                 self.uid_tracker[uid_i].chaindata.last_updated_block
+            #                 > last_updated_block
+            #             ):
+            #                 self.uid_tracker[uid].chaindata.last_updated_block = 0
+            #                 self.uid_tracker[uid].train.r2_hash = "x" * 64
+            #                 self.uid_tracker[uid].train.account_id = "x" * 32
+            #                 self.uid_tracker[uid].train.access_key_id = "x" * 32
+            #                 self.uid_tracker[uid].train.secret_access_key = "x" * 64
+            #             else:
+            #                 self.uid_tracker[
+            #                     uid
+            #                 ].chaindata.last_updated_block = last_updated_block
+            #                 self.uid_tracker[uid].train.r2_hash = r2_hash
+            #                 self.uid_tracker[uid].train.account_id = account_id
+            #                 self.uid_tracker[uid].train.access_key_id = access_key_id
+            #                 self.uid_tracker[
+            #                     uid
+            #                 ].train.secret_access_key = secret_access_key
+            #     else:
+            #         self.uid_tracker[
+            #             uid
+            #         ].chaindata.last_updated_block = last_updated_block
+            #         self.uid_tracker[uid].train.r2_hash = r2_hash
+            #         self.uid_tracker[uid].train.account_id = account_id
+            #         self.uid_tracker[uid].train.access_key_id = access_key_id
+            #         self.uid_tracker[uid].train.secret_access_key = secret_access_key
 
             if uid == self.uid:
                 peer_id = str(self.dht.peer_id.to_base58())
