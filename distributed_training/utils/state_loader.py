@@ -397,9 +397,6 @@ def check_cache_sync(self, r2, local_model_name, epoch, output_dir):
                 required_files.append(
                     f"inner_optimizer.rank{i+1:04d}-of-{self.world_size}.pt"
                 )
-            self.logger.info("REQUIRED FILES")
-            self.logger.info(required_files)
-            self.logger.info(set(required_files).issubset(files))
             if set(required_files).issubset(files):
                 self.logger.info("Skipping Download Using Local Cache")
                 return True
