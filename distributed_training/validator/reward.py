@@ -476,14 +476,14 @@ async def score_uids(self, uids: list):
     cleanup_old_cache(self)
 
 
-def score_repo(self, uid: int, epoch: int) -> bool:
+def score_repo(self, uid: int, prefix: str) -> bool:
     """
     Check if the miner's R2 manifest exists and is recent enough.
     """
     bucket_name = f"{self.config.neuron.global_model_name}-{uid:03d}"
     r2 = get_r2_client(self, uid, donwload_on_all_ranks=False)
     try:
-        response = r2.head_object(Bucket=bucket_name, Key=f"epoch-{epoch}/gradients.pt")
+        response = r2.head_object(Bucket=bucket_name, Key=f"{prefix}gradients.pt")
         last_modified = (
             email.utils.parsedate_to_datetime(
                 response["LastModified"].strftime("%a, %d %b %Y %H:%M:%S GMT")
@@ -507,12 +507,14 @@ def benchmark_uids(self):
         self.blocks_since_allreduce < (self.config.neuron.blocks_per_allreduce / 2)
     ) and (self.global_progress.epoch != 0):
         epoch = self.global_progress.epoch - 1
+        prefix = f"epoch-{epoch}/"
     else:
         epoch = self.global_progress.epoch
+        prefix = ""
 
     for uid in self.uid_tracker:
         try:
-            self.uid_tracker[uid].train.is_valid = score_repo(self, uid, epoch)
+            self.uid_tracker[uid].train.is_valid = score_repo(self, uid, prefix)
         except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
             # self.logger.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
             self.uid_tracker[uid].train.is_valid = False
