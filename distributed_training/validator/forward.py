@@ -341,7 +341,7 @@ async def forward(self):
             else:
                 self.logger.info("Succesfully completed allreduce & upload process")
                 self.all_reduce_success_status = True
-                self.config.neuron.blocks_per_allreduce = 250
+                self.config.neuron.blocks_per_allreduce = 500
 
     else:
         if self.master:
