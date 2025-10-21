@@ -1007,75 +1007,10 @@ def upload_new_state(
         self.logger.info(
             f"Successfully pushed new model with tag {self.local_progress.epoch}"
         )
-
-        # Wait to allow out of sync miners to download new model state
-        time.sleep(self.load_state_timeout)
     elif upload_success_status[0].item() != self.world_size:
         self.logger.error(
             "Maximum Retry Limit Reached. Unable To Upload Model To HF Hub."
         )
-
-    # attempt = 0
-    # while attempt < self.model_upload_retry_limit:
-    #     try:
-    #         self.logger.info(
-    #             f"Pushing new model and optimizer state to HF Hub with tag {epoch}"
-    #         )
-
-    #         # Save and upload both model and optimizer state
-    #         upload_success = save_and_upload_state(
-    #             self,
-    #             epoch=epoch,
-    #             results=results,
-    #             model_state=model_state,
-    #             inner_optimizer_state=inner_optimizer_state,
-    #             inner_optimizer_lr=inner_optimizer_lr,
-    #             block=block,
-    #         )
-
-    #         if upload_success and self.master:
-    #             # Verify the upload
-    #             updated_refs = list_repo_refs(
-    #                 self.config.neuron.global_model_name,
-    #                 repo_type="model",
-    #             )
-    #             new_tag = (
-    #                 max(
-    #                     [
-    #                         int(tag.name.split(".")[1])
-    #                         for tag in updated_refs.tags
-    #                         if (
-    #                             (len(tag.name.split(".")) == 3)
-    #                             and (tag.name.split(".")[0] == __run__)
-    #                         )
-    #                     ]
-    #                 )
-    #                 if updated_refs.tags
-    #                 else 0
-    #             )
-    #             self.logger.info(f"Successfully pushed new model with tag {new_tag}")
-    #             # Wait to allow out of sync miners to download new model state
-    #             time.sleep(self.load_state_timeout)
-    #             break
-
-    #     except HfHubHTTPError as e:
-    #         attempt += 1
-    #         self.logger.info(f"{e}. Loading State from Peer.")
-    #         state_loaded = load_state_from_peer(self, epoch=self.global_progress.epoch)
-    #         if state_loaded:
-    #             break
-    #     except Exception:
-    #         attempt += 1
-    #         self.logger.warning(
-    #             f"Failed To Upload Model To HF hub, Retrying. Attempt {attempt}/{self.model_upload_retry_limit}."
-    #         )
-    #         if attempt < self.model_upload_retry_limit:
-    #             time.sleep(self.model_upload_retry_delay)
-    #         else:
-    #             self.logger.error(
-    #                 "Maximum Retry Limit Reached. Unable To Upload Model To HF Hub."
-    #             )
-    #             raise
 
     return upload_success
 
