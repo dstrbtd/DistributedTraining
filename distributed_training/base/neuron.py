@@ -16,6 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 import os
+import pathlib
 import copy
 from abc import ABC, abstractmethod
 
@@ -181,7 +182,7 @@ class BaseNeuron(ABC):
 
         # Initialize the all_reduce, download and upload variables.
         self.allreduce_timeout = 540
-        self.upload_state_duration = 420
+        self.upload_state_duration = 100
         self.all_reduce_success_status = True
         self.should_all_reduce = False
         self.retry_limit = 100
@@ -261,4 +262,39 @@ class BaseNeuron(ABC):
     def load_state(self):
         self.logger.warning(
             "load_state() not implemented for this neuron. You can implement this function to load model checkpoints or other useful data."
+        )
+
+    def print_memory_usage(self):
+        def cg_read(p):
+            try:
+                return pathlib.Path(p).read_text().strip()
+            except FileNotFoundError:
+                return None
+
+        # Memory limit (bytes) — cgroup v2 then v1
+        memory_limit = cg_read("/sys/fs/cgroup/memory.max") or cg_read(
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+        )
+        if memory_limit and memory_limit != "max":
+            memory_limit_gb = int(memory_limit) / 1024**3
+            self.logger.debug(f"Memory limit: {memory_limit_gb:.1f} GB")
+        else:
+            self.logger.debug("Memory limit: Unlimited Or Not Set")
+
+        memory_used = cg_read("/sys/fs/cgroup/memory.current") or cg_read(
+            "/sys/fs/cgroup/memory/memory.usage_in_bytes"
+        )
+        if memory_used and memory_used != "max":
+            memory_used_gb = int(memory_used) / 1024**3
+            self.logger.debug(f"Memory Used: {memory_used_gb:.1f} GB")
+        else:
+            self.logger.debug("Memory Used: Unlimited Or Not Set")
+
+        if self.master:
+            self.logger.debug(
+                f"CPU Memory Usage: {memory_used_gb:.1f}GBs out of {memory_limit_gb:.1f}GBs"
+            )
+
+        return (
+            f"CPU Memory Usage: {memory_used_gb:.1f}GBs out of {memory_limit_gb:.1f}GBs"
         )

@@ -428,9 +428,7 @@ def load_model_optimizer_gradient_averager(
     against this for now gc.collect() is run after each component
     with optimizers and state averagers are deleted.
     """
-    self.logger.debug(
-        f"CPU Memory Before Loading State {psutil.virtual_memory().available / 10**9} GB"
-    )
+    self.logger.info(f"Before Loading State {self.print_memory_usage()}")
     r2 = get_r2_client(self, uid, donwload_on_all_ranks=True)
 
     global_model_revision = f"{__run__}.{epoch}.0"
@@ -841,9 +839,7 @@ def load_model_optimizer_gradient_averager(
                 r2, local_model_name, self.local_progress.epoch - 1
             )
 
-    self.logger.info(
-        f"CPU Memory After Loading State {psutil.virtual_memory().available / 10**9} GB"
-    )
+    self.logger.info(f"After Loading State {self.print_memory_usage()}")
     return loading_success
 
 

@@ -196,7 +196,7 @@ def add_args(cls, parser, prefix=None):
         "--neuron.local_batch_size_train",
         type=int,
         help="The default batch size",
-        default=4,
+        default=2,
     )
 
     parser.add_argument(
@@ -231,7 +231,7 @@ def add_args(cls, parser, prefix=None):
         "--neuron.rank_0_only_log",
         action="store_true",
         help="Toggles wandb logging for the project",
-        default=False,
+        default=True,
     )
 
     parser.add_argument(

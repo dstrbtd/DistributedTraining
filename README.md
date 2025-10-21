@@ -71,10 +71,10 @@ pm2 start run_miner.sh --name distributed_training_miner_auto_update --
     --subtensor.chain_endpoint <your chain url>  # Must be attained by following the instructions in the docs/running_on_*.md files
     --wallet.name <your miner wallet> # Must be created using the bittensor-cli
     --wallet.hotkey <your validator hotkey> # Must be created using the bittensor-cli
-    --logging.debug # Run in debug mode, alternatively --logging.trace for trace mode
     --axon.port <an open port to serve the bt axon on>
     --dht.port <another open port to serve the dht axon on>
     --dht.ip <your device ip address>
+    --rank_0_only_log <wether you want to display rank 0 logs only> # Only disable for logging
 ```
 ---
 
@@ -92,6 +92,7 @@ pm2 start run_validator.sh --name distributed_training_auto_update --
     --axon.port <an open port to serve the bt axon on>
     --dht.port <another open port to serve the dht axon on>
     --dht.ip <your device ip address>
+    --rank_0_only_log <wether you want to display rank 0 logs only> # Only disable for logging
 ```
 
 </div>
