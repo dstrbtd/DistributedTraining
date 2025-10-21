@@ -119,10 +119,8 @@ class BaseMinerNeuron(BaseNeuron):
 
         # This loop maintains the miner's operations until intentionally stopped.
         try:
-            self.logger.info("start run barrier start")
             dist.barrier()
             self.resume_training()
-            self.logger.info("start run barrier end")
 
             while not self.should_exit:
                 try:
@@ -142,7 +140,7 @@ class BaseMinerNeuron(BaseNeuron):
                                     self.wandb.log(self.event)
                                 self.event = {}
 
-                    self.logger.info(
+                    self.logger.debug(
                         "self.training_active.set()",
                         self.training_active.is_set(),
                         "pre dataset",
@@ -156,7 +154,7 @@ class BaseMinerNeuron(BaseNeuron):
                     )
 
                     # Wait if training is paused
-                    self.logger.info(
+                    self.logger.debug(
                         "self.training_active.wait()",
                         self.training_active.is_set(),
                         "post dataset",

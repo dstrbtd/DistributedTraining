@@ -389,10 +389,10 @@ class DatasetLoader(SubsetLoader):
                 # Handle HTTP client errors with a retry mechanism
                 attempt += 1
                 if attempt < retry_limit:
-                    self.logger.info(
+                    self.logger.debug(
                         f"Retrying page {page} due to error: {e}. Attempt {attempt} of {retry_limit}"
                     )
-                    self.logger.info(
+                    self.logger.debug(
                         f"Waiting {self.retry_delay * attempt} seconds before retrying..."
                     )
                     await asyncio.sleep(

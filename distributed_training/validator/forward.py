@@ -78,7 +78,6 @@ async def forward(self):
     self.should_all_reduce = (
         self.blocks_since_allreduce >= self.config.neuron.blocks_per_allreduce
     )
-    self.should_all_reduce = False
     self.logger.info(
         f"Current block {self.current_block} | Blocks Since Last AllReduce: {self.blocks_since_allreduce} | Should AllReduce: {self.should_all_reduce}"
     )

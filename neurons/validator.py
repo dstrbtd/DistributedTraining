@@ -361,7 +361,7 @@ class Validator(BaseValidatorNeuron):
     def _setup_training_params(self):
         self.local_batch_size_train = self.config.neuron.local_batch_size_train
         self.local_batch_size_train_effective = (
-            self.config.neuron.local_batch_size_train_effective
+            self.config.neuron.local_batch_size_train_effective / self.world_size
         )
         self.logging_interval = 5
         self.number_of_local_steps = (

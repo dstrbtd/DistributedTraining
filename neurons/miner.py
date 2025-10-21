@@ -300,7 +300,7 @@ class Miner(BaseMinerNeuron):
         # Reload on ALL ranks (simplest + avoids param rebroadcast complexities).
         # (If you truly want only rank 0 to load, you must then broadcast params,
         # which is more invasive.)
-        self.logger.info("Sync reload begin")
+        self.logger.debug("Sync Reload Begin")
 
         if all_reduce_flag_tensor == 1:
             self.loop.run_until_complete(
@@ -639,7 +639,7 @@ class Miner(BaseMinerNeuron):
         current_block_tensor = torch.tensor([self.current_block])
         dist.broadcast(current_block_tensor, src=0, group=self.gloo_group)
         self.current_block = current_block_tensor[0].item()
-        self.logger.info(self.current_block)
+        self.logger.debug(self.current_block)
 
     async def fetch_training_data(self):
         """Async function to fetch training data"""
@@ -670,7 +670,7 @@ class Miner(BaseMinerNeuron):
                     dataset_length, op=dist.ReduceOp.MIN, group=self.gloo_group
                 )
                 dataset.buffer = dataset.buffer[:dataset_length]
-                self.logger.info("DATASET BUFFER LENGTH", len(dataset.buffer))
+                self.logger.debug("Dataset Buffer Length", len(dataset.buffer))
 
                 return dataset
             except Exception as e:
@@ -965,7 +965,7 @@ class Miner(BaseMinerNeuron):
     def _setup_training_params(self):
         self.local_batch_size_train = self.config.neuron.local_batch_size_train
         self.local_batch_size_train_effective = (
-            self.config.neuron.local_batch_size_train_effective
+            self.config.neuron.local_batch_size_train_effective / self.world_size
         )
         self.logging_interval = 5
         self.number_of_local_steps = (
