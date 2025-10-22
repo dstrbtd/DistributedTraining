@@ -74,7 +74,7 @@ pm2 start run_miner.sh --name distributed_training_miner_auto_update --
     --axon.port <an open port to serve the bt axon on>
     --dht.port <another open port to serve the dht axon on>
     --dht.ip <your device ip address>
-    --rank_0_only_log <wether you want to display rank 0 logs only> # Only disable for logging
+    --show_all_rank_logs <wether you want to display rank 0 logs only> # Only enable for debugging
 ```
 ---
 
@@ -92,7 +92,7 @@ pm2 start run_validator.sh --name distributed_training_auto_update --
     --axon.port <an open port to serve the bt axon on>
     --dht.port <another open port to serve the dht axon on>
     --dht.ip <your device ip address>
-    --rank_0_only_log <wether you want to display rank 0 logs only> # Only disable for logging
+    --show_all_rank_logs <wether you want to display rank 0 logs only> # Only enable for debugging
 ```
 
 </div>

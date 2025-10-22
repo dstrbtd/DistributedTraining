@@ -147,6 +147,13 @@ class Miner(BaseMinerNeuron):
                 region_name="auto",
             )
         }
+        self.r2["write"] = boto3.client(
+            "s3",
+            endpoint_url=f"https://{self.config.r2.account_id}.r2.cloudflarestorage.com",
+            aws_access_key_id=self.config.r2.write.access_key_id,
+            aws_secret_access_key=self.config.r2.write.secret_access_key,
+            region_name="auto",
+        )
         commitment = None
         while commitment == None:
             try:
@@ -194,6 +201,22 @@ class Miner(BaseMinerNeuron):
             self.start_background_upload(
                 epoch=self.global_progress.epoch,
             )
+        if self.master:
+            # Save metadata
+            metadata = {
+                "run": int(__run__),
+                "outer_step": int(self.local_progress.epoch),
+                "inner_step": int(self.local_progress.inner_step),
+                "peer_id": str(self.dht.peer_id.to_base58()),
+            }
+            with open(os.path.join(self.output_dir, f"metadata.json"), "w") as f:
+                json.dump(metadata, f, indent=4, sort_keys=True)
+            # Upload Peer Metadata With Updated Peer ID
+            self.r2["write"].upload_file(
+                str(os.path.join(self.output_dir, "metadata.json")),
+                self.config.r2.bucket_name,
+                f"metadata.json",
+            )
         self.reload_state_event = threading.Event()
         self.all_reduce_flag = 0
 
@@ -230,6 +253,7 @@ class Miner(BaseMinerNeuron):
                     - time.perf_counter()
                     + self.all_reduce_start_time
                 )
+                wait_time = 0
                 if wait_time > 0:
                     self.logger.info(
                         f"Waiting {int(wait_time)} seconds until validator complete the all_reduce"
@@ -1398,6 +1422,7 @@ class Miner(BaseMinerNeuron):
                             # bandwidth
                         )
                         self.logger.info("All Reduce Finish")
+                        raise Exception("Force All Reduce Fail")
                         if not synapse.completion:
                             raise Exception("AllReduce Failed, Loading Latest State")
                     except Exception as e:
@@ -1415,21 +1440,35 @@ class Miner(BaseMinerNeuron):
             dist.broadcast(synapse_completion, src=0, group=self.gloo_group)
             self.logger.info("Synapse Completion" + str(synapse_completion[0].item()))
             if synapse_completion[0].item() == 1:
+                # Archive before updating the epoch
                 if self.master:
-                    # Archive before updating the epoch
-                    r2_write = boto3.client(
-                        "s3",
-                        endpoint_url=f"https://{self.config.r2.account_id}.r2.cloudflarestorage.com",
-                        aws_access_key_id=self.config.r2.write.access_key_id,
-                        aws_secret_access_key=self.config.r2.write.secret_access_key,
-                        region_name="auto",
-                    )
-                    archive_root_bucket(
-                        r2_write,
-                        self.config.r2.bucket_name,
-                        epoch=self.local_progress.epoch,
-                    )
-                dist.barrier()
+                    upload_attempts_max = 3
+                    uppload_attempt = 0
+                    while uppload_attempt < upload_attempts_max:
+                        try:
+                            self.logger.info(
+                                f"Archiving current bucket to epoch-{self.local_progress.epoch}"
+                            )
+                            archive_root_bucket(
+                                self.r2["write"],
+                                self.config.r2.bucket_name,
+                                epoch=self.local_progress.epoch,
+                            )
+                            self.logger.info(
+                                f"Archived current bucket to epoch-{self.local_progress.epoch}"
+                            )
+                            break
+
+                        except Exception as e:
+                            uppload_attempt += 1
+                            if uppload_attempt >= upload_attempts_max:
+                                self.logger.info(
+                                    f"Failed to load model, retrying. Attempt {uppload_attempt}/{upload_attempts_max}. Error {str(e)}"
+                                )
+                                self.logger.info(e)
+                else:
+                    time.sleep(900)
+                dist.barrier(group=self.gloo_group)
 
                 self.logger.info(f"Apply opt params")
                 self.apply_optimizer_parameters()

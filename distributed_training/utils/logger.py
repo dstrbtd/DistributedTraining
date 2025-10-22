@@ -107,16 +107,16 @@ def hive_log_filter(record):
 
 
 class RankFilter(logging.Filter):
-    def __init__(self, rank, rank_0_only_log):
+    def __init__(self, rank, show_all_rank_logs):
         super().__init__()
         self.rank = rank
-        self.rank_0_only_log = rank_0_only_log
+        self.show_all_rank_logs = show_all_rank_logs
 
     def filter(self, record):
         # Add ANSI escape code for bold: \033[1m … \033[0m
         record.rank = f"\033[1mRank {self.rank}\033[0m"
         # return True
-        return self.rank == 0 if self.rank_0_only_log else True
+        return self.rank == 0 if (self.show_all_rank_logs is False) else True
 
 
 def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
@@ -177,7 +177,7 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
     root_logger.setLevel(logging.DEBUG)  # Capture all levels
 
     # Attach rank filter to all loggers
-    rank_filter = RankFilter(self.local_rank, self.config.neuron.rank_0_only_log)
+    rank_filter = RankFilter(self.local_rank, self.config.neuron.show_all_rank_logs)
     root_logger.addFilter(rank_filter)
     bt_logger.addFilter(rank_filter)
 
