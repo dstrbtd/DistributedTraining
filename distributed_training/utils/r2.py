@@ -13,6 +13,17 @@ from botocore.client import BaseClient
 from s3transfer.manager import TransferManager
 from boto3.s3.transfer import TransferConfig
 
+ACCEPTED_FILES = [
+    "config.json",
+    "model.safetensors",
+    "gradients.pt",
+    "inner_optimizer.rank0001-of-4.pt",
+    "inner_optimizer.rank0002-of-4.pt",
+    "inner_optimizer.rank0003-of-4.pt",
+    "inner_optimizer.rank0004-of-4.pt",
+    "outer_optimizer.pt",
+]
+
 
 def upload_folder_to_r2(r2, bucket, prefix="", max_workers=14):
     local_folder = pathlib.Path(bucket)
@@ -26,6 +37,9 @@ def upload_folder_to_r2(r2, bucket, prefix="", max_workers=14):
         key = f"{prefix}/{path.relative_to(local_folder)}"
         key = str(path.relative_to(local_folder))
         size = os.path.getsize(path)
+
+        if key not in ACCEPTED_FILES:
+            return key
 
         if size > 512:
             threshold = 64
@@ -62,6 +76,7 @@ def upload_folder_to_r2(r2, bucket, prefix="", max_workers=14):
 
 
 def archive_root_bucket(r2: BaseClient, bucket: str, epoch: int):
+    # print(datetime.datetime.now())
     # multipart thresholds/chunks; tune as needed
     tcfg = TransferConfig(
         multipart_threshold=8 * 1024 * 1024,  # 8MB
@@ -79,7 +94,12 @@ def archive_root_bucket(r2: BaseClient, bucket: str, epoch: int):
                 key = obj["Key"]
 
                 # ✅ skip pseudo-folders or empty keys
-                if (not key) or ("epoch-" in key) or (obj["Size"] == 0):
+                if (
+                    (not key)
+                    or ("epoch-" in key)
+                    or (obj["Size"] == 0)
+                    or (key not in ACCEPTED_FILES)
+                ):
                     continue
 
                 dest_key = f"{archive_prefix}{key}"
@@ -97,6 +117,8 @@ def archive_root_bucket(r2: BaseClient, bucket: str, epoch: int):
         for f in futures:
             f.result()
     r2.close()
+    # print("✅ Archive complete")
+    # print(datetime.datetime.now())
 
 
 def restore_from_epoch(r2: BaseClient, bucket: str, epoch: int):

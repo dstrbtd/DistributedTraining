@@ -264,7 +264,10 @@ class Miner(BaseMinerNeuron):
                 self.global_progress.epoch = get_progress(self, "global")[0]
                 self.reload_state_event.set()
             # elif (
-            #     (self.local_progress.epoch == 0 and self.local_progress.inner_step > 20)
+            #     (
+            #         self.local_progress.epoch == 0
+            #         and (self.local_progress.inner_step % 10 == 0)
+            #     )
             #     or (
             #         self.local_progress.epoch != 0
             #         and self.local_progress.inner_step > 20
@@ -462,6 +465,7 @@ class Miner(BaseMinerNeuron):
                     self.model.config.save_pretrained(self.output_dir)
                     self.logger.info(f"Model Saved")
                     del full_state
+                    gc.collect()
 
                     # Save pseudo gradient state
                     torch.save(
@@ -645,6 +649,7 @@ class Miner(BaseMinerNeuron):
 
         dist.barrier()
         del full_state, optim_sd, gradient_state
+        gc.collect()
 
     def pause_training(self):
         """Pauses the continuous training loop"""
@@ -974,7 +979,7 @@ class Miner(BaseMinerNeuron):
         # Load model and components
         load_state_from_peer(self, self.uid, self.local_progress.epoch)
         self.model.config.block_list = []
-        cleanup_old_cache(self)
+        # cleanup_old_cache(self)
 
         # Setup upload executor
         self.upload_executor = ThreadPoolExecutor(

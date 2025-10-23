@@ -394,6 +394,7 @@ class BaseValidatorNeuron(BaseNeuron):
                 self.uid_tracker[uid] = UidTracker(
                     uid=uid
                 )  # reset uid_tracker for this uid
+                self.failed_is_alive_counter[uid] = 0
 
         # Check to see if the metagraph has changed size.
         # If so, we need to add new hotkeys and moving averages.
@@ -406,6 +407,7 @@ class BaseValidatorNeuron(BaseNeuron):
             self.uid_tracker[uid] = UidTracker(
                 uid=uid
             )  # reset uid_tracker for this uid
+            self.failed_is_alive_counter[uid] = 0
 
         # Update the hotkeys.
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)

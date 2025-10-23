@@ -455,7 +455,11 @@ def load_model_optimizer_gradient_averager(
         else self.config.neuron.global_model_name
     )
     output_dir = os.path.join(os.getcwd(), local_model_name)
+    global_output_dir = os.path.join(os.getcwd(), global_model_name)
     use_cache = check_cache_sync(self, r2, local_model_name, epoch, output_dir)
+    use_global_cache = check_cache_sync(
+        self, r2, local_model_name, epoch, global_output_dir
+    )
     metadata_epoch = get_progress(self, "local", uid=uid)[0]
     if epoch == metadata_epoch:
         prefix = ""
@@ -534,7 +538,7 @@ def load_model_optimizer_gradient_averager(
 
         if not hasattr(self, "model"):
             if use_cache is False:
-                model_path = r2_download(
+                _ = r2_download(
                     self,
                     r2=r2,
                     bucket=local_model_name,
@@ -542,7 +546,7 @@ def load_model_optimizer_gradient_averager(
                     donwload_on_all_ranks=False,
                     destination=output_dir,
                 )
-                config_path = r2_download(
+                _ = r2_download(
                     self,
                     r2=r2,
                     bucket=local_model_name,
@@ -591,21 +595,26 @@ def load_model_optimizer_gradient_averager(
             else:
                 model_state = None
 
-            objs = [model_state]
-            dist.broadcast_object_list(objs, src=0, group=self.gloo_group)
-            m_blob = objs[0]
+            # objs = [model_state]
+            # dist.broadcast_object_list(objs, src=0, group=self.gloo_group)
+            # m_blob = objs[0]
+            self.logger.info(self.print_memory_usage())
             self.logger.info("Downloaded Model State")
             model_loading_options = StateDictOptions(
-                full_state_dict=True, cpu_offload=True, broadcast_from_rank0=False
+                full_state_dict=True, cpu_offload=True, broadcast_from_rank0=True
             )
             dist.barrier()
-            set_model_state_dict(self.model, m_blob, options=model_loading_options)
+            set_model_state_dict(self.model, model_state, options=model_loading_options)
             self.logger.info("Sharded Model State")
+            self.logger.info(self.print_memory_usage())
 
-            need_full_state = not hasattr(self, "outer_optimizer")
+            need_full_state = self.master and not hasattr(self, "outer_optimizer")
             if need_full_state:
-                full_state = m_blob
-            del objs, model_state, m_blob
+                # full_state = m_blob
+                full_state = model_state
+            # del objs, model_state, m_blob
+            del model_state
+            gc.collect()
 
         self.logger.info(
             f"Successfully Loaded Model From {local_model_name} With Revision {revision}"
@@ -763,7 +772,7 @@ def load_model_optimizer_gradient_averager(
         if reload_outer_optimizer:
             optimizer_state = None
             try:
-                if use_cache is False:
+                if use_global_cache is False:
                     optimizer_state_path = r2_download(
                         self,
                         r2=get_r2_client(
@@ -772,13 +781,12 @@ def load_model_optimizer_gradient_averager(
                         bucket=global_model_name,
                         key=f"{prefix}outer_optimizer.pt",
                         donwload_on_all_ranks=False,
-                        destination=output_dir,
+                        destination=global_output_dir,
                     )
                 else:
                     optimizer_state_path = os.path.join(
-                        self.output_dir, "outer_optimizer.pt"
+                        global_output_dir, "outer_optimizer.pt"
                     )
-
                 optimizer_state = torch.load(
                     optimizer_state_path, map_location="cpu", weights_only=True
                 )
@@ -948,7 +956,7 @@ def load_state_from_peer(
             self.local_progress.samples_accumulated = 0
             self.logger.info(f"New Model Tag: {self.global_progress.epoch}")
 
-            cleanup_old_cache(self)
+            # cleanup_old_cache(self)
 
         else:
             self.logger.debug(f"Model With Tag: {epoch} Does Not Exist")
