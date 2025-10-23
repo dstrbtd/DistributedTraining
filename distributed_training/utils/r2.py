@@ -76,7 +76,8 @@ def upload_folder_to_r2(r2, bucket, prefix="", max_workers=14):
 
 
 def archive_root_bucket(r2: BaseClient, bucket: str, epoch: int):
-    # print(datetime.datetime.now())
+    print("⌛️ Archive start")
+    print(datetime.datetime.now())
     # multipart thresholds/chunks; tune as needed
     tcfg = TransferConfig(
         multipart_threshold=8 * 1024 * 1024,  # 8MB
@@ -117,8 +118,8 @@ def archive_root_bucket(r2: BaseClient, bucket: str, epoch: int):
         for f in futures:
             f.result()
     r2.close()
-    # print("✅ Archive complete")
-    # print(datetime.datetime.now())
+    print("✅ Archive complete")
+    print(datetime.datetime.now())
 
 
 def restore_from_epoch(r2: BaseClient, bucket: str, epoch: int):

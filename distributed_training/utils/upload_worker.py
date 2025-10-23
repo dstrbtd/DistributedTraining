@@ -1,7 +1,8 @@
 # upload_worker.py
 import sys
-import boto3
 import pathlib
+import boto3
+from botocore.config import Config
 
 from distributed_training.utils.r2 import (
     upload_folder_to_r2,
@@ -25,6 +26,12 @@ if __name__ == "__main__":
         aws_access_key_id=r2_write_access_access_key_id,
         aws_secret_access_key=r2_write_access_secret_access_key,
         region_name="auto",
+        config=Config(
+            retries={"max_attempts": 10, "mode": "adaptive"},  # or "standard"
+            connect_timeout=30,
+            read_timeout=120,
+            max_pool_connections=50,
+        ),
     )
 
     upload_folder_to_r2(r2_write, bucket)
