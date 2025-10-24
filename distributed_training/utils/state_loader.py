@@ -453,6 +453,7 @@ def load_model_optimizer_gradient_averager(
         prefix = ""
     else:
         prefix = f"epoch-{epoch}/"
+    prefix = f"epoch-{epoch}/"
 
     local_model_name = (
         f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}"
@@ -652,7 +653,6 @@ def load_model_optimizer_gradient_averager(
                     num_warmup_steps=1000,
                     num_training_steps=88000,
                 )
-
             if use_cache is False:
                 optimizer_state_path = r2_download(
                     self,

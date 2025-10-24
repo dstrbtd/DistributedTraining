@@ -18,6 +18,7 @@ if __name__ == "__main__":
     tag = sys.argv[5]
     archive = sys.argv[6]
     epoch = tag.split(".")[1]
+    prefix = f"epoch-{epoch}/"
     restore = "True"
 
     r2_write = boto3.client(
@@ -34,7 +35,7 @@ if __name__ == "__main__":
         ),
     )
 
-    upload_folder_to_r2(r2_write, bucket)
+    upload_folder_to_r2(r2_write, bucket, prefix)
     # Only archive on the miner side after an AllReduce
     # Variable has to be fed as a string in subprocess
     if archive == "True":

@@ -27,7 +27,7 @@ import bittensor as bt
 import numpy as np
 
 from distributed_training.base.neuron import BaseNeuron
-from distributed_training.utils.chain import log_peerid_to_chain
+from distributed_training.utils.chain import log_r2_to_chain
 from distributed_training.utils.weight_utils import (
     convert_weights_and_uids_for_emit,
     process_weights_for_netuid,
@@ -229,7 +229,7 @@ class BaseValidatorNeuron(BaseNeuron):
 
                     self.step += 1
                     if self.r2_credentials_logged_to_chain is False:
-                        log_peerid_to_chain(self)
+                        log_r2_to_chain(self)
 
         # If someone intentionally stops the validator, it'll safely terminate operations.
         except KeyboardInterrupt:

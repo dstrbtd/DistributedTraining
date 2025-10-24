@@ -339,6 +339,7 @@ async def score_uids(self, uids: list):
     else:
         epoch = self.global_progress.epoch
         prefix = ""
+    prefix = f"epoch-{epoch}/"
 
     test_time = time.time()
 

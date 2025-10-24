@@ -36,11 +36,12 @@ def upload_folder_to_r2(r2, bucket, prefix="", max_workers=14):
     pbar = tqdm.tqdm(total=len(files))
 
     def _upload(path):
-        key = f"{prefix}/{path.relative_to(local_folder)}"
-        key = str(path.relative_to(local_folder))
+        key = f"{prefix}{path.relative_to(local_folder)}"
+        print(key)
+        # key = str(path.relative_to(local_folder))
         size = os.path.getsize(path)
 
-        if key not in ACCEPTED_FILES:
+        if key.split("/")[-1] not in ACCEPTED_FILES:
             return key
 
         if size > 512:
