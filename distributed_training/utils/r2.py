@@ -24,10 +24,11 @@ ACCEPTED_FILES = [
     "inner_optimizer.rank0003-of-4.pt",
     "inner_optimizer.rank0004-of-4.pt",
     "outer_optimizer.pt",
+    "metadata.json"
 ]
 
 
-def upload_folder_to_r2(r2, bucket, prefix="", max_workers=14):
+def upload_folder_to_r2(r2, bucket, prefix="", max_workers=8):
     local_folder = pathlib.Path(bucket)
 
     files = [p for p in local_folder.rglob("*") if p.is_file()]

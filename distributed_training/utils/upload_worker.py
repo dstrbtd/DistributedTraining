@@ -45,8 +45,5 @@ if __name__ == "__main__":
     #     restore_from_epoch(r2_write, bucket, epoch)
 
     # r2_write.upload_file(
-    #     str("/root/llama-1b-ws-2/metadata.json"), bucket, f"metadata.json"
-    # )
-    # r2_write.upload_file(
-    #     str("/root/llama-1b-ws-2/metadata.json"), bucket, f"epoch-26/metadata.json"
+    #     str("/root/llama-4b-ws-4/metadata.json"), bucket, f"metadata.json"
     # )
