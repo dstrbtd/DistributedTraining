@@ -81,7 +81,7 @@ from distributed_training import __run__
 # from distributed_training.averaging.avg_handler import AllReduceError
 from distributed_training.base.miner import BaseMinerNeuron, TrainingStatus
 from distributed_training.data.dataset import DatasetLoader
-from distributed_training.utils.chain import log_peerid_to_chain
+from distributed_training.utils.chain import log_r2_to_chain
 from distributed_training.utils.misc import (
     init_dht,
     load_wandb,
@@ -96,14 +96,10 @@ from distributed_training.utils.state_loader import (
     cleanup_old_cache,
     load_state_from_peer,
 )
-from distributed_training.utils.r2 import (
-    r2_download,
-    archive_root_bucket,
-)
+from distributed_training.utils.r2 import archive_root_bucket, log_peerid_to_r2
 from distributed_training.utils.compression import TransformDCT, CompressDCT
 import torch.distributed as dist
 from threading import Thread
-from threading import Event
 import distributed_training
 
 
@@ -117,8 +113,6 @@ from safetensors.torch import save_file
 import faulthandler, signal
 
 faulthandler.register(signal.SIGUSR1)
-import datetime
-import os
 
 
 def cuda_mem(logger, tag):
@@ -131,58 +125,7 @@ def cuda_mem(logger, tag):
 
 class Miner(BaseMinerNeuron):
     def __init__(self, config=None):
-        self.world_size = int(os.getenv("WORLD_SIZE", 1))
-        self.local_rank = int(os.getenv("LOCAL_RANK", 0))
-        torch.cuda.set_device(self.local_rank)
-        self.master = self.local_rank == 0
         super(Miner, self).__init__(config=config)
-
-        self.session = boto3.session.Session()
-        self.r2 = {
-            "local": self.session.client(
-                "s3",
-                endpoint_url=f"https://{self.config.r2.account_id}.r2.cloudflarestorage.com",
-                aws_access_key_id=self.config.r2.read.access_key_id,
-                aws_secret_access_key=self.config.r2.read.secret_access_key,
-                region_name="auto",
-            )
-        }
-        self.r2["write"] = boto3.client(
-            "s3",
-            endpoint_url=f"https://{self.config.r2.account_id}.r2.cloudflarestorage.com",
-            aws_access_key_id=self.config.r2.write.access_key_id,
-            aws_secret_access_key=self.config.r2.write.secret_access_key,
-            region_name="auto",
-        )
-        commitment = None
-        while commitment == None:
-            try:
-                if self.master:
-                    commitment = [
-                        self.subtensor.get_commitment(
-                            self.config.netuid, self.master_uid
-                        )
-                    ]
-                else:
-                    commitment = [
-                        self.config.r2.account_id
-                        + self.config.r2.read.access_key_id
-                        + self.config.r2.read.secret_access_key
-                    ]
-                dist.broadcast_object_list(commitment, src=0, group=self.gloo_group)
-                global_account_id = commitment[0][:32]
-                global_access_key_id = commitment[0][32:64]
-                global_asecret_access_key = commitment[0][64:]
-                self.r2["global"] = self.session.client(
-                    "s3",
-                    endpoint_url=f"https://{global_account_id}.r2.cloudflarestorage.com",
-                    aws_access_key_id=global_access_key_id,
-                    aws_secret_access_key=global_asecret_access_key,
-                    region_name="auto",
-                )
-            except Exception as e:
-                self.logger.info(f"Error getting commitment: {str(e)}")
-                time.sleep(15)
 
         self._update_wandb_project()
         self._init_basic_components()
@@ -193,7 +136,6 @@ class Miner(BaseMinerNeuron):
             self.block
         else:
             self.current_block = 0
-
         self.sync_current_block()
         self.starting_block = self.current_block
 
@@ -201,23 +143,6 @@ class Miner(BaseMinerNeuron):
             self.start_background_upload(
                 epoch=self.global_progress.epoch,
             )
-        if self.master:
-            # Save metadata
-            metadata = {
-                "run": int(__run__),
-                "outer_step": int(self.local_progress.epoch),
-                "inner_step": int(self.local_progress.inner_step),
-                "peer_id": str(self.dht.peer_id.to_base58()),
-            }
-            with open(os.path.join(self.output_dir, f"metadata.json"), "w") as f:
-                json.dump(metadata, f, indent=4, sort_keys=True)
-            # Upload Peer Metadata With Updated Peer ID
-            self.r2["write"].upload_file(
-                str(os.path.join(self.output_dir, "metadata.json")),
-                self.config.r2.bucket_name,
-                f"metadata.json",
-            )
-        self.reload_state_event = threading.Event()
         self.all_reduce_flag = 0
 
         self.loop = asyncio.new_event_loop()
@@ -225,7 +150,6 @@ class Miner(BaseMinerNeuron):
         if self.master:
             cuda_mem(self.logger, f"Load 0")
 
-        if self.master:
             # Serve passes the axon information to the network + netuid we are hosting on.
             # This will auto-update if the axon port of external ip have changed.
             self.logger.info(
@@ -237,8 +161,7 @@ class Miner(BaseMinerNeuron):
             self.axon.start()
             self.logger.info(f"Miner starting at block: {self.block}")
 
-        if self.master:
-            self.reload_state_checker_thread = Thread(
+            self.reload_state_checker_thread = threading.Thread(
                 target=self.reload_state_watcher, daemon=True
             )
             self.reload_state_checker_thread.start()
@@ -542,7 +465,7 @@ class Miner(BaseMinerNeuron):
                         else:
                             time.sleep(5)
 
-                    log_peerid_to_chain(self)
+                    log_peerid_to_r2(self)
 
                     self.logger.info(
                         f"Successfully pushed new model state with tag {__run__}.{epoch}.{self.model.config.inner_step} to bucket: {self.config.r2.bucket_name}"
@@ -927,29 +850,6 @@ class Miner(BaseMinerNeuron):
         self.training_status = TrainingStatus.STOPPED
         self.training_error = None
 
-        # Create Tag Deletion Queue & Thread
-        self.tag_deletion_queue = Queue()
-        self.tag_deletion_thread = threading.Thread(target=self.delete_tags)
-        self.tag_deletion_thread.start()
-
-    def delete_tags(self):
-        while True:
-            if self.tag_deletion_queue.qsize() <= 0:
-                time.sleep(60)
-            else:
-                tag_name = self.tag_deletion_queue.get()
-                try:
-                    # Update tag for this version
-                    delete_tag(
-                        self.config.neuron.local_model_name,
-                        repo_type="model",
-                        tag=tag_name,
-                    )
-                    self.logger.info(f"Succesfully deleted tag {tag_name}")
-                except Exception as e:
-                    self.logger.info(f"Failed to delete tag {tag_name} with error {e}")
-                time.sleep(30)
-
     def _init_model_components(self):
         """Initialize model-related components including tokenizer and optimizer settings."""
         self._init_tokenizer()
@@ -1045,7 +945,8 @@ class Miner(BaseMinerNeuron):
     def _init_network_components(self):
         """Initialize network and P2P components"""
         self.logger.info("Logging PeerID to chain")
-        log_peerid_to_chain(self)
+        log_r2_to_chain(self)
+        log_peerid_to_r2(self)
 
     def _sync_with_global_model(self):
         if self.master:
@@ -1427,7 +1328,6 @@ class Miner(BaseMinerNeuron):
                             # bandwidth
                         )
                         self.logger.info("All Reduce Finish")
-                        raise Exception("Force All Reduce Fail")
                         if not synapse.completion:
                             raise Exception("AllReduce Failed, Loading Latest State")
                     except Exception as e:

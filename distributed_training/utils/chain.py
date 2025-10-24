@@ -1,7 +1,7 @@
 from distributed_training import __run__
 
 
-def log_peerid_to_chain(self):
+def log_r2_to_chain(self):
     if self.master:
         try:
             metadata = (
@@ -10,7 +10,7 @@ def log_peerid_to_chain(self):
                 + self.config.r2.read.secret_access_key
             )
             self.subtensor.commit(self.wallet, self.config.netuid, str(metadata))
-            self.peer_id_logged_to_chain = True
+            self.r2_credentials_logged_to_chain = True
             self.logger.info(f"Metadata dict succesfully logged to chain.")
         except Exception as e:
             self.peer_id_logged_to_chain = False

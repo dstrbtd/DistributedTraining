@@ -49,7 +49,8 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 from transformers import AutoTokenizer
 
 from distributed_training.base.validator import BaseValidatorNeuron
-from distributed_training.utils.chain import log_peerid_to_chain
+from distributed_training.utils.chain import log_r2_to_chain
+from distributed_training.utils.r2 import log_peerid_to_r2
 from distributed_training.utils.misc import (
     init_dht,
     load_wandb,
@@ -84,58 +85,7 @@ from torch.distributed.checkpoint.state_dict import (
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
-        self.world_size = int(os.getenv("WORLD_SIZE", 1))
-        self.local_rank = int(os.getenv("LOCAL_RANK", 0))
-        torch.cuda.set_device(self.local_rank)
-        self.master = self.local_rank == 0
         super(Validator, self).__init__(config=config)
-
-        self.session = boto3.session.Session()
-        self.r2 = {
-            "local": self.session.client(
-                "s3",
-                endpoint_url=f"https://{self.config.r2.account_id}.r2.cloudflarestorage.com",
-                aws_access_key_id=self.config.r2.read.access_key_id,
-                aws_secret_access_key=self.config.r2.read.secret_access_key,
-                region_name="auto",
-            )
-        }
-        commitment = None
-        while commitment == None:
-            try:
-                if self.master:
-                    if self.uid == self.master_uid:
-                        commitment = [
-                            self.config.r2.account_id
-                            + self.config.r2.write.access_key_id
-                            + self.config.r2.write.secret_access_key
-                        ]
-                    else:
-                        commitment = [
-                            self.subtensor.get_commitment(
-                                self.config.netuid, self.master_uid
-                            )
-                        ]
-                else:
-                    commitment = [
-                        self.config.r2.account_id
-                        + self.config.r2.read.access_key_id
-                        + self.config.r2.read.secret_access_key
-                    ]
-                dist.broadcast_object_list(commitment, src=0, group=self.gloo_group)
-                global_account_id = commitment[0][:32]
-                global_access_key_id = commitment[0][32:64]
-                global_asecret_access_key = commitment[0][64:]
-                self.r2["global"] = self.session.client(
-                    "s3",
-                    endpoint_url=f"https://{global_account_id}.r2.cloudflarestorage.com",
-                    aws_access_key_id=global_access_key_id,
-                    aws_secret_access_key=global_asecret_access_key,
-                    region_name="auto",
-                )
-            except Exception as e:
-                self.logger.info(f"Error getting commitment: {str(e)}")
-                time.sleep(15)
 
         self.set_current_block_across_ranks()
         self._update_wandb_project()
@@ -375,7 +325,8 @@ class Validator(BaseValidatorNeuron):
     def _init_network_components(self):
         """Initialize network and P2P components"""
         self.logger.info("Logging PeerID to chain")
-        log_peerid_to_chain(self)
+        log_r2_to_chain(self)
+        log_peerid_to_r2(self)
 
     def _init_uid_components(self):
         self._setup_uids()

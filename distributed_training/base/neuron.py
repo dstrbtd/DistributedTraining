@@ -15,9 +15,12 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import time
 import os
 import pathlib
 import copy
+import boto3
+import threading
 from abc import ABC, abstractmethod
 
 import bittensor as bt
@@ -99,6 +102,12 @@ class BaseNeuron(ABC):
         # These are core Bittensor classes to interact with the network.
         self.logger.info("Setting up bittensor objects.")
 
+        # Set distributed variables
+        self.world_size = int(os.getenv("WORLD_SIZE", 1))
+        self.local_rank = int(os.getenv("LOCAL_RANK", 0))
+        torch.cuda.set_device(self.local_rank)
+        self.master = self.local_rank == 0
+
         if self.master:
             # The wallet holds the cryptographic key pairs for the miner.
             self.wallet = bt.wallet(config=self.config)
@@ -157,7 +166,7 @@ class BaseNeuron(ABC):
         dist.broadcast(master_uid, src=0, group=self.gloo_group)
         self.master_uid = master_uid[0].item()
 
-        # --- Attach the R2 data model ---
+        # Create the R2 data model
         r2 = R2Config(
             bucket_name=f"{self.config.neuron.global_model_name.split('/')[-1]}-{self.uid:03d}"
             if "miner" in self.__class__.__name__.lower()
@@ -172,12 +181,12 @@ class BaseNeuron(ABC):
                 secret_access_key=os.getenv("R2_WRITE_SECRET_ACCESS_KEY"),
             ),
         )
-
         self.config.r2 = r2
 
         # Save directory
         self.output_dir = os.path.join(os.getcwd(), self.config.r2.bucket_name)
 
+        # Init Step
         self.step = 0
 
         # Initialize the all_reduce, download and upload variables.
@@ -187,6 +196,56 @@ class BaseNeuron(ABC):
         self.should_all_reduce = False
         self.retry_limit = 100
         self.retry_delay = 60
+
+        # Create different r2 sessions
+        self.session = boto3.session.Session()
+        self.r2 = {
+            "local": self.session.client(
+                "s3",
+                endpoint_url=f"https://{self.config.r2.account_id}.r2.cloudflarestorage.com",
+                aws_access_key_id=self.config.r2.read.access_key_id,
+                aws_secret_access_key=self.config.r2.read.secret_access_key,
+                region_name="auto",
+            )
+        }
+        self.r2["write"] = boto3.client(
+            "s3",
+            endpoint_url=f"https://{self.config.r2.account_id}.r2.cloudflarestorage.com",
+            aws_access_key_id=self.config.r2.write.access_key_id,
+            aws_secret_access_key=self.config.r2.write.secret_access_key,
+            region_name="auto",
+        )
+        commitment = None
+        while commitment == None:
+            try:
+                if self.master:
+                    commitment = [
+                        self.subtensor.get_commitment(
+                            self.config.netuid, self.master_uid
+                        )
+                    ]
+                else:
+                    commitment = [
+                        self.config.r2.account_id
+                        + self.config.r2.read.access_key_id
+                        + self.config.r2.read.secret_access_key
+                    ]
+                dist.broadcast_object_list(commitment, src=0, group=self.gloo_group)
+                global_account_id = commitment[0][:32]
+                global_access_key_id = commitment[0][32:64]
+                global_asecret_access_key = commitment[0][64:]
+                self.r2["global"] = self.session.client(
+                    "s3",
+                    endpoint_url=f"https://{global_account_id}.r2.cloudflarestorage.com",
+                    aws_access_key_id=global_access_key_id,
+                    aws_secret_access_key=global_asecret_access_key,
+                    region_name="auto",
+                )
+            except Exception as e:
+                self.logger.info(f"Error getting commitment: {str(e)}")
+                time.sleep(15)
+
+        self.reload_state_event = threading.Event()
 
     # @abstractmethod # miner is not using this anymore
     async def forward(self, synapse: bt.Synapse) -> bt.Synapse:
@@ -270,6 +329,11 @@ class BaseNeuron(ABC):
                 return pathlib.Path(p).read_text().strip()
             except FileNotFoundError:
                 return None
+
+        memory_used = 0
+        memory_limit = 0
+        memory_used_gb = 0
+        memory_limit_gb = 0
 
         # Memory limit (bytes) — cgroup v2 then v1
         memory_limit = cg_read("/sys/fs/cgroup/memory.max") or cg_read(

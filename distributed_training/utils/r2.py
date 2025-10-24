@@ -5,6 +5,7 @@ import tempfile
 import filelock
 import datetime
 import pathlib
+import json
 import torch.distributed as dist
 
 from boto3.s3.transfer import TransferConfig
@@ -12,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from botocore.client import BaseClient
 from s3transfer.manager import TransferManager
 from boto3.s3.transfer import TransferConfig
+from distributed_training import __run__
 
 ACCEPTED_FILES = [
     "config.json",
@@ -201,3 +203,22 @@ def r2_download(self, r2, bucket, key, donwload_on_all_ranks=True, destination=N
             raise RuntimeError("Master rank failed during r2_download().")
 
     return destination_path
+
+
+def log_peerid_to_r2(self):
+    if self.master:
+        # Save metadata
+        metadata = {
+            "run": int(__run__),
+            "outer_step": int(self.local_progress.epoch),
+            "inner_step": int(self.local_progress.inner_step),
+            "peer_id": str(self.dht.peer_id.to_base58()),
+        }
+        with open(os.path.join(self.output_dir, f"metadata.json"), "w") as f:
+            json.dump(metadata, f, indent=4, sort_keys=True)
+        # Upload Peer Metadata With Updated Peer ID
+        self.r2["write"].upload_file(
+            str(os.path.join(self.output_dir, "metadata.json")),
+            self.config.r2.bucket_name,
+            f"metadata.json",
+        )

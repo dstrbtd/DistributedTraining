@@ -444,10 +444,15 @@ def load_model_optimizer_gradient_averager(
     # with open(global_config_path, "r") as file:
     #     self.global_model_config = json.load(file)
 
+    metadata_epoch = get_progress(self, "local", uid=uid)[0]
     if (revision is None) and (uid != self.master_uid):
         revision = f"{__run__}.{epoch}.{self.local_progress.inner_step}"
     elif (revision is None) and (uid == self.master_uid):
         revision = global_model_revision
+    if epoch == metadata_epoch:
+        prefix = ""
+    else:
+        prefix = f"epoch-{epoch}/"
 
     local_model_name = (
         f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}"
@@ -456,15 +461,10 @@ def load_model_optimizer_gradient_averager(
     )
     output_dir = os.path.join(os.getcwd(), local_model_name)
     global_output_dir = os.path.join(os.getcwd(), global_model_name)
-    use_cache = check_cache_sync(self, r2, local_model_name, epoch, output_dir)
+    use_cache = check_cache_sync(self, r2, local_model_name, prefix, output_dir)
     use_global_cache = check_cache_sync(
-        self, r2, local_model_name, epoch, global_output_dir
+        self, r2, local_model_name, prefix, global_output_dir
     )
-    metadata_epoch = get_progress(self, "local", uid=uid)[0]
-    if epoch == metadata_epoch:
-        prefix = ""
-    else:
-        prefix = f"epoch-{epoch}/"
 
     # # Delete existing outer optimizer
     # if hasattr(self, "outer_optimizer"):

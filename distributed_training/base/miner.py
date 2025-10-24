@@ -25,7 +25,7 @@ import bittensor as bt
 
 from enum import Enum
 from distributed_training.base.neuron import BaseNeuron
-from distributed_training.utils.chain import log_peerid_to_chain
+from distributed_training.utils.chain import log_r2_to_chain
 from distributed_training.utils.misc import get_bandwidth
 from distributed_training.utils.state_loader import load_state_from_peer
 from distributed_training.utils.progress_tracker import get_progress
@@ -90,7 +90,7 @@ class BaseMinerNeuron(BaseNeuron):
         # self.config.neuron.disable_set_weights = True
 
         # Log PeerID to chain flag
-        self.peer_id_logged_to_chain = False
+        self.r2_credentials_logged_to_chain = False
 
     # def run(rank, self, world_size):
     def run(self):
@@ -125,8 +125,8 @@ class BaseMinerNeuron(BaseNeuron):
             while not self.should_exit:
                 try:
                     if self.master:
-                        if self.peer_id_logged_to_chain is False:
-                            log_peerid_to_chain(self)
+                        if self.r2_credentials_logged_to_chain is False:
+                            log_r2_to_chain(self)
 
                         if not self.config.neuron.dont_wandb_log:
                             if self.event != {}:

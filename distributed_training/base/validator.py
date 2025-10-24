@@ -102,7 +102,7 @@ class BaseValidatorNeuron(BaseNeuron):
         self.lock = asyncio.Lock()
 
         # Log PeerID to chain flag
-        self.peer_id_logged_to_chain = False
+        self.r2_credentials_logged_to_chain = False
 
     def serve_axon(self):
         """Serve axon to enable external connections."""
@@ -228,7 +228,7 @@ class BaseValidatorNeuron(BaseNeuron):
                         self.wandb.log(self.event)
 
                     self.step += 1
-                    if self.peer_id_logged_to_chain is False:
+                    if self.r2_credentials_logged_to_chain is False:
                         log_peerid_to_chain(self)
 
         # If someone intentionally stops the validator, it'll safely terminate operations.
