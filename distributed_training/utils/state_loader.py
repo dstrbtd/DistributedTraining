@@ -1067,15 +1067,15 @@ def save_and_upload_state(
                 )
                 self.logger.info("Save optimizer")
 
-                # # Save metadata
-                metadata = {
-                    "run": int(__run__),
-                    "outer_step": int(self.local_progress.epoch),
-                    "inner_step": int(self.local_progress.inner_step),
-                    "peer_id": str(self.dht.peer_id.to_base58()),
-                }
-                with open(os.path.join(self.output_dir, f"metadata.json"), "w") as f:
-                    json.dump(metadata, f, indent=4, sort_keys=True)
+                # # # Save metadata
+                # metadata = {
+                #     "run": int(__run__),
+                #     "outer_step": int(self.local_progress.epoch),
+                #     "inner_step": int(self.local_progress.inner_step),
+                #     "peer_id": str(self.dht.peer_id.to_base58()),
+                # }
+                # with open(os.path.join(self.output_dir, f"metadata.json"), "w") as f:
+                #     json.dump(metadata, f, indent=4, sort_keys=True)
 
             # Save inner optimizer state
             inner_optimizer_state = {
@@ -1107,6 +1107,9 @@ def save_and_upload_state(
                 #     bucket=self.config.r2.bucket_name,
                 #     epoch=self.local_progress.epoch,
                 # )
+
+                log_peerid_to_r2(self, prefix=f"epoch-{self.local_progress.epoch}/")
+                log_peerid_to_r2(self)
 
             self.logger.info(
                 f"Successfully pushed new model and optimizer state with tag {epoch} to bucket: {self.config.r2.bucket_name}"

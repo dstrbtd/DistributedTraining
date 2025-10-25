@@ -207,7 +207,7 @@ def r2_download(self, r2, bucket, key, donwload_on_all_ranks=True, destination=N
     return destination_path
 
 
-def log_peerid_to_r2(self):
+def log_peerid_to_r2(self, prefix=""):
     if self.master:
         # Save metadata
         metadata = {

@@ -190,7 +190,7 @@ class BaseNeuron(ABC):
         self.step = 0
 
         # Initialize the all_reduce, download and upload variables.
-        self.allreduce_timeout = 540
+        self.allreduce_timeout = 600
         self.upload_state_duration = 1500
         self.all_reduce_success_status = True
         self.should_all_reduce = False
