@@ -34,7 +34,6 @@ class AveragingHandler:
         local_batch_size_train_effective,
         tokenizer,
         device,
-        output_dir,
         logger,
         parameters_list=None,
     ):
@@ -53,10 +52,9 @@ class AveragingHandler:
         self.number_of_local_steps = (
             self.local_batch_size_train_effective // self.local_batch_size_train
         )
-        self.output_dir = output_dir
+        self.logger = logger
         self.parameters_list = parameters_list
         self.master = True
-        self.logger = logger
 
     def _get_weights_sample(self) -> List[float]:
         """Get a sample of model weights for validation."""
@@ -478,27 +476,28 @@ class AveragingHandler:
         ):
             main_param.data.copy_(opt_param.data, non_blocking=True)
 
-    def reset_main_parameters(self, r2, model_name, epoch):
+    def reset_main_parameters(self, r2, model_name, prefix, use_cache, output_dir):
         """Reset the optimizer parameteres to the parameters at the start of the epoch"""
         try:
-            model_path = r2_download(
-                self,
-                r2=r2,
-                bucket=model_name,
-                key=f"epoch-{epoch}/model.safetensors",
-                donwload_on_all_ranks=False,
-                destination=self.output_dir,
-            )
-            config_path = r2_download(
-                self,
-                r2=r2,
-                bucket=model_name,
-                key=f"epoch-{epoch}/config.json",
-                donwload_on_all_ranks=False,
-                destination=self.output_dir,
-            )
+            if use_cache:
+                _ = r2_download(
+                    self,
+                    r2=r2,
+                    bucket=model_name,
+                    key=f"{prefix}model.safetensors",
+                    donwload_on_all_ranks=False,
+                    destination=output_dir,
+                )
+                _ = r2_download(
+                    self,
+                    r2=r2,
+                    bucket=model_name,
+                    key=f"{prefix}/config.json",
+                    donwload_on_all_ranks=False,
+                    destination=output_dir,
+                )
             main_parameters = AutoModelForCausalLM.from_pretrained(
-                self.output_dir,  # directory containing model files
+                output_dir,  # directory containing model files
                 trust_remote_code=False,
             )
             opt_parameters = [

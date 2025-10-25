@@ -1345,35 +1345,35 @@ class Miner(BaseMinerNeuron):
             dist.broadcast(synapse_completion, src=0, group=self.gloo_group)
             self.logger.info("Synapse Completion" + str(synapse_completion[0].item()))
             if synapse_completion[0].item() == 1:
-                # Archive before updating the epoch
-                if self.master:
-                    upload_attempts_max = 3
-                    uppload_attempt = 0
-                    while uppload_attempt < upload_attempts_max:
-                        try:
-                            self.logger.info(
-                                f"Archiving current bucket to epoch-{self.local_progress.epoch}"
-                            )
-                            archive_root_bucket(
-                                self.r2["write"],
-                                self.config.r2.bucket_name,
-                                epoch=self.local_progress.epoch,
-                            )
-                            self.logger.info(
-                                f"Archived current bucket to epoch-{self.local_progress.epoch}"
-                            )
-                            break
+                # # Archive before updating the epoch
+                # if self.master:
+                #     upload_attempts_max = 3
+                #     uppload_attempt = 0
+                #     while uppload_attempt < upload_attempts_max:
+                #         try:
+                #             self.logger.info(
+                #                 f"Archiving current bucket to epoch-{self.local_progress.epoch}"
+                #             )
+                #             archive_root_bucket(
+                #                 self.r2["write"],
+                #                 self.config.r2.bucket_name,
+                #                 epoch=self.local_progress.epoch,
+                #             )
+                #             self.logger.info(
+                #                 f"Archived current bucket to epoch-{self.local_progress.epoch}"
+                #             )
+                #             break
 
-                        except Exception as e:
-                            uppload_attempt += 1
-                            if uppload_attempt >= upload_attempts_max:
-                                self.logger.info(
-                                    f"Failed to load model, retrying. Attempt {uppload_attempt}/{upload_attempts_max}. Error {str(e)}"
-                                )
-                                self.logger.info(e)
-                else:
-                    time.sleep(900)
-                dist.barrier(group=self.gloo_group)
+                #         except Exception as e:
+                #             uppload_attempt += 1
+                #             if uppload_attempt >= upload_attempts_max:
+                #                 self.logger.info(
+                #                     f"Failed to load model, retrying. Attempt {uppload_attempt}/{upload_attempts_max}. Error {str(e)}"
+                #                 )
+                #                 self.logger.info(e)
+                # else:
+                #     time.sleep(900)
+                # dist.barrier(group=self.gloo_group)
 
                 self.logger.info(f"Apply opt params")
                 self.apply_optimizer_parameters()

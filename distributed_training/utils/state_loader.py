@@ -831,7 +831,6 @@ def load_model_optimizer_gradient_averager(
             self.config.neuron.local_batch_size_train_effective,
             self.tokenizer,
             self.device,
-            self.output_dir,
             self.logger,
             # parameters_list,
         )
@@ -841,7 +840,7 @@ def load_model_optimizer_gradient_averager(
             and ("." in revision)
         ):
             self.avg_handler.reset_main_parameters(
-                r2, local_model_name, self.local_progress.epoch - 1
+                r2, global_model_name, prefix, use_global_cache, global_output_dir
             )
 
     self.logger.info(f"After Loading State {self.print_memory_usage()}")

@@ -24,7 +24,7 @@ ACCEPTED_FILES = [
     "inner_optimizer.rank0003-of-4.pt",
     "inner_optimizer.rank0004-of-4.pt",
     "outer_optimizer.pt",
-    "metadata.json"
+    "metadata.json",
 ]
 
 
