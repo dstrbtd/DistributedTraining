@@ -1098,15 +1098,15 @@ def save_and_upload_state(
                 )
                 # Upload everything in one go
                 upload_folder_to_r2(
-                    r2=self.r2["global"],
+                    r2=self.r2["write"],
                     bucket=self.config.r2.bucket_name,
                 )
 
-                archive_root_bucket(
-                    r2=self.r2["global"],
-                    bucket=self.config.r2.bucket_name,
-                    epoch=self.local_progress.epoch,
-                )
+                # archive_root_bucket(
+                #     r2=self.r2["global"],
+                #     bucket=self.config.r2.bucket_name,
+                #     epoch=self.local_progress.epoch,
+                # )
 
             self.logger.info(
                 f"Successfully pushed new model and optimizer state with tag {epoch} to bucket: {self.config.r2.bucket_name}"

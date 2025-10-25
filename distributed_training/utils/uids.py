@@ -321,7 +321,9 @@ def map_uid_to_peerid(self):
             if uid == self.uid:
                 peer_id = str(self.dht.peer_id.to_base58())
             else:
-                peer_id = get_progress(self, "local", uid=uid, multiple_ranks=False)[2]
+                peer_id = get_progress(
+                    self, "local", uid=uid, donwload_on_all_ranks=False
+                )[2]
 
             if peer_id != self.uid_tracker[uid].all_reduce.peer_id:
                 uid_peerid_metadata = [

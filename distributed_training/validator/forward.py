@@ -363,7 +363,6 @@ async def forward(self):
             self.logger.info("No Active Miners Found This Step.")
             return responses
 
-        self.miner_uids = [i for i in range(10)]
         if self.master:
             self.event.update({"UIDs": self.miner_uids})
         self.logger.info(f"UIDs:  {self.miner_uids}")
