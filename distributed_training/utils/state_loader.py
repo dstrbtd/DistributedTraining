@@ -1113,6 +1113,8 @@ def save_and_upload_state(
                 log_peerid_to_r2(self, prefix=f"epoch-{self.local_progress.epoch}/")
                 log_peerid_to_r2(self)
 
+            else:
+                time.sleep(1000)
             self.logger.info(
                 f"Successfully pushed new model and optimizer state with tag {epoch} to bucket: {self.config.r2.bucket_name}"
             )

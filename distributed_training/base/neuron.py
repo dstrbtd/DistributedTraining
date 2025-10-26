@@ -26,6 +26,7 @@ from abc import ABC, abstractmethod
 import bittensor as bt
 
 from distributed_training import __spec_version__ as spec_version
+from botocore.config import Config
 
 # Sync calls set weights and also resyncs the metagraph.
 from distributed_training.utils.config import (
@@ -198,6 +199,12 @@ class BaseNeuron(ABC):
         self.retry_delay = 60
 
         # Create different r2 sessions
+        r2_config = Config(
+            retries={"max_attempts": 10, "mode": "adaptive"},  # or "standard"
+            connect_timeout=30,
+            read_timeout=120,
+            max_pool_connections=50,
+        )
         self.session = boto3.session.Session()
         self.r2 = {
             "local": self.session.client(
@@ -206,6 +213,7 @@ class BaseNeuron(ABC):
                 aws_access_key_id=self.config.r2.read.access_key_id,
                 aws_secret_access_key=self.config.r2.read.secret_access_key,
                 region_name="auto",
+                config=r2_config,
             )
         }
         self.r2["write"] = boto3.client(
@@ -214,6 +222,7 @@ class BaseNeuron(ABC):
             aws_access_key_id=self.config.r2.write.access_key_id,
             aws_secret_access_key=self.config.r2.write.secret_access_key,
             region_name="auto",
+            config=r2_config,
         )
         commitment = None
         while commitment == None:
@@ -240,6 +249,7 @@ class BaseNeuron(ABC):
                     aws_access_key_id=global_access_key_id,
                     aws_secret_access_key=global_asecret_access_key,
                     region_name="auto",
+                    config=r2_config,
                 )
             except Exception as e:
                 self.logger.info(f"Error getting commitment: {str(e)}")

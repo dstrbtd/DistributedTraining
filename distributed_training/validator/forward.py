@@ -110,8 +110,6 @@ async def forward(self):
                         k=sample_size,
                         epoch=self.local_progress.epoch,
                     )
-                    if min_sample_size > 1:
-                        min_sample_size = min_sample_size - 1
             dist.barrier()
         else:
             # For non-master validators
@@ -311,9 +309,6 @@ async def forward(self):
                         self.logger.info(
                             f"Error reporting allreduce metrics to dashboard {e}"
                         )
-
-                else:
-                    time.sleep(1000)
 
                 self.all_reduce_success_status = (
                     True if all_reduce_success_status_tensor[0].item() == 1 else False

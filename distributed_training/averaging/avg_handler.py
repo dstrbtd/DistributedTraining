@@ -184,6 +184,7 @@ class AveragingHandler:
                         allreduce_timeout=allreduce_timeout,
                         next_chunk_timeout=next_chunk_timeout,
                         min_matchmaking_time=min_matchmaking_time,
+                        timeout=timeout,
                     ),
                     connection_limit=len(miner_uids),
                     timeout=timeout,

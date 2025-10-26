@@ -256,7 +256,7 @@ class Miner(BaseMinerNeuron):
             self.loop.run_until_complete(
                 self.all_reduce_local(
                     distributed_training.protocol.AllReduce(
-                        min_group_size=self.config.neuron.min_group_size, timeout=420
+                        min_group_size=self.config.neuron.min_group_size, timeout=self.allreduce_timeout
                     )
                 )
             )
@@ -400,18 +400,6 @@ class Miner(BaseMinerNeuron):
                     )
                     del gradient_state
 
-                    # Save metadata
-                    metadata = {
-                        "run": int(__run__),
-                        "outer_step": int(self.local_progress.epoch),
-                        "inner_step": int(self.local_progress.inner_step),
-                        "peer_id": str(self.dht.peer_id.to_base58()),
-                    }
-                    with open(
-                        os.path.join(self.output_dir, f"metadata.json"), "w"
-                    ) as f:
-                        json.dump(metadata, f, indent=4, sort_keys=True)
-
                 # Save optimizer state
                 optimizer_state = {
                     "optimizer_state_dict": optim_sd,
@@ -465,6 +453,7 @@ class Miner(BaseMinerNeuron):
                         else:
                             time.sleep(5)
 
+                    log_peerid_to_r2(self, prefix=f"epoch-{self.local_progress.epoch}/")
                     log_peerid_to_r2(self)
 
                     self.logger.info(
@@ -1242,9 +1231,10 @@ class Miner(BaseMinerNeuron):
         self, synapse: distributed_training.protocol.AllReduce
     ) -> distributed_training.protocol.AllReduce:
         self.logger.info("Received Main All Reduce Call")
-        self.all_reduce_flag = 1
 
         # Update gradient averager params to latest synapse values
+        if synapse.timeout is not None:
+            self.allreduce_timeout = synapse.timeout
         if synapse.min_group_size is not None:
             self.grad_averager.matchmaking_kwargs[
                 "min_group_size"
@@ -1262,6 +1252,7 @@ class Miner(BaseMinerNeuron):
                 "min_matchmaking_time"
             ] = synapse.min_matchmaking_time
 
+        self.all_reduce_flag = 1
         return synapse
 
     async def all_reduce_local(
@@ -1345,36 +1336,6 @@ class Miner(BaseMinerNeuron):
             dist.broadcast(synapse_completion, src=0, group=self.gloo_group)
             self.logger.info("Synapse Completion" + str(synapse_completion[0].item()))
             if synapse_completion[0].item() == 1:
-                # # Archive before updating the epoch
-                # if self.master:
-                #     upload_attempts_max = 3
-                #     uppload_attempt = 0
-                #     while uppload_attempt < upload_attempts_max:
-                #         try:
-                #             self.logger.info(
-                #                 f"Archiving current bucket to epoch-{self.local_progress.epoch}"
-                #             )
-                #             archive_root_bucket(
-                #                 self.r2["write"],
-                #                 self.config.r2.bucket_name,
-                #                 epoch=self.local_progress.epoch,
-                #             )
-                #             self.logger.info(
-                #                 f"Archived current bucket to epoch-{self.local_progress.epoch}"
-                #             )
-                #             break
-
-                #         except Exception as e:
-                #             uppload_attempt += 1
-                #             if uppload_attempt >= upload_attempts_max:
-                #                 self.logger.info(
-                #                     f"Failed to load model, retrying. Attempt {uppload_attempt}/{upload_attempts_max}. Error {str(e)}"
-                #                 )
-                #                 self.logger.info(e)
-                # else:
-                #     time.sleep(900)
-                # dist.barrier(group=self.gloo_group)
-
                 self.logger.info(f"Apply opt params")
                 self.apply_optimizer_parameters()
 
