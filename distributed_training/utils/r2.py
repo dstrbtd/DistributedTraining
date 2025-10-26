@@ -221,5 +221,5 @@ def log_peerid_to_r2(self, prefix=""):
         self.r2["write"].upload_file(
             str(os.path.join(self.output_dir, "metadata.json")),
             self.config.r2.bucket_name,
-            f"metadata.json",
+            f"{prefix}metadata.json",
         )
