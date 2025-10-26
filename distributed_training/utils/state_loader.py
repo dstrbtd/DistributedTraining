@@ -27,6 +27,7 @@ from distributed_training.utils.r2 import (
     archive_root_bucket,
     upload_folder_to_r2,
     r2_download,
+    log_peerid_to_r2,
 )
 from distributed_training.averaging.avg_handler import AveragingHandler
 from torch.distributed._tensor import DeviceMesh
@@ -1100,6 +1101,7 @@ def save_and_upload_state(
                 upload_folder_to_r2(
                     r2=self.r2["write"],
                     bucket=self.config.r2.bucket_name,
+                    prefix=f"epoch-{epoch}/",
                 )
 
                 # archive_root_bucket(

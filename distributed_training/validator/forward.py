@@ -306,10 +306,15 @@ async def forward(self):
                             bandwidth=avg_bandwidth,
                         )
                         # -------
+
                     except Exception as e:
                         self.logger.info(
                             f"Error reporting allreduce metrics to dashboard {e}"
                         )
+
+                else:
+                    time.sleep(1000)
+
                 self.all_reduce_success_status = (
                     True if all_reduce_success_status_tensor[0].item() == 1 else False
                 )
