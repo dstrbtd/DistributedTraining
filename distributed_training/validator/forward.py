@@ -158,7 +158,7 @@ async def forward(self):
                 if top_uid_index < len(self.miner_uids):
                     top_uid = self.miner_uids[top_uid_index]
                 else:
-                    top_uid = 1
+                    top_uid = 244
                 self.local_progress.epoch = self.global_progress.epoch
                 self.logger.info(f"Top UID identified as: {top_uid}")
 

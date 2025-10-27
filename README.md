@@ -47,7 +47,7 @@ f"{self.config.neuron.global_model_name}-{uid:03d}"
 ```
 For example uid `1` under a global_model_name `llama-4b-ws-4` would have the name `llama-4b-ws-4-001`.
 
-6. Create READ, WRITE and ADMIN R2 Access tokens to all your applciable R2 buckets. Add them to `.env.example` and rename the file `.env`. 
+6. Create READ and WRITE that cover all your applciable R2 buckets. Add them to `.env.example` and rename the file `.env`. 
 
 7. Install [PM2](https://pm2.io/docs/runtime/guide/installation/) and the [`jq` package](https://jqlang.github.io/jq/) on your system.
 
