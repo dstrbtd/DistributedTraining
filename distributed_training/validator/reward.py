@@ -163,10 +163,8 @@ async def evaluate_model(
                         continue
 
                     inputs = inputs.to(device)
-
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                         outputs = model(input_ids=inputs, labels=inputs)
-
                     total_loss += outputs.loss.item()
                     n_batches_sampled += 1
                     del inputs, labels, outputs

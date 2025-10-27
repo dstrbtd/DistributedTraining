@@ -8,7 +8,7 @@ import traceback
 
 from dotenv import load_dotenv
 from hivemind.utils.logging import use_hivemind_log_handler
-from logging.handlers import QueueHandler, QueueListener
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from multiprocessing import Queue
 
 from distributed_training import __version__, __spec_version__
@@ -218,6 +218,10 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
         shutil.copyfile(local_logfile, local_logfile.replace(".txt", "_archive.txt"))
         os.remove(local_logfile)
 
+    # Setup hivemind logger
+    hivemind_logger = logging.getLogger("hivemind")
+    hivemind_logger.handlers.clear()
+    hivemind_logger.setLevel(logging.DEBUG)
     file_handler = logging.FileHandler(local_logfile)
     file_handler.setLevel(logging.DEBUG)
     file_handler.addFilter(hive_log_filter)
@@ -229,6 +233,8 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
             "%(asctime)s - rank %(rank)s - %(name)s - %(levelname)s - %(message)s"
         )
     )
+    hivemind_logger.addHandler(file_handler)
+    hivemind_logger.propagate = False
 
     # Setup queue logging
     log_queue = Queue(-1)
@@ -254,3 +260,5 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
         if isinstance(logger, logging.Logger):
             if name not in ["bittensor"]:
                 logger.propagate = False
+                if not any(isinstance(h, RotatingFileHandler) for h in logger.handlers):
+                    logger.addHandler(file_handler)

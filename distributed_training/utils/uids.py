@@ -58,7 +58,6 @@ async def check_uid_availability(
         bool: True if uid is available, False otherwise
     """
     # Filter non serving axons.
-
     if not metagraph.axons[uid].is_serving:
         return False
 

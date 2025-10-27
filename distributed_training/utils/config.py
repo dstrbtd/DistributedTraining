@@ -157,11 +157,12 @@ def add_args(cls, parser, prefix=None):
             "/ip4/161.97.156.125/tcp/8000/p2p/12D3KooWRnYaFBVruNqSE87GDjY6PCf9JPMqRfWht7bEXTN14m27",
         ],
     )
+
     parser.add_argument(
         "--neuron.blocks_per_allreduce",
         type=int,
         help="Amount of blocks between each all reduce",
-        default=500,
+        default=250,
     )
 
     parser.add_argument(

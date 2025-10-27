@@ -470,7 +470,8 @@ class AveragingHandler:
             for param in group["params"]
         ]
         for main_param, opt_param in zip(
-            self.state_averager.main_parameters, opt_parameters
+            tuple(self.state_averager.main_parameters[i] for i in self.parameters_list),
+            opt_parameters,
         ):
             main_param.data.copy_(opt_param.data, non_blocking=True)
 

@@ -107,6 +107,7 @@ class Validator(BaseValidatorNeuron):
         success_rate,
         duration,
         participating_miners_count,
+        failed_miners_count,
         bandwidth=None,
     ):
         """Report AllReduce operation metrics to InfluxDB"""
@@ -124,6 +125,7 @@ class Validator(BaseValidatorNeuron):
                     "learning_rate", float(self.inner_optimizer.param_groups[0]["lr"])
                 )
                 .field("participating_miners", int(participating_miners_count))
+                .field("failed_miners", int(failed_miners_count))
             )
 
             if bandwidth is not None:
@@ -166,6 +168,8 @@ class Validator(BaseValidatorNeuron):
                             point = point.field(k, v)
                         else:
                             point = point.field(k, float(v))
+                    elif (k == "all_reduce.peer_id") or (k == "train.model_id"):
+                        point = point.field(k, v)
 
                 points.append(point)
 

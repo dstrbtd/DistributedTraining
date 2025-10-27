@@ -210,5 +210,4 @@ def process_weights_for_netuid(
         x=non_zero_weights, limit=max_weight_limit
     )
     bittensor.logging.debug(f"final_weights: {normalized_weights}")
-
     return non_zero_weight_uids, normalized_weights

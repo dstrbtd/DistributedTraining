@@ -413,7 +413,7 @@ class BaseValidatorNeuron(BaseNeuron):
         # Update the hotkeys.
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
 
-    def update_scores(self):
+    def update_scores(self, uids: List[int]):
         """Performs exponential moving average on the scores based on the rewards received from the miners."""
 
         #  Make sure uid_tracker is sorted by uids
