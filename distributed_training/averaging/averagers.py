@@ -34,6 +34,27 @@ from hivemind.utils.asyncio import (
 from hivemind.utils.streaming import split_for_streaming
 from hivemind.utils.timed_storage import DHTExpiration, get_dht_time
 
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
+
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    StateDictOptions,
+    set_model_state_dict,
+)
+import torch.distributed as dist
+import gc
+
+
 GatheredData = Any
 
 hivemind_logger = get_logger(__name__)
@@ -521,6 +542,8 @@ class DTGradAverager(DTAverager):
         dht: DHT,
         prefix: str,
         warn: bool = True,
+        local_rank: int = 0,
+        world_size: int = 1,
         **kwargs,
     ):
         if "averaged_grads" in kwargs:
@@ -542,6 +565,9 @@ class DTGradAverager(DTAverager):
         self._new_averaged_grads = False
 
         averaged_grads = tuple(grad for grad in self._grads_from_optimizer())
+
+        self.local_rank = local_rank
+        self.world_size = world_size
 
         super().__init__(
             averaged_tensors=averaged_grads,
@@ -597,7 +623,7 @@ class DTGradAverager(DTAverager):
         if control is None:
             control = self.schedule_step(timeout=timeout, **kwargs)
 
-        self.compute_and_load_pseudo_grad_into_averager()
+        # self.compute_and_load_pseudo_grad_into_averager()
         control.allow_allreduce()
 
         return control.result(timeout) if wait else control
@@ -618,6 +644,11 @@ class DTGradAverager(DTAverager):
                 # main_param is the param that has been updated by the inner optimizer, it is suppose to be on gpu
                 grad = opt_param.data - main_param.detach().to(opt_param.device)
                 averaged_grad.copy_(grad, non_blocking=True)
+
+    # worker1, worker2, ... define this
+    def get_param_shard(self, idx: int) -> torch.Tensor:
+        # idx is the index into self.main_parameters
+        return self.main_parameters[idx]
 
     def notify_used_averaged_gradients(self):
         """Notify averager that the results of a previous averaging round are accounted for"""
@@ -660,29 +691,70 @@ class DTGradAverager(DTAverager):
             break
 
 
-class DTStateAverager(TrainingStateAverager):
-    def __init__(
-        self,
-        **kwargs,
-    ):
-        super().__init__(
-            **kwargs
-        )  # we specifically don't pass the scheduler here, default TrainingStateAverager would use it with the outer optimizer and we w
+@torch.no_grad()
+def compute_and_load_pseudo_grad_into_averager(self):
+    """
+    Rank 0 only:
+    - Requests shards via RPC from other ranks one at a time.
+    - Reconstructs parameter shard by shard on CPU.
+    - Computes pseudo-gradients and loads into averager.
+    """
+    # assert self.local_rank == 0, "Only rank 0 should call this function!"
 
-    def reset_main_parameters(self, model_name, revision):
-        """Reset the optimizer parameteres to the parameters at the start of the epoch"""
-        try:
-            main_parameters = AutoModelForCausalLM.from_pretrained(
-                model_name, revision=revision, trust_remote_code=True
-            )
-            opt_parameters = [
-                param
-                for group in self.optimizer.param_groups
-                for param in group["params"]
-            ]
-            for main_param, opt_param in zip(
-                tuple(main_parameters.parameters()), opt_parameters
+    opts = StateDictOptions(
+        full_state_dict=True, cpu_offload=True
+    )  # gather to CPU on rank 0
+    full_state = get_model_state_dict(self.model, options=opts)
+    if self.master:
+        opt_parameters = [
+            p for g in self.outer_optimizer.param_groups for p in g["params"]
+        ]
+        with self.grad_averager.get_tensors() as averaged_grads:
+            for idx, (opt_param, averaged_grad, named_main_param) in enumerate(
+                zip(opt_parameters, averaged_grads, full_state.items())
             ):
-                opt_param.data.copy_(main_param.data, non_blocking=True)
-        except Exception as e:
-            bt.logging.info(f"Failed to reset optimizer parameters with error: {e}")
+                _, submod = named_main_param
+                # opt_param is the param that will be all_reduce, it is suppose to be on cpu
+                # main_param is the param that has been updated by the inner optimizer, it is suppose to be on gpu
+                grad = opt_param.data - submod.detach().to(opt_param.device)
+                averaged_grad.copy_(grad, non_blocking=True)
+
+
+@torch.no_grad()
+def apply_optimizer_parameters(self):
+    dist.barrier(group=self.gloo_group)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    opts_get = StateDictOptions(
+        full_state_dict=True,
+        cpu_offload=True,
+    )
+    full_state = get_model_state_dict(self.model, options=opts_get)
+    self.logger.info("Full state")
+
+    if self.master:
+        # Flatten optimizer params in the same order every time
+        offloaded_parameters = [
+            p for g in self.outer_optimizer.param_groups for p in g["params"]
+        ]
+        assert len(offloaded_parameters) == len(
+            full_state
+        ), f"mismatch: {len(offloaded_parameters)} vs {len(full_state)}"
+        # full_state values are plain CPU tensors here (no DTensor)
+        for (name, tensor), off_t in zip(full_state.items(), offloaded_parameters):
+            assert isinstance(tensor, torch.Tensor) and tensor.device.type == "cpu"
+            tensor.copy_(off_t, non_blocking=True)
+
+    opts_set = StateDictOptions(
+        full_state_dict=True,
+        cpu_offload=True,
+        broadcast_from_rank0=True,
+    )
+    # Push back into the model (reshard). All ranks must enter.
+    set_model_state_dict(
+        model=self.model, model_state_dict=full_state, options=opts_set
+    )
+
+    del full_state
+    gc.collect()
+    torch.cuda.empty_cache()

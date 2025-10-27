@@ -227,17 +227,20 @@ class DatasetLoader(SubsetLoader):
         offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100
     ):
         configs_data = await DatasetLoader.fetch_dataset_configs()
+        keys = sorted(configs_data.keys())
         rng = np.random.default_rng(
             hash(seed) & 0xFFFFFFFF
         )  # Create a generator with a seed
         rng.bit_generator.advance(offset)  # Efficiently skip ahead `n` steps
         result = []
         for _ in range(n_pages):
+            idx = rng.integers(0, len(keys))
+            cfg = keys[idx]
             config = rng.choice(list(configs_data.keys()))
             choice = rng.integers(
-                0, configs_data[config]["num_rows"] - 1 - num_rows_per_page
+                0, configs_data[cfg]["num_rows"] - 1 - num_rows_per_page
             )
-            result.append((str(config), int(choice), configs_data[config]["split"]))
+            result.append((cfg, int(choice), configs_data[cfg]["split"]))
         return result
 
     def __init__(
@@ -287,14 +290,17 @@ class DatasetLoader(SubsetLoader):
 
         return self
 
-    async def _fetch(self, page_info: typing.Tuple[str, int, str]):
+    async def _fetch(self, page_info: typing.Tuple[str, int, str], batch_size: int = 5):
         self.pages = list(page_info)
+
         async with aiohttp.ClientSession() as session:
-            tasks = [
-                self._fetch_data_for_page((config_name, page, split), session)
-                for (config_name, page, split) in self.pages
-            ]
-            await asyncio.gather(*tasks)
+            for i in range(0, len(self.pages), batch_size):
+                batch = self.pages[i : i + batch_size]
+                tasks = [
+                    self._fetch_data_for_page((config_name, page, split), session)
+                    for (config_name, page, split) in batch
+                ]
+                await asyncio.gather(*tasks)
 
     async def _fetch_data_to_buffer(self, num_pages):
         """
@@ -383,10 +389,10 @@ class DatasetLoader(SubsetLoader):
                 # Handle HTTP client errors with a retry mechanism
                 attempt += 1
                 if attempt < retry_limit:
-                    self.logger.info(
+                    self.logger.debug(
                         f"Retrying page {page} due to error: {e}. Attempt {attempt} of {retry_limit}"
                     )
-                    self.logger.info(
+                    self.logger.debug(
                         f"Waiting {self.retry_delay * attempt} seconds before retrying..."
                     )
                     await asyncio.sleep(

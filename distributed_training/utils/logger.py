@@ -49,7 +49,7 @@ class JSONFormatter(logging.Formatter):
     def __init__(self, miner):
         self.network = miner.config.subtensor.network
         self.netuid = miner.config.netuid
-        self.hotkey = miner.wallet.hotkey.ss58_address
+        self.hotkey = miner.wallet.hotkey.ss58_address if miner.master else None
         self.version = __version__
         self.spec_version = __spec_version__
         self.run_id = None
@@ -104,6 +104,19 @@ def hive_log_filter(record):
         "hivemind.optim.progress_tracker",
         "hivemind.p2p.p2p_daemon_bindings.control",
     }
+
+
+class RankFilter(logging.Filter):
+    def __init__(self, rank, show_all_rank_logs):
+        super().__init__()
+        self.rank = rank
+        self.show_all_rank_logs = show_all_rank_logs
+
+    def filter(self, record):
+        # Add ANSI escape code for bold: \033[1m … \033[0m
+        record.rank = f"\033[1mRank {self.rank}\033[0m"
+        # return True
+        return self.rank == 0 if (self.show_all_rank_logs is False) else True
 
 
 def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
@@ -163,13 +176,26 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)  # Capture all levels
 
+    # Attach rank filter to all loggers
+    rank_filter = RankFilter(self.local_rank, self.config.neuron.show_all_rank_logs)
+    root_logger.addFilter(rank_filter)
+    bt_logger.addFilter(rank_filter)
+
+    # Create rank-aware formatter
+    terminal_formatter = logging.Formatter(
+        "   %(rank)s    | %(message)s",
+    )
+    for handler in bt_logger.handlers:
+        handler.addFilter(rank_filter)
+        handler.setFormatter(terminal_formatter)
+
     # Loki handler with extra labels
     loki_handler = LokiHandler(
         url="https://logs-prod-006.grafana.net/loki/api/v1/push",
         tags={
             "application": "distributed_training",
             "level": "dynamic",  # Will be overridden dynamically
-            "hotkey": self.wallet.hotkey.ss58_address,
+            "hotkey": self.wallet.hotkey.ss58_address if self.master else None,
             "netuid": str(self.config.netuid),
         },
         auth=("944477", os.getenv("LOKI_KEY")),
@@ -188,7 +214,7 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
     loki_handler.emit = dynamic_label_emit
 
     # File handler for Hivemind
-    if os.path.exists(local_logfile):
+    if os.path.exists(local_logfile) and self.master:
         shutil.copyfile(local_logfile, local_logfile.replace(".txt", "_archive.txt"))
         os.remove(local_logfile)
 
@@ -199,8 +225,13 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
     file_handler = logging.FileHandler(local_logfile)
     file_handler.setLevel(logging.DEBUG)
     file_handler.addFilter(hive_log_filter)
+    file_handler.addFilter(
+        RankFilter(self.local_rank, self.config.neuron.rank_0_only_log)
+    )
     file_handler.setFormatter(
-        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        logging.Formatter(
+            "%(asctime)s - rank %(rank)s - %(name)s - %(levelname)s - %(message)s"
+        )
     )
     hivemind_logger.addHandler(file_handler)
     hivemind_logger.propagate = False
@@ -210,11 +241,19 @@ def setup_logging(self, local_logfile="logs_mylogfile.txt", config=None):
     queue_handler = QueueHandler(log_queue)
     root_logger.addHandler(queue_handler)
 
+    listener = QueueListener(log_queue, loki_handler, file_handler)
     listener = QueueListener(log_queue, loki_handler)
     listener.start()
 
     # Disable noisy hivemind default logging
     use_hivemind_log_handler("nowhere")
+
+    for name in logging.root.manager.loggerDict:
+        if name.startswith("hivemind"):
+            logger = logging.getLogger(name)
+            logger.addHandler(file_handler)
+            logger.propagate = False
+            logger.setLevel(logging.DEBUG)
 
     # Disable propagation for other loggers
     for name, logger in logging.root.manager.loggerDict.items():

@@ -37,24 +37,30 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 from distributed_training import __run__
 from distributed_training.data.dataset import DatasetLoader
-from distributed_training.utils.progress_tracker import (
-    get_local_epoch,
-    get_local_inner_step,
-)
+from distributed_training.utils.progress_tracker import get_progress, get_r2_client
 from distributed_training.utils.state_loader import (
-    check_model_exists,
     cleanup_old_cache,
     load_state_from_peer,
 )
+from distributed_training.utils.r2 import r2_download
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    StateDictOptions,
+    set_model_state_dict,
+)
 
-from huggingface_hub import hf_hub_download
 from rich.console import Console
 from rich.table import Table
+
+import torch.distributed as dist
+import email.utils
+from datetime import datetime, timezone
+from botocore.session import get_session
 
 # Set scoring weights
 TRAIN_SCORE_WEIGHT = 0.75
 ALL_REDUCE_SCORE_WEIGHT = 0.25
-MAX_UPLOAD_INTERVAL = 1800  # Seconds
+MAX_UPLOAD_INTERVAL = 2400  # Seconds
 
 api = HfApi()
 
@@ -80,17 +86,24 @@ async def fetch_training_data(
             pages = await DatasetLoader.next_pages(
                 offset=block,
                 n_pages=n_pages,
-                seed=uid,
+                seed=uid + self.local_rank,
             )
-            random.seed(uid)
-            random.shuffle(pages)
+            rng = np.random.default_rng(hash(self.uid) & 0xFFFFFFFF)
+            rng.shuffle(pages)
+
+            self.logger.debug(pages)
 
             dataset = await DatasetLoader.create(
-                batch_size=self.local_batch_size_train,
+                batch_size=self.config.neuron.local_batch_size_train,
                 sequence_length=1024,
                 pages_info=pages,
                 tokenizer=self.tokenizer,
             )
+
+            dataset_length = torch.tensor(len(dataset.buffer))
+            dist.all_reduce(dataset_length, op=dist.ReduceOp.MIN, group=self.gloo_group)
+            dataset.buffer = dataset.buffer[:dataset_length]
+            self.logger.debug("Dataset Buffer Length", len(dataset.buffer))
 
             return dataset
         except Exception as e:
@@ -160,7 +173,7 @@ async def evaluate_model(
     return total_loss, n_batches_total, n_batches_sampled
 
 
-async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
+async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix):
     """
     Apply pseudo gradient for a UID and evaluate loss before and after.
 
@@ -189,23 +202,31 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
 
     # 2. Load and apply pseudo gradient
     self.logger.info(f"UID {uid:03d}: Applying pseudo gradient")
-    model_t1 = copy.deepcopy(model_base)
 
-    gradient = torch.load(
-        hf_hub_download(
-            repo_id=self.uid_tracker[uid].train.model_id,
-            filename="gradients.pt",
-            revision=revision,
+    model_t1 = model_base
+
+    r2 = get_r2_client(self, uid, donwload_on_all_ranks=True)
+    self.logger.info(f"UID {uid:03d}: Got r2 client")
+    gradient_path = r2_download(
+        self,
+        r2=r2,
+        bucket=f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
+        key=f"{prefix}gradients.pt",
+        donwload_on_all_ranks=False,
+        destination=os.path.join(
+            os.getcwd(),
+            f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
         ),
+    )
+    dist.barrier()
+    gradient = torch.load(
+        gradient_path,
         weights_only=True,
         map_location="cpu",
     )
     gradient.pop("metadata")
 
-    self.logger.info(
-        f"UID {uid:03d}: Gradient loaded from {self.uid_tracker[uid].train.model_id} "
-        f"with revision {revision}"
-    )
+    self.logger.info(f"UID {uid:03d}: Gradient loaded with revision {revision}")
     self.update_model_with_pseudo_gradient(model=model_t1, uid=uid, state_dict=gradient)
     self.logger.info(f"UID {uid:03d}: Model updated with current gradient")
 
@@ -230,7 +251,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision):
     torch.cuda.empty_cache()
 
     # Remove repo from cache
-    cleanup_old_cache(self, repo_id=self.uid_tracker[uid].train.model_id)
+    cleanup_old_cache(self)
 
     return average_loss_before, average_loss_after
 
@@ -247,24 +268,28 @@ def compute_loss_improvement(before: float, after: float) -> dict:
     }
 
 
-def get_uids_blocks(self, uid: int, revision: str) -> list[int]:
+def get_uids_blocks(self, uid: int, prefix=str) -> list[int]:
     """"""
-    uid_blocks = json.load(
-        open(
-            hf_hub_download(
-                repo_id=self.uid_tracker[uid].train.model_id,
-                filename="config.json",
-                revision=revision,
-            )
-        )
-    )["block_list"]
-    if (self.current_block - max(uid_blocks)) > (
-        self.config.neuron.blocks_per_allreduce / 2
-    ):
+    bucket_name = f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}"
+    r2 = get_r2_client(self, uid, donwload_on_all_ranks=True)
+    config_path = r2_download(
+        self,
+        r2=r2,
+        bucket=bucket_name,
+        key=f"{prefix}config.json",
+        donwload_on_all_ranks=True,
+        destination=bucket_name,
+    )
+    uid_blocks = json.load(open(config_path))["block_list"]
+    if False:
+        # if (self.current_block - max(uid_blocks)) > (
+        #     self.config.neuron.blocks_per_allreduce / 2
+        # ):
         raise Exception(
             f"Uploaded datatset block older than {((self.config.neuron.blocks_per_allreduce / 2) *12) / 60} minutes"
         )
     else:
+        random.seed(uid)
         assgined_blocks = random.sample(uid_blocks, 1)
         return assgined_blocks
 
@@ -308,36 +333,69 @@ async def score_uids(self, uids: list):
         self.blocks_since_allreduce < (self.config.neuron.blocks_per_allreduce / 2)
     ) and (self.global_progress.epoch != 0):
         epoch = self.global_progress.epoch - 1
+        prefix = f"epoch-{epoch}/"
     else:
         epoch = self.global_progress.epoch
-    model_huggingface_id = self.config.neuron.global_model_name
+        prefix = ""
+    prefix = f"epoch-{epoch}/"
+
     test_time = time.time()
 
-    # Sample a random evaluation block
-    random_blocks = random.sample(
-        range(self.current_block + 20, self.current_block * 10), 1
-    )
+    if self.master:
+        # Sample a random evaluation block
+        random_blocks = random.sample(
+            range(self.current_block + 20, self.current_block * 10), 1
+        )
+    else:
+        random_blocks = [self.current_block]
+    dist.broadcast_object_list(random_blocks, src=0, group=self.gloo_group)
+    self.logger.info(random_blocks)
 
     # Get revisions for all UIDs
-    for uid in uids:
-        self.uid_tracker[
-            uid
-        ].train.revision = f"{__run__}.{epoch}.{get_local_inner_step(self, repo_id=self.uid_tracker[uid].train.model_id, epoch=epoch)}"
+    if self.master:
+        for uid in uids:
+            self.uid_tracker[
+                uid
+            ].train.revision = f"{__run__}.{epoch}.{get_progress(self, 'local', uid=uid, donwload_on_all_ranks=False)[1]}"
 
     # Sync global model if behind
     if self.local_progress.epoch != epoch:
         load_state_from_peer(
             self,
-            repo_id=model_huggingface_id,
+            uid=self.master_uid,
             epoch=epoch,
             reload_inner_optimizer=True,
             reload_outer_optimizer=False,
             use_fallback_model=False,
         )
 
+    # Extract model state for future resets
+    model_state_dict = get_model_state_dict(
+        self.model,
+        options=StateDictOptions(
+            full_state_dict=False,  # Only save local shards, not full model
+            cpu_offload=True,  # Automatically offload to CPU
+        ),
+    )
     for uid in uids:
+        score_status = torch.tensor([0])
         try:
-            revision = self.uid_tracker[uid].train.revision
+            # Reset model state dict before an evaluation
+            set_model_state_dict(
+                self.model,
+                dict(model_state_dict),
+                options=StateDictOptions(
+                    full_state_dict=False,  # We saved only local shards, so load them back as such
+                    strict=True,  # Ensure all keys match
+                ),
+            )
+
+            if self.master:
+                revision_list = [self.uid_tracker[uid].train.revision]
+            else:
+                revision_list = [""]
+            dist.broadcast_object_list(revision_list, src=0, group=self.gloo_group)
+            revision = revision_list[0]
 
             # Revision Checks
             if revision.split(".")[-1] == 0:
@@ -354,11 +412,13 @@ async def score_uids(self, uids: list):
                     model_base=self.model,
                     blocks=random_blocks,
                     revision=revision,
+                    prefix=prefix,
                 )
             )
 
-            for k, v in loss_scores.items():
-                setattr(self.uid_tracker[uid].train.random, k, v)
+            if self.master:
+                for k, v in loss_scores.items():
+                    setattr(self.uid_tracker[uid].train.random, k, v)
 
             self.logger.info(
                 f"UID {uid:03d}: Random <=> Absolute loss improvement: {loss_scores['absolute']:.6f}"
@@ -372,7 +432,9 @@ async def score_uids(self, uids: list):
             # ──────────────────────────────────────────────────────────────────────────
 
             self.logger.info(f"UID {uid:03d}: Sampling dataset indices for testing")
-            assigned_block = get_uids_blocks(self, uid, revision)
+            self.set_current_block_across_ranks()
+            assigned_block = get_uids_blocks(self, uid, prefix)
+            self.logger.info(assigned_block)
 
             loss_scores = compute_loss_improvement(
                 *await evaluate_with_gradient(
@@ -381,11 +443,13 @@ async def score_uids(self, uids: list):
                     model_base=self.model,
                     blocks=assigned_block,
                     revision=revision,
+                    prefix=prefix,
                 )
             )
 
-            for k, v in loss_scores.items():
-                setattr(self.uid_tracker[uid].train.assigned, k, v)
+            if self.master:
+                for k, v in loss_scores.items():
+                    setattr(self.uid_tracker[uid].train.assigned, k, v)
 
             self.logger.info(
                 f"UID {uid:03d}: Assigned <=> Absolute loss improvement: {loss_scores['absolute']:.6f}"
@@ -393,61 +457,63 @@ async def score_uids(self, uids: list):
             self.logger.info(
                 f"UID {uid:03d}: Assigned <=> Relative loss improvement: {loss_scores['relative']:.6f}"
             )
+            score_status = torch.tensor([1])
 
         except Exception as e:
             self.logger.info(f"UID {uid:03d}: Error calculating loss score: {e}")
-            reset_uid_train_scores(self, uid)
 
         finally:
-            # Mark update time for UID
-            self.uid_tracker[uid].train.updated_time = test_time
+            dist.all_reduce(score_status, group=self.gloo_group)
+            self.logger.info(f"UID {uid:03d}: Score status {score_status[0].item()}")
+            if (score_status[0].item() != self.world_size) and self.master:
+                reset_uid_train_scores(self, uid)
+            elif self.master:
+                # Mark update time for UID
+                self.uid_tracker[uid].train.updated_time = test_time
 
     # Remove stale gradient cache
     cleanup_old_cache(self)
 
 
-def score_repo(self, repo_id: str) -> bool:
+def score_repo(self, uid: int, prefix: str) -> bool:
     """
-    Check if the model repository is valid and udpated in the last 20 minutes.
-
-    Args:
-        repo_id (str): huggingface repository ID of the model.
-
-    Returns:
-        bool: True if the model is valid and up-to-date, False otherwise.
+    Check if the miner's R2 manifest exists and is recent enough.
     """
-    local_config = AutoConfig.from_pretrained(repo_id, trust_remote_code=True)
-    if (
-        (self.global_model_config.hidden_size != local_config.hidden_size)
-        or (
-            self.global_model_config.num_attention_heads
-            != local_config.num_attention_heads
+    bucket_name = f"{self.config.neuron.global_model_name}-{uid:03d}"
+    r2 = get_r2_client(self, uid, donwload_on_all_ranks=False)
+    try:
+        response = r2.head_object(Bucket=bucket_name, Key=f"{prefix}gradients.pt")
+        last_modified = (
+            email.utils.parsedate_to_datetime(
+                response["LastModified"].strftime("%a, %d %b %Y %H:%M:%S GMT")
+            )
+            if isinstance(response["LastModified"], datetime)
+            else email.utils.parsedate_to_datetime(response["LastModified"])
         )
-        or (
-            self.global_model_config.num_hidden_layers != local_config.num_hidden_layers
-        )
-        or (
-            self.global_model_config.num_key_value_heads
-            != local_config.num_key_value_heads
-        )
-    ):
-        return False
-    latest_commit = api.repo_info(repo_id).lastModified
 
-    if (datetime.now(pytz.utc) - latest_commit).seconds > MAX_UPLOAD_INTERVAL:
+        age_seconds = (datetime.now(timezone.utc) - last_modified).total_seconds()
+        return age_seconds < MAX_UPLOAD_INTERVAL
+    except Exception as e:
+        self.logger.info(f"UID {uid:03d}: Manifest check failed — {e}")
         return False
-    return True
 
 
 def benchmark_uids(self):
     """
     Benchmark each UID by checking if their model is valid and up-to-date.
     """
+    if (
+        self.blocks_since_allreduce < (self.config.neuron.blocks_per_allreduce / 2)
+    ) and (self.global_progress.epoch != 0):
+        epoch = self.global_progress.epoch - 1
+        prefix = f"epoch-{epoch}/"
+    else:
+        epoch = self.global_progress.epoch
+        prefix = ""
+
     for uid in self.uid_tracker:
         try:
-            self.uid_tracker[uid].train.is_valid = score_repo(
-                self, self.uid_tracker[uid].train.model_id
-            )
+            self.uid_tracker[uid].train.is_valid = score_repo(self, uid, prefix)
         except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
             # self.logger.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
             self.uid_tracker[uid].train.is_valid = False
@@ -609,6 +675,8 @@ def update_all_reduce_scores(self):
                     score = 1
                 else:
                     score = 0
+                if int(uid) not in self.uid_tracker:
+                    continue
                 if self.uid_tracker[int(uid)].all_reduce.score != score:
                     self.uid_tracker[int(uid)].all_reduce.count += 1
                 self.uid_tracker[int(uid)].all_reduce.score = score

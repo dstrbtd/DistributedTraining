@@ -16,7 +16,9 @@
 # DEALINGS IN THE SOFTWARE.
 
 
+import boto3
 import os
+import time
 
 os.environ["NEST_ASYNCIO"] = "0"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
@@ -47,7 +49,8 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 from transformers import AutoTokenizer
 
 from distributed_training.base.validator import BaseValidatorNeuron
-from distributed_training.utils.chain import log_peerid_to_chain
+from distributed_training.utils.chain import log_r2_to_chain
+from distributed_training.utils.r2 import log_peerid_to_r2
 from distributed_training.utils.misc import (
     init_dht,
     load_wandb,
@@ -56,12 +59,11 @@ from distributed_training.utils.logger import setup_logging
 from distributed_training.utils.progress_tracker import (
     GlobalTrainingProgress,
     LocalTrainingProgress,
-    get_global_epoch,
+    get_progress,
 )
 from random import randrange
 from distributed_training.utils.state_loader import (
     cleanup_old_cache,
-    load_model_optimizer_gradient_averager,
     load_state_from_peer,
 )
 from distributed_training.utils.uids import map_uid_to_peerid, update_run_peerid_list
@@ -71,10 +73,21 @@ from distributed_training import __run__
 from distributed_training.utils.compression import CompressDCT, TransformDCT
 from typing import Any
 
+import torch.distributed as dist
+from torch.distributed.checkpoint.state_dict import (
+    set_model_state_dict,
+)
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    StateDictOptions,
+)
+
 
 class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super(Validator, self).__init__(config=config)
+
+        self.set_current_block_across_ranks()
         self._update_wandb_project()
         self._init_basic_components()
         self._init_model_components()
@@ -183,36 +196,39 @@ class Validator(BaseValidatorNeuron):
             self.logger.error(f"Error reporting scoring metrics: {e}")
 
     def _init_metrics_collection(self):
-        # Initialize InfluxDB client
-        self.influx_client = None
-        self.influx_write_api = None
-        try:
-            self.logger.info(
-                "Attempting to initialize InfluxDB client for metrics collection..."
-            )
-            self.influx_client = InfluxDBClient(
-                url=self.config.neuron.influxdb_url,
-                token=self.config.neuron.influxdb_token,
-                org=self.config.neuron.influxdb_org,
-            )
-            self.influx_write_api = self.influx_client.write_api(
-                write_options=SYNCHRONOUS
-            )
-            self.logger.info("InfluxDB client and write_api initialized successfully.")
-
-        except Exception as e:
-            self.logger.error(
-                f"Failed to initialize InfluxDB client: {e}. Metrics collection will be disabled."
-            )
-            if self.influx_client:
-                try:
-                    self.influx_client.close()
-                except Exception as close_e:
-                    self.logger.error(
-                        f"Error closing InfluxDB client during cleanup: {close_e}"
-                    )
+        if self.master:
+            # Initialize InfluxDB client
             self.influx_client = None
             self.influx_write_api = None
+            try:
+                self.logger.info(
+                    "Attempting to initialize InfluxDB client for metrics collection..."
+                )
+                self.influx_client = InfluxDBClient(
+                    url=self.config.neuron.influxdb_url,
+                    token=self.config.neuron.influxdb_token,
+                    org=self.config.neuron.influxdb_org,
+                )
+                self.influx_write_api = self.influx_client.write_api(
+                    write_options=SYNCHRONOUS
+                )
+                self.logger.info(
+                    "InfluxDB client and write_api initialized successfully."
+                )
+
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to initialize InfluxDB client: {e}. Metrics collection will be disabled."
+                )
+                if self.influx_client:
+                    try:
+                        self.influx_client.close()
+                    except Exception as close_e:
+                        self.logger.error(
+                            f"Error closing InfluxDB client during cleanup: {close_e}"
+                        )
+                self.influx_client = None
+                self.influx_write_api = None
 
     def _init_basic_components(self):
         """Initialize basic validator components"""
@@ -220,14 +236,13 @@ class Validator(BaseValidatorNeuron):
 
         # Core setup
         self.device = self.config.neuron.device
-        self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         init_dht(self)
 
         # Progress tracking
         self._init_progress_tracking()
 
         # Wandb setup
-        if not self.config.neuron.dont_wandb_log:
+        if (not self.config.neuron.dont_wandb_log) and self.master:
             self.wandb = load_wandb(
                 self, self.config, self.wallet, "validator", str(self.dht.peer_id)
             )
@@ -237,7 +252,7 @@ class Validator(BaseValidatorNeuron):
 
     def _init_progress_tracking(self):
         self.local_progress = LocalTrainingProgress(
-            peer_id=self.dht.peer_id.to_bytes(),
+            peer_id=self.dht.peer_id.to_bytes() if self.master else b"",
             epoch=0,
             samples_accumulated=0,
             samples_per_second=0.0,
@@ -247,7 +262,7 @@ class Validator(BaseValidatorNeuron):
             loss=0.0,
         )
         self.global_progress = GlobalTrainingProgress(epoch=0, samples_accumulated=0)
-        self.global_progress.epoch = get_global_epoch(self)
+        self.global_progress.epoch = get_progress(self, "global")[0]
         self.local_progress.epoch = self.global_progress.epoch
 
         if self.global_progress.epoch is None:
@@ -268,7 +283,7 @@ class Validator(BaseValidatorNeuron):
         self.load_state_timeout = 180
 
         # Core parameters
-        self.learning_rate_maximum = 4e-4
+        self.learning_rate_maximum = 2.5e-4
         self.learning_rate_eval = 0.5
         self.weight_decay = 0.1
         self.num_inner_steps = 500
@@ -283,7 +298,7 @@ class Validator(BaseValidatorNeuron):
 
     def _init_tokenizer(self):
         self.tokenizer = AutoTokenizer.from_pretrained(
-            self.config.neuron.global_model_name, use_fast=True
+            self.config.neuron.global_tokenizer_name, use_fast=True
         )
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -291,10 +306,8 @@ class Validator(BaseValidatorNeuron):
         self.learning_rate = self.get_learning_rate()
         self.average_loss = None
 
-        load_model_optimizer_gradient_averager(
-            self, self.config.neuron.global_model_name, self.global_progress.epoch
-        )
-        # cleanup_old_cache(self)
+        load_state_from_peer(self, self.master_uid, self.global_progress.epoch)
+        cleanup_old_cache(self)
 
         if self.local_progress.epoch < self.global_progress.epoch:
             load_state_from_peer(self, epoch=self.global_progress.epoch)
@@ -302,7 +315,7 @@ class Validator(BaseValidatorNeuron):
     def _setup_training_params(self):
         self.local_batch_size_train = self.config.neuron.local_batch_size_train
         self.local_batch_size_train_effective = (
-            self.config.neuron.local_batch_size_train_effective
+            self.config.neuron.local_batch_size_train_effective / self.world_size
         )
         self.logging_interval = 5
         self.number_of_local_steps = (
@@ -316,7 +329,8 @@ class Validator(BaseValidatorNeuron):
     def _init_network_components(self):
         """Initialize network and P2P components"""
         self.logger.info("Logging PeerID to chain")
-        log_peerid_to_chain(self)
+        log_r2_to_chain(self)
+        log_peerid_to_r2(self)
 
     def _init_uid_components(self):
         self._setup_uids()
@@ -324,42 +338,53 @@ class Validator(BaseValidatorNeuron):
         self._setup_allreduce_block()
 
     def _setup_uids(self):
-        self.master_uid = self.metagraph.hotkeys.index(
-            self.config.neuron.master_ss58_address,
-        )
-        self.failed_is_alive_counter = {uid: 0 for uid in self.metagraph.uids.tolist()}
-        self.miner_uids = []
+        if self.master:
+            self.failed_is_alive_counter = {
+                uid: 0 for uid in self.metagraph.uids.tolist()
+            }
+            self.miner_uids = []
 
     def _load_gradient_compressors(self):
-        # Init compression
-        self.transformer = TransformDCT(
-            self.model, target_chunk=self.config.neuron.target_chunk
-        )
-        self.compressor = CompressDCT(
-            use_quantization=True,
-            quantization_bins=self.config.neuron.quantization_bins,
-            quantization_range=self.config.neuron.quantization_range,
-        )
-        self.xshapes = {}
-        self.totalks = {}
-        self.error_feedback = {}
-        self.owned_params = set()
-        for n, p in self.model.named_parameters():
-            self.owned_params.add(n)
-            self.error_feedback[n] = torch.zeros_like(p, device=self.device)
-            _, _, xshape, totalk = self.compressor.compress(
-                self.transformer.encode(
-                    torch.zeros_like(p), use_dct=self.config.neuron.use_dct
-                ),
-                self.config.neuron.topk_compression,
+        self.logger.info("Load Start")
+        dist.barrier(device_ids=[self.local_rank])
+        opts = StateDictOptions(
+            full_state_dict=True, cpu_offload=True
+        )  # gather to CPU on rank 0
+        full_state = get_model_state_dict(self.model, options=opts)
+        self.logger.info("Full state")
+        if self.master:
+            # Init compression
+            self.transformer = TransformDCT(
+                full_state, target_chunk=self.config.neuron.target_chunk
             )
-            self.xshapes[n] = xshape
-            self.totalks[n] = totalk
+            self.compressor = CompressDCT(
+                use_quantization=True,
+                quantization_bins=self.config.neuron.quantization_bins,
+                quantization_range=self.config.neuron.quantization_range,
+            )
+            self.logger.info("Compressor Loaded")
+            self.xshapes = {}
+            self.totalks = {}
+            self.error_feedback = {}
+            self.owned_params = set()
+            for n, p in full_state.items():
+                self.owned_params.add(n)
+                self.error_feedback[n] = torch.zeros_like(p, device="cpu")
+                _, _, xshape, totalk = self.compressor.compress(
+                    self.transformer.encode(
+                        torch.zeros_like(p), use_dct=self.config.neuron.use_dct
+                    ),
+                    self.config.neuron.topk_compression,
+                )
+                self.xshapes[n] = xshape
+                self.totalks[n] = totalk
+        dist.barrier(device_ids=[self.local_rank])
 
     def _init_peer_mapping(self):
         self.stop_event = threading.Event()
-        map_uid_to_peerid(self)
-        update_run_peerid_list(self)
+        if self.master:
+            map_uid_to_peerid(self)
+            update_run_peerid_list(self)
 
     def _setup_allreduce_block(self):
         if (self.uid == self.master_uid) or (
@@ -423,63 +448,63 @@ class Validator(BaseValidatorNeuron):
     ) -> None:
         model.zero_grad()
 
-        # Apply the pseudo-gradient to the model parameters
-        for n, p in model.named_parameters():
-            idxs_key = n + "idxs"
-            vals_key = n + "vals"
-            quant_key = n + "quant_params"
-            idxs = state_dict.get(idxs_key, None)
-            vals = state_dict.get(vals_key, None)
-            quant_params = state_dict.get(quant_key, None)
-            if (
-                (idxs is not None)
-                and (vals is not None)
-                and ((quant_params is not None) or (quantize is False))
-            ):
-                idxs = idxs.to(self.device)
-                vals = vals.to(self.device)
+        opts_get = StateDictOptions(
+            full_state_dict=True,
+            cpu_offload=True,
+        )
+        full_state = get_model_state_dict(self.model, options=opts_get)
 
-                # after building x and (optionally) flattening (h,w) -> (h*w)
-                if len(self.xshapes[n]) > 2:
-                    D = int(self.xshapes[n][-1] * self.xshapes[n][-2])  # h*w
-                else:
-                    D = int(self.xshapes[n][-1])  # in_features
+        if self.master:
+            # Apply the pseudo-gradient to the model parameters
+            for n, p in full_state.items():
+                idxs_key = n + "idxs"
+                vals_key = n + "vals"
+                quant_key = n + "quant_params"
+                idxs = state_dict.get(idxs_key, None)
+                vals = state_dict.get(vals_key, None)
+                quant_params = state_dict.get(quant_key, None)
+                if (
+                    (idxs is not None)
+                    and (vals is not None)
+                    and ((quant_params is not None) or (quantize is False))
+                ):
+                    idxs = idxs.to(self.device)
+                    vals = vals.to(self.device)
+                    grad = self.transformer.decode(
+                        self.compressor.decompress(
+                            p.to(self.device),
+                            idxs,
+                            vals,
+                            self.xshapes[n],
+                            self.totalks[n],
+                            quant_params,
+                        ),
+                        use_dct=self.config.neuron.use_dct,
+                    ).to(p.device)
 
-                idx64 = idxs.long().contiguous().view(-1).cpu()
-                imin, imax = int(idx64.min()), int(idx64.max())
-                if imin < 0 or imax >= D:
-                    self.logger.info(
-                        f"UID {uid:03d}: index min: {imin} / index max: {imax} vs size {D} on {n}"
-                    )
-                    raise ValueError(
-                        f"UID {uid:03d}: index min: {imin} / index max: {imax} vs size {D} on {n}"
+                    # Final safety check on the gradient itself
+                    if torch.isnan(grad).any() or torch.isinf(grad).any():
+                        self.logger.info(
+                            f"Decompressed gradient for parameter {n} contains NaN/Inf, skipping UID {uid}"
+                        )
+                        raise ValueError(
+                            f"Invalid gradient from UID {uid}: NaN or Inf in decompressed gradient for parameter {n}"
+                        )
+                    p.data.sub_(
+                        grad,
+                        alpha=self.outer_optimizer.param_groups[0]["lr"]
+                        * self.learning_rate_eval,
                     )
 
-                grad = self.transformer.decode(
-                    self.compressor.decompress(
-                        p.to(self.device),
-                        idxs,
-                        vals,
-                        self.xshapes[n],
-                        self.totalks[n],
-                        quant_params,
-                    ),
-                    use_dct=self.config.neuron.use_dct,
-                ).to(self.device)
-
-                # Final safety check on the gradient itself
-                if torch.isnan(grad).any() or torch.isinf(grad).any():
-                    self.logger.info(
-                        f"Decompressed gradient for parameter {n} contains NaN/Inf, skipping UID {uid}"
-                    )
-                    raise ValueError(
-                        f"Invalid gradient from UID {uid}: NaN or Inf in decompressed gradient for parameter {n}"
-                    )
-                p.data.sub_(
-                    grad,
-                    alpha=self.state_averager.optimizer.param_groups[0]["lr"]
-                    * self.learning_rate_eval,
-                )
+        opts_set = StateDictOptions(
+            full_state_dict=True,
+            cpu_offload=True,
+            broadcast_from_rank0=True,
+        )
+        # Push back into the model (reshard). All ranks must enter.
+        set_model_state_dict(
+            model=self.model, model_state_dict=full_state, options=opts_set
+        )
 
     def flatten_model(self, model, parent_key="", sep="."):
         """Recursively flatten a Pydantic model or dict into dotted key format."""

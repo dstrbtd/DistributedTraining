@@ -22,9 +22,21 @@ import os
 import bittensor as bt
 import torch
 from distributed_training import __run__, __version__
-from dotenv import load_dotenv
+from dataclasses import dataclass
 
-load_dotenv()
+
+@dataclass
+class R2Access:
+    access_key_id: str | None = None
+    secret_access_key: str | None = None
+
+
+@dataclass
+class R2Config:
+    bucket_name: str | None = None
+    account_id: str | None = None
+    read: R2Access = R2Access()
+    write: R2Access = R2Access()
 
 
 def check_config(cls, config: "bt.Config"):
@@ -54,7 +66,6 @@ def add_args(cls, parser, prefix=None):
     parser.add_argument("--netuid", type=int, help="Subnet netuid", default=1)
 
     neuron_type = "validator" if "miner" not in cls.__name__.lower() else "miner"
-
     prefix_str = "" if prefix == None else prefix + "."
     try:
         default_name = os.getenv("BT_WALLET_NAME") or "default"
@@ -143,7 +154,7 @@ def add_args(cls, parser, prefix=None):
         nargs="+",
         help="The addresses for the DHT",
         default=[
-            "/ip4/161.97.156.125/tcp/8000/p2p/12D3KooWJxZVYrzwbt1cTga5CSzFfE3BrMFuaLnZ3YmyZUZpJgyX",
+            "/ip4/161.97.156.125/tcp/8000/p2p/12D3KooWRnYaFBVruNqSE87GDjY6PCf9JPMqRfWht7bEXTN14m27",
         ],
     )
 
@@ -158,15 +169,14 @@ def add_args(cls, parser, prefix=None):
         "--neuron.global_model_name",
         type=str,
         help="The model to be trained",
-        default="dstrbtd/llama-1b",
+        default="llama-4b-ws-4",
     )
 
     parser.add_argument(
-        "--neuron.local_model_name",
+        "--neuron.global_tokenizer_name",
         type=str,
-        help="The model to be trained",
-        default=None,
-        required=neuron_type != "validator",
+        help="The HF repo_id of the tokenizer to be used for training",
+        default="dstrbtd/llama-1b",
     )
 
     parser.add_argument(
@@ -187,7 +197,7 @@ def add_args(cls, parser, prefix=None):
         "--neuron.local_batch_size_train",
         type=int,
         help="The default batch size",
-        default=4,
+        default=2,
     )
 
     parser.add_argument(
@@ -198,10 +208,10 @@ def add_args(cls, parser, prefix=None):
     )
 
     parser.add_argument(
-        "--neuron.target_n_blocks",
+        "--neuron.upload_steps",
         type=int,
-        help="The hivemind global target_batch_size",
-        default=2,
+        help="The frequency of uploads per inner step",
+        default=5,
     )
 
     parser.add_argument(
@@ -216,6 +226,13 @@ def add_args(cls, parser, prefix=None):
         type=str,
         help="The DHT run_id",
         default=f"v{__version__.replace('.','_')}_r{__run__}",
+    )
+
+    parser.add_argument(
+        "--neuron.show_all_rank_logs",
+        action="store_true",
+        help="Set to true to show logs of all ranks",
+        default=False,
     )
 
     parser.add_argument(

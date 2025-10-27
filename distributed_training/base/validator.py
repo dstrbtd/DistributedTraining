@@ -27,15 +27,16 @@ import bittensor as bt
 import numpy as np
 
 from distributed_training.base.neuron import BaseNeuron
-from distributed_training.utils.chain import log_peerid_to_chain
+from distributed_training.utils.chain import log_r2_to_chain
 from distributed_training.utils.weight_utils import (
     convert_weights_and_uids_for_emit,
     process_weights_for_netuid,
 )
-from distributed_training.utils.progress_tracker import UidTracker, get_global_epoch
+from distributed_training.utils.progress_tracker import UidTracker, get_progress
 from distributed_training.utils.state_loader import load_state_from_peer
 from distributed_training.validator.reward import update_total_scores
 from openskill.models import PlackettLuce
+from torch import distributed as dist
 
 
 class BaseValidatorNeuron(BaseNeuron):
@@ -48,46 +49,48 @@ class BaseValidatorNeuron(BaseNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
-        # Save a copy of the hotkeys to local memory.
-        self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
+        if self.master:
+            # Save a copy of the hotkeys to local memory.
+            self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
 
-        # Dendrite lets us send messages to other nodes (axons) in the network.
-        self.dendrite = bt.dendrite(wallet=self.wallet)
-        self.logger.info(f"Dendrite: {self.dendrite}")
+            # Dendrite lets us send messages to other nodes (axons) in the network.
+            self.dendrite = bt.dendrite(wallet=self.wallet)
+            self.logger.info(f"Dendrite: {self.dendrite}")
 
-        # Set up initial scoring weights for validation
-        self.logger.info("Building validation weights.")
-        self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
+            # Set up initial scoring weights for validation
+            self.logger.info("Building validation weights.")
+            self.scores = np.zeros(self.metagraph.n, dtype=np.float32)
 
-        # Initialize openskill_model before loading state
-        self.openskill_model = PlackettLuce(
-            beta=self.config.neuron.openskill_beta, tau=self.config.neuron.openskill_tau
-        )
-        self.openskill_ratings = {
-            int(uid): self.openskill_model.rating(name=str(uid))
-            for uid in range(self.metagraph.n)
-        }
+            # Initialize openskill_model before loading state
+            self.openskill_model = PlackettLuce(
+                beta=self.config.neuron.openskill_beta,
+                tau=self.config.neuron.openskill_tau,
+            )
+            self.openskill_ratings = {
+                int(uid): self.openskill_model.rating(name=str(uid))
+                for uid in range(self.metagraph.n)
+            }
 
-        # Initialize uid_tracker
-        self.uid_tracker = {
-            uid: UidTracker(uid=uid) for uid in self.metagraph.uids.tolist()
-        }
+            # Initialize uid_tracker
+            self.uid_tracker = {
+                uid: UidTracker(uid=uid) for uid in self.metagraph.uids.tolist()
+            }
 
-        # Load current state
-        self.logger.debug("load_state()")
-        self.load_state()
+            # Load current state
+            self.logger.debug("load_state()")
+            self.load_state()
 
-        # Set event dictionary
-        self.event = {}
+            # Set event dictionary
+            self.event = {}
 
-        # Init sync with the network. Updates the metagraph.
-        self.sync()
+            # Init sync with the network. Updates the metagraph.
+            self.sync()
 
-        # Serve axon to enable external connections.
-        if not self.config.neuron.axon_off:
-            self.serve_axon()
-        else:
-            self.logger.warning("axon off, not serving ip to chain.")
+            # Serve axon to enable external connections.
+            if not self.config.neuron.axon_off:
+                self.serve_axon()
+            else:
+                self.logger.warning("axon off, not serving ip to chain.")
 
         # Create asyncio event loop to manage async tasks.
         self.loop = asyncio.get_event_loop()
@@ -99,7 +102,7 @@ class BaseValidatorNeuron(BaseNeuron):
         self.lock = asyncio.Lock()
 
         # Log PeerID to chain flag
-        self.peer_id_logged_to_chain = False
+        self.r2_credentials_logged_to_chain = False
 
     def serve_axon(self):
         """Serve axon to enable external connections."""
@@ -156,23 +159,25 @@ class BaseValidatorNeuron(BaseNeuron):
         # Check that validator is registered on the network.
         self.sync()
 
-        self.logger.info(
-            f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
-        )
+        if self.master:
+            self.logger.info(
+                f"Running validator {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}"
+            )
 
-        self.logger.info(f"Validator starting at block: {self.block}")
+            self.logger.info(f"Validator starting at block: {self.block}")
 
         # This loop maintains the validator's operations until intentionally stopped.
         try:
             while True:
-                self.logger.info(f"step({self.step}) block({self.block})")
+                if self.master:
+                    self.logger.info(f"step({self.step}) block({self.block})")
 
-                # Init Wandb Event For Step
-                if self.event != {}:
-                    self.event = {}
+                    # Init Wandb Event For Step
+                    if self.event != {}:
+                        self.event = {}
 
                 current_global_epoch = self.global_progress.epoch
-                self.global_progress.epoch = get_global_epoch(self)
+                self.global_progress.epoch = get_progress(self, "local")[0]
                 if (
                     self.blocks_since_allreduce
                     > (self.config.neuron.blocks_per_allreduce / 2)
@@ -180,6 +185,7 @@ class BaseValidatorNeuron(BaseNeuron):
                     (self.local_progress.epoch != self.global_progress.epoch)
                     or (not self.all_reduce_success_status)
                 ):
+                    self.reload_state_event.set()
                     if self.local_progress.epoch != self.global_progress.epoch:
                         self.logger.info(
                             f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
@@ -191,11 +197,13 @@ class BaseValidatorNeuron(BaseNeuron):
                     load_state_from_peer(self, epoch=self.global_progress.epoch)
                     # Reset all_reduce success status
                     if not self.all_reduce_success_status:
+                        self.set_current_block_across_ranks()
                         self.all_reduce_success_status = True
-                        self.last_allreduce_block = self.block
+                        self.last_allreduce_block = self.current_block
                     # Load all_reduce scores if non_master_uid
                     if (
-                        (self.uid != self.master_uid)
+                        self.master
+                        and (self.uid != self.master_uid)
                         and (self.global_progress.epoch != current_global_epoch)
                         and (self.should_all_reduce)
                     ):
@@ -210,17 +218,18 @@ class BaseValidatorNeuron(BaseNeuron):
 
                 # Sync metagraph and potentially set weights.
                 self.sync()
-                # Log to wandb
-                if (
-                    not self.config.neuron.dont_wandb_log
-                    and "uids" in self.event
-                    and len(self.event["uids"]) > 0
-                ):
-                    self.wandb.log(self.event)
+                if self.master:
+                    # Log to wandb
+                    if (
+                        not self.config.neuron.dont_wandb_log
+                        and "uids" in self.event
+                        and len(self.event["uids"]) > 0
+                    ):
+                        self.wandb.log(self.event)
 
-                self.step += 1
-                if self.peer_id_logged_to_chain is False:
-                    log_peerid_to_chain(self)
+                    self.step += 1
+                    if self.r2_credentials_logged_to_chain is False:
+                        log_r2_to_chain(self)
 
         # If someone intentionally stops the validator, it'll safely terminate operations.
         except KeyboardInterrupt:
@@ -385,9 +394,7 @@ class BaseValidatorNeuron(BaseNeuron):
                 self.uid_tracker[uid] = UidTracker(
                     uid=uid
                 )  # reset uid_tracker for this uid
-                self.openskill_ratings[uid] = self.openskill_model.rating(
-                    name=str(uid),
-                )
+                self.failed_is_alive_counter[uid] = 0
 
         # Check to see if the metagraph has changed size.
         # If so, we need to add new hotkeys and moving averages.
@@ -397,12 +404,11 @@ class BaseValidatorNeuron(BaseNeuron):
             min_len = min(len(self.hotkeys), len(self.scores))
             new_moving_average[:min_len] = self.scores[:min_len]
             self.scores = new_moving_average
-            self.uid_tracker[uid] = UidTracker(
-                uid=uid
-            )  # reset uid_tracker for this uid
-            self.openskill_ratings[uid] = self.openskill_model.rating(
-                name=str(uid),
-            )
+            for uid in range(min_len, len(self.metagraph.hotkeys)):
+                self.uid_tracker[uid] = UidTracker(
+                    uid=uid
+                )  # reset uid_tracker for this uid
+                self.failed_is_alive_counter[uid] = 0
 
         # Update the hotkeys.
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
@@ -499,8 +505,8 @@ class BaseValidatorNeuron(BaseNeuron):
             )
 
             self.step = state["step"]
-            self.scores = state["scores"]
-            self.hotkeys = state["hotkeys"]
+            self.scores[0 : len(state["scores"])] = state["scores"]
+            self.hotkeys[0 : len(state["hotkeys"])] = state["hotkeys"]
             if "failed_is_alive_counter" in state:
                 self.failed_is_alive_counter = state[
                     "failed_is_alive_counter"
@@ -520,14 +526,6 @@ class BaseValidatorNeuron(BaseNeuron):
                         sigma=self.uid_tracker[uid].train.openskill_rating.sigma,
                         name=str(uid),
                     )
-        elif os.path.isfile(self.config.neuron.full_path + "/state.pt"):
-            self.logger.info(
-                "Pre-saved validator state found in .pt format. Loading validator state."
-            )
-            state = torch.load(self.config.neuron.full_path + "/state.pt")
-            self.step = state["step"]
-            self.scores = state["scores"].cpu().numpy()
-            self.hotkeys = state["hotkeys"]
 
         else:
             self.logger.info("Pre-saved validator state not found.")

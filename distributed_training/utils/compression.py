@@ -49,9 +49,9 @@ class TransformDCT:
 
         # Get all variants of model tensor sizes
         # Generate all possible valid DCT sizes for model tensors
-        for _, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
+        for _, p in model.items():
+            # if not p.requires_grad:
+            #     continue
             for s in p.shape:
                 # Get the closest smallest divisor to the targeted DCT size
                 sc = _get_smaller_split(s, self.target_chunk)
@@ -147,8 +147,7 @@ class CompressDCT(Generic[Q]):
         use_quantization: Literal[True] = True,
         quantization_bins: int = 256,
         quantization_range: int = 6,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     @overload
     def __init__(
@@ -157,8 +156,7 @@ class CompressDCT(Generic[Q]):
         use_quantization: Literal[False] = False,
         quantization_bins: int = 256,
         quantization_range: int = 6,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     @torch.no_grad()
     def __init__(
@@ -190,16 +188,14 @@ class CompressDCT(Generic[Q]):
         self: "CompressDCT[Literal[True]]",
         x: torch.Tensor,
         topk: int,
-    ) -> tuple[IdxT, ValT, ShapeT, TotK, QuantParamsT]:
-        ...
+    ) -> tuple[IdxT, ValT, ShapeT, TotK, QuantParamsT]: ...
 
     @overload
     def compress(
         self: "CompressDCT[Literal[False]]",
         x: torch.Tensor,
         topk: int,
-    ) -> tuple[IdxT, ValT, ShapeT, TotK]:
-        ...
+    ) -> tuple[IdxT, ValT, ShapeT, TotK]: ...
 
     @torch.no_grad()
     def compress(self, x: torch.Tensor, topk: int, quantize: bool = False):  # type: ignore[override]

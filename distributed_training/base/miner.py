@@ -19,15 +19,16 @@ import asyncio
 import threading
 import time
 import traceback
+import torch.distributed as dist
 
 import bittensor as bt
 
 from enum import Enum
 from distributed_training.base.neuron import BaseNeuron
-from distributed_training.utils.chain import log_peerid_to_chain
+from distributed_training.utils.chain import log_r2_to_chain
 from distributed_training.utils.misc import get_bandwidth
 from distributed_training.utils.state_loader import load_state_from_peer
-from distributed_training.utils.progress_tracker import get_global_epoch
+from distributed_training.utils.progress_tracker import get_progress
 
 
 class TrainingStatus(Enum):
@@ -57,27 +58,28 @@ class BaseMinerNeuron(BaseNeuron):
                 "You are allowing non-registered entities to send requests to your miner. This is a security risk."
             )
 
-        # The axon handles request processing, allowing validators to send this miner requests.
-        self.axon = bt.axon(
-            wallet=self.wallet,
-            config=self.config,
-            port=self.config.axon.port,
-            ip=self.config.axon.ip,
-            external_ip=self.config.axon.external_ip,
-            external_port=self.config.axon.external_port,
-        )
+        if self.master:
+            # The axon handles request processing, allowing validators to send this miner requests.
+            self.axon = bt.axon(
+                wallet=self.wallet,
+                config=self.config,
+                port=self.config.axon.port,
+                ip=self.config.axon.ip,
+                external_ip=self.config.axon.external_ip,
+                external_port=self.config.axon.external_port,
+            )
 
-        # Attach determiners which functions are called when servicing a request.
-        self.logger.info("Attaching forward function to miner axon.")
-        self.axon.attach(
-            forward_fn=self.is_alive,
-            blacklist_fn=self.blacklist_is_alive,
-            # priority_fn=self.priority,
-        ).attach(
-            forward_fn=self.all_reduce,
-            blacklist_fn=self.blacklist_all_reduce,
-        )
-        self.logger.info(f"Axon created: {self.axon}")
+            # Attach determiners which functions are called when servicing a request.
+            self.logger.info("Attaching forward function to miner axon.")
+            self.axon.attach(
+                forward_fn=self.is_alive,
+                blacklist_fn=self.blacklist_is_alive,
+                # priority_fn=self.priority,
+            ).attach(
+                forward_fn=self.all_reduce,
+                blacklist_fn=self.blacklist_all_reduce,
+            )
+            self.logger.info(f"Axon created: {self.axon}")
 
         # Instantiate runners
         self.should_exit: bool = False
@@ -88,8 +90,9 @@ class BaseMinerNeuron(BaseNeuron):
         # self.config.neuron.disable_set_weights = True
 
         # Log PeerID to chain flag
-        self.peer_id_logged_to_chain = False
+        self.r2_credentials_logged_to_chain = False
 
+    # def run(rank, self, world_size):
     def run(self):
         """
         Initiates and manages the main loop for the miner on the Bittensor network. The main loop handles graceful shutdown on keyboard interrupts and logs unforeseen errors.
@@ -112,104 +115,70 @@ class BaseMinerNeuron(BaseNeuron):
             KeyboardInterrupt: If the miner is stopped by a manual interruption.
             Exception: For unforeseen errors during the miner's operation, which are logged for diagnosis.
         """
-
-        # Check that miner is registered on the network.
-        self.sync()
-
-        # Serve passes the axon information to the network + netuid we are hosting on.
-        # This will auto-update if the axon port of external ip have changed.
-        self.logger.info(
-            f"Serving miner axon {self.axon} on network: {self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid} and port: {self.axon.port}"
-        )
-        self.axon.serve(netuid=self.config.netuid, subtensor=self.subtensor)
-
-        # Start  starts the miner's axon, making it active on the network.
-        self.axon.start()
-        self.logger.info(f"Miner starting at block: {self.block}")
-
-        # Starting training thread
-        self.start_continuous_training()
+        self.logger.info("Synced metagraph")
 
         # This loop maintains the miner's operations until intentionally stopped.
         try:
+            dist.barrier()
+            self.resume_training()
+
             while not self.should_exit:
-                while (
-                    self.block - self.metagraph.last_update[self.uid]
-                    < self.config.neuron.epoch_length
-                ):
-                    if self.peer_id_logged_to_chain is False:
-                        log_peerid_to_chain(self)
+                try:
+                    if self.master:
+                        if self.r2_credentials_logged_to_chain is False:
+                            log_r2_to_chain(self)
 
-                    if not self.config.neuron.dont_wandb_log:
-                        if self.event != {}:
-                            self.event.update(self.get_miner_info())
-                            try:
-                                self.bandwidth = get_bandwidth()
-                                self.event.update(self.bandwidth)
-                            except Exception:
-                                self.logger.debug("Error getting bandwidth metrics")
-                            self.wandb.log(self.event)
-                            self.event = {}
+                        if not self.config.neuron.dont_wandb_log:
+                            if self.event != {}:
+                                self.event.update(self.get_miner_info())
+                                try:
+                                    self.bandwidth = get_bandwidth()
+                                    self.event.update(self.bandwidth)
+                                except Exception:
+                                    self.logger.debug("Error getting bandwidth metrics")
+                                if self.master:
+                                    self.wandb.log(self.event)
+                                self.event = {}
 
-                    if not self.all_reduce_success_status:
-                        wait_time = (
-                            self.allreduce_timeout
-                            + self.upload_state_duration
-                            - time.perf_counter()
-                            + self.all_reduce_start_time
-                        )
-                        self.logger.info(
-                            f"Waiting {int(wait_time)} seconds until validator complete the all_reduce"
-                        )
-                        # Wait for the master validator to upload new global model
-                        time.sleep(wait_time)
-                        # Check if master validator has failed to all_reduce
-                        self.global_progress.epoch = get_global_epoch(self)
-                        if self.local_progress.epoch > self.global_progress.epoch:
-                            self.logger.info(
-                                f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
-                            )
-                            load_state_from_peer(
-                                self,
-                                epoch=self.global_progress.epoch,
-                            )
-                        else:
-                            load_state_from_peer(
-                                self,
-                                repo_id=self.config.neuron.local_model_name,
-                                epoch=self.global_progress.epoch,
-                            )
-                        self.model.config.block_list = []
-                        self.resume_training()
-                        self.all_reduce_success_status = True
-                    else:
-                        if (self.last_allreduce_block is not None) and (
-                            (time.perf_counter() - self.all_reduce_start_time)
-                            > (self.allreduce_timeout + self.upload_state_duration)
-                        ):
-                            self.load_state(reset_last_allreduce_block=True)
-                        elif (self.last_allreduce_block is None) and (
-                            self.current_block % 50 == 0
-                        ):
-                            self.load_state(reset_last_allreduce_block=False)
+                    self.logger.debug(
+                        "self.training_active.set()",
+                        self.training_active.is_set(),
+                        "pre dataset",
+                    )
+                    # Wait if training is paused
+                    self.training_active.wait()
 
-                    # Wait before checking again.
-                    time.sleep(1)
+                    self.logger.debug(":pages: Fetching fineweb-edu pages")
+                    dataset = self.training_loop.run_until_complete(
+                        self.fetch_training_data()
+                    )
 
-                    # Check if we should exit.
-                    if self.should_exit:
-                        break
+                    # Wait if training is paused
+                    self.logger.debug(
+                        "self.training_active.wait()",
+                        self.training_active.is_set(),
+                        "post dataset",
+                    )
+                    self.training_active.wait()
 
-                # Sync metagraph and potentially set weights.
-                self.sync()
-                self.step += 1
+                    if self.master:
+                        self.model.config.block_list.append(self.current_block)
+                    self._process_training_batch(dataset)
+
+                except Exception as e:
+                    self.logger.warning(f"Training Loop Failed with error: {e}")
+                    self.training_status = TrainingStatus.ERROR
+                    self.training_error = str(e)
+                    break
 
             # Await the training task to ensure it completes before exiting
+            self.training_status = TrainingStatus.STOPPED
 
         # If someone intentionally stops the miner, it'll safely terminate operations.
         except KeyboardInterrupt:
             self.should_exit = True
-            self.axon.stop()
+            if self.master:
+                self.axon.stop()
             self.logger.success(
                 ":white_heavy_check_mark: Miner killed by keyboard interrupt."
             )
@@ -220,7 +189,7 @@ class BaseMinerNeuron(BaseNeuron):
             self.logger.error(traceback.format_exc())
 
     def load_state(self, reset_last_allreduce_block=False):
-        self.global_progress.epoch = get_global_epoch(self)
+        self.global_progress.epoch = get_progress(self, "global")[0]
         if self.local_progress.epoch != self.global_progress.epoch:
             self.logger.info(
                 f"Local Epoch {self.local_progress.epoch} Behind Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
@@ -237,7 +206,7 @@ class BaseMinerNeuron(BaseNeuron):
             else:
                 load_state_from_peer(
                     self,
-                    repo_id=self.config.neuron.local_model_name,
+                    uid=self.uid,
                     epoch=self.global_progress.epoch,
                 )
             self.model.config.block_list = []

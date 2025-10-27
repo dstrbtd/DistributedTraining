@@ -36,9 +36,20 @@ wandb login <your_wandb_api_key>
 huggingface-cli login <your_hf_write_api_key>
 ```
 
-4. Create a unique huggignface repo_id via the following link: https://huggingface.co/new and note the repo_id to provide it under the config neuron.local_model_name in the startup command
+4. Register your hotkey
+```bash
+btcli subnets register --subtensor.network finney --netuid $NETUID --wallet.name $WALLET_NAME --wallet.hotkey $HOTKEY_NAME
+```
 
-5. Install [PM2](https://pm2.io/docs/runtime/guide/installation/) and the [`jq` package](https://jqlang.github.io/jq/) on your system.
+5. Create a R2 bucket which follows the below format.
+```bash
+f"{self.config.neuron.global_model_name}-{uid:03d}"
+```
+For example uid `1` under a global_model_name `llama-4b-ws-4` would have the name `llama-4b-ws-4-001`.
+
+6. Create READ and WRITE that cover all your applciable R2 buckets. Add them to `.env.example` and rename the file `.env`. 
+
+7. Install [PM2](https://pm2.io/docs/runtime/guide/installation/) and the [`jq` package](https://jqlang.github.io/jq/) on your system.
 
 **On Linux**:
 ```bash
@@ -49,26 +60,21 @@ sudo apt update && sudo apt install jq && sudo apt install npm && sudo npm insta
 brew update && brew install jq && brew install npm && sudo npm install pm2 -g && pm2 update
 ```
 
-6. Register your hotkey
-```bash
-btcli subnets register --subtensor.network finney --netuid $NETUID --wallet.name $WALLET_NAME --wallet.hotkey $HOTKEY_NAME
-```
-
 ---
 # Running a Miner
 Once you have installed this repo you can run a miner with **auto updates enabled** using the following commands.
 ```bash
 chmod +x run_miner.sh
 pm2 start run_miner.sh --name distributed_training_miner_auto_update --
+    --nproc_per_node <number of gpus> # Must be algined to the maximum number of gpus on your VM
     --netuid <your netuid>  # Must be attained by following the instructions in the docs/running_on_*.md files
     --subtensor.chain_endpoint <your chain url>  # Must be attained by following the instructions in the docs/running_on_*.md files
     --wallet.name <your miner wallet> # Must be created using the bittensor-cli
     --wallet.hotkey <your validator hotkey> # Must be created using the bittensor-cli
-    --logging.debug # Run in debug mode, alternatively --logging.trace for trace mode
     --axon.port <an open port to serve the bt axon on>
     --dht.port <another open port to serve the dht axon on>
     --dht.ip <your device ip address>
-    --neuron.local_model_name <a unique hf public repo id you can push models to>
+    --show_all_rank_logs <wether you want to display rank 0 logs only> # Only enable for debugging
 ```
 ---
 
@@ -77,6 +83,7 @@ Once you have installed this repo you should request access to the Distributed o
 ```bash
 chmod +x run_validator.sh
 pm2 start run_validator.sh --name distributed_training_auto_update --
+    --nproc_per_node <number of gpus> # Must be algined to the maximum number of gpus on your VM
     --netuid <your netuid> # Must be attained by following the instructions in the docs/running_on_*.md files
     --subtensor.chain_endpoint <your chain url> # Must be attained by following the instructions in the docs/running_on_*.md files
     --wallet.name <your validator wallet>  # Must be created using the bittensor-cli
@@ -85,6 +92,7 @@ pm2 start run_validator.sh --name distributed_training_auto_update --
     --axon.port <an open port to serve the bt axon on>
     --dht.port <another open port to serve the dht axon on>
     --dht.ip <your device ip address>
+    --show_all_rank_logs <wether you want to display rank 0 logs only> # Only enable for debugging
 ```
 
 </div>
