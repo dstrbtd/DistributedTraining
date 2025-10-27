@@ -136,7 +136,7 @@ class Miner(BaseMinerNeuron):
             self.block
         else:
             self.current_block = 0
-        self.sync_current_block()
+        self.set_current_block_across_ranks()
         self.starting_block = self.current_block
 
         if self.should_sync_model:
@@ -176,7 +176,6 @@ class Miner(BaseMinerNeuron):
                     - time.perf_counter()
                     + self.all_reduce_start_time
                 )
-                wait_time = 0
                 if wait_time > 0:
                     self.logger.info(
                         f"Waiting {int(wait_time)} seconds until validator complete the all_reduce"
@@ -512,12 +511,6 @@ class Miner(BaseMinerNeuron):
         full_state = get_model_state_dict(self.model, options=opts)
         self.logger.info("Full State")
 
-        # with FSDP.state_dict_type(
-        #     self.model,
-        #     StateDictType.LOCAL_STATE_DICT,                 # local/sharded per rank
-        #     state_dict_config=LocalStateDictConfig(offload_to_cpu=True),
-        #     optim_state_dict_config=LocalOptimStateDictConfig(offload_to_cpu=True),
-        # ):
         o_opts = StateDictOptions(full_state_dict=False, cpu_offload=True)
         optim_sd = get_optimizer_state_dict(
             self.model, self.inner_optimizer, options=o_opts
@@ -577,18 +570,12 @@ class Miner(BaseMinerNeuron):
         self.training_status = TrainingStatus.RUNNING
         self.logger.info(":white_heavy_check_mark: Resuming continuous training.")
 
-    def sync_current_block(self):
-        current_block_tensor = torch.tensor([self.current_block])
-        dist.broadcast(current_block_tensor, src=0, group=self.gloo_group)
-        self.current_block = current_block_tensor[0].item()
-        self.logger.debug(self.current_block)
-
     async def fetch_training_data(self):
         """Async function to fetch training data"""
         attempt = 0
         while attempt < self.retry_limit:
             try:
-                self.sync_current_block()
+                self.set_current_block_across_ranks()
 
                 pages = await DatasetLoader.next_pages(
                     offset=self.current_block,
@@ -1360,7 +1347,7 @@ class Miner(BaseMinerNeuron):
                 self.local_progress.samples_accumulated = 0
                 self.local_progress.inner_step = 0
                 self.local_progress.epoch += 1
-                self.sync_current_block()
+                self.set_current_block_across_ranks()
                 self.last_allreduce_block = self.current_block
                 self.logger.info("AllReduce Operation Finished Succesfully")
                 self.start_background_upload(

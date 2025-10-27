@@ -147,11 +147,11 @@ class BaseNeuron(ABC):
         else:
             self.uid = 0
 
-        sync = torch.tensor([self.uid], device="cpu")
+        uid = torch.tensor([self.uid], device="cpu")
         dist.barrier(group=self.gloo_group)
-        dist.broadcast(sync, src=0, group=self.gloo_group)
+        dist.broadcast(uid, src=0, group=self.gloo_group)
         dist.barrier(group=self.gloo_group)
-        self.uid = sync[0].item()
+        self.uid = uid[0].item()
 
         master_uid = (
             torch.tensor(
@@ -192,7 +192,7 @@ class BaseNeuron(ABC):
 
         # Initialize the all_reduce, download and upload variables.
         self.allreduce_timeout = 600
-        self.upload_state_duration = 1500
+        self.upload_state_duration = 1800
         self.all_reduce_success_status = True
         self.should_all_reduce = False
         self.retry_limit = 100
