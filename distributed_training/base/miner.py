@@ -161,7 +161,8 @@ class BaseMinerNeuron(BaseNeuron):
                     )
                     self.training_active.wait()
 
-                    self.model.config.block_list.append(self.current_block)
+                    if self.master:
+                        self.model.config.block_list.append(self.current_block)
                     self._process_training_batch(dataset)
 
                 except Exception as e:

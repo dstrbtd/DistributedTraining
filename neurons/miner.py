@@ -417,11 +417,11 @@ class Miner(BaseMinerNeuron):
                 self.logger.info(f"Optimizer Saved")
                 del optimizer_state
 
-                # # Reset model blocklist & keep local copy in case upload fails
-                # block_list = self.model.config.block_list
-                # self.model.config.block_list = []
-
                 if self.master:
+                    # Reset model blocklist & keep local copy in case upload fails
+                    block_list = self.model.config.block_list
+                    self.model.config.block_list = []
+
                     self.logger.info(
                         f":upload: Uploading model and optimizer states to r2 bucket: {self.config.r2.bucket_name}"
                     )
@@ -446,9 +446,7 @@ class Miner(BaseMinerNeuron):
                             self.logger.info(
                                 "Cancelling Ongoing Model Upload For AllReduce Operation"
                             )
-                            # self.model.config.block_list = (
-                            #     block_list + self.model.config.block_list
-                            # )
+                            self.model.config.block_list = block_list + self.model.config.block_list
                             return False
                         else:
                             time.sleep(5)
@@ -473,9 +471,8 @@ class Miner(BaseMinerNeuron):
                     self.logger.error(
                         "Maximum retry limit reached. Unable to upload state to HF Hub."
                     )
-                    # self.model.config.block_list = (
-                    #     block_list + self.model.config.block_list
-                    # )
+                    if self.master:
+                        self.model.config.block_list = block_list + self.model.config.block_list
                     raise
 
         return False
@@ -856,7 +853,7 @@ class Miner(BaseMinerNeuron):
         # Load model and components
         load_state_from_peer(self, self.uid, self.local_progress.epoch)
         self.model.config.block_list = []
-        # cleanup_old_cache(self)
+        cleanup_old_cache(self)
 
         # Setup upload executor
         self.upload_executor = ThreadPoolExecutor(
@@ -1205,7 +1202,9 @@ class Miner(BaseMinerNeuron):
                 # Wait if training is paused
                 self.training_active.wait()
 
-                self.model.config.block_list.append(self.current_block)
+                if self.master:
+                    self.model.config.block_list.append(self.current_block)
+
                 self._process_training_batch(dataset)
             except Exception as e:
                 self.logger.warning(f"Training Loop Failed with error: {e}")

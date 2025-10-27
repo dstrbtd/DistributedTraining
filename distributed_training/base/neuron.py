@@ -258,12 +258,10 @@ class BaseNeuron(ABC):
         self.reload_state_event = threading.Event()
 
     # @abstractmethod # miner is not using this anymore
-    async def forward(self, synapse: bt.Synapse) -> bt.Synapse:
-        ...
+    async def forward(self, synapse: bt.Synapse) -> bt.Synapse: ...
 
     @abstractmethod
-    def run(self):
-        ...
+    def run(self): ...
 
     def sync(self):
         """

@@ -908,7 +908,7 @@ def load_state_from_peer(
             self.local_progress.samples_accumulated = 0
             self.logger.info(f"New Model Tag: {self.global_progress.epoch}")
 
-            # cleanup_old_cache(self)
+            cleanup_old_cache(self)
 
         else:
             self.logger.debug(f"Model With Tag: {epoch} Does Not Exist")
@@ -929,6 +929,7 @@ def cleanup_old_cache(self):
             if os.path.isdir(file)
             and (self.config.neuron.global_model_name in file)
             and (file != self.config.r2.bucket_name)
+            and (file != self.config.neuron.global_model_name)
         ]
         for file in files:
             try:
