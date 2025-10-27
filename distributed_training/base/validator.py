@@ -404,10 +404,11 @@ class BaseValidatorNeuron(BaseNeuron):
             min_len = min(len(self.hotkeys), len(self.scores))
             new_moving_average[:min_len] = self.scores[:min_len]
             self.scores = new_moving_average
-            self.uid_tracker[uid] = UidTracker(
-                uid=uid
-            )  # reset uid_tracker for this uid
-            self.failed_is_alive_counter[uid] = 0
+            for uid in range(min_len, len(self.metagraph.hotkeys)):
+                self.uid_tracker[uid] = UidTracker(
+                    uid=uid
+                )  # reset uid_tracker for this uid
+                self.failed_is_alive_counter[uid] = 0
 
         # Update the hotkeys.
         self.hotkeys = copy.deepcopy(self.metagraph.hotkeys)
@@ -525,14 +526,6 @@ class BaseValidatorNeuron(BaseNeuron):
                         sigma=self.uid_tracker[uid].train.openskill_rating.sigma,
                         name=str(uid),
                     )
-        elif os.path.isfile(self.config.neuron.full_path + "/state.pt"):
-            self.logger.info(
-                "Pre-saved validator state found in .pt format. Loading validator state."
-            )
-            state = torch.load(self.config.neuron.full_path + "/state.pt")
-            self.step = state["step"]
-            self.scores = state["scores"].cpu().numpy()
-            self.hotkeys = state["hotkeys"]
 
         else:
             self.logger.info("Pre-saved validator state not found.")

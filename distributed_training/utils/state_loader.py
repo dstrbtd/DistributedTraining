@@ -24,7 +24,6 @@ from distributed_training.utils.progress_tracker import (
     get_r2_client,
 )
 from distributed_training.utils.r2 import (
-    archive_root_bucket,
     upload_folder_to_r2,
     r2_download,
     log_peerid_to_r2,
@@ -431,19 +430,6 @@ def load_model_optimizer_gradient_averager(
 
     global_model_revision = f"{__run__}.{epoch}.0"
     global_model_name = self.config.neuron.global_model_name
-    # global_model_output_dir = os.path.join(os.getcwd(), global_model_name)
-    # global_config_path = r2_download(
-    #     self,
-    #     r2=r2,
-    #     bucket=global_model_name,
-    #     key=f"epoch-{epoch}/config.json",
-    #     donwload_on_all_ranks=False,
-    #     destination=global_model_output_dir,
-    # )
-    # dist.barrier()
-    # self.global_model_config = AutoConfig.from_pretrained(global_config_path)
-    # with open(global_config_path, "r") as file:
-    #     self.global_model_config = json.load(file)
 
     metadata_epoch = get_progress(self, "local", uid=uid)[0]
     if (revision is None) and (uid != self.master_uid):
@@ -468,30 +454,6 @@ def load_model_optimizer_gradient_averager(
         self, r2, local_model_name, prefix, global_output_dir
     )
 
-    # # Delete existing outer optimizer
-    # if hasattr(self, "outer_optimizer"):
-    #     for group in self.outer_optimizer.param_groups:
-    #         group["params"].clear()
-    #     self.outer_optimizer.state.clear()
-    #     del self.outer_optimizer
-    #     gc.collect()
-    #     torch.cuda.synchronize()
-    #     torch.cuda.empty_cache()
-
-    # # Delete existing gradient averager
-    # if hasattr(self, "grad_averager"):
-    #     self.grad_averager.shutdown()
-    #     while self.grad_averager.is_alive():
-    #         time.sleep(1)
-
-    #     del self.grad_averager.main_parameters
-    #     del self.grad_averager.offloaded_optimizer
-    #     del self.grad_averager._averaged_tensors
-    #     del self.grad_averager
-    #     gc.collect()
-    #     torch.cuda.synchronize()
-    #     torch.cuda.empty_cache()
-
     # Delete existing average handler
     if hasattr(self, "avg_handler"):
         del self.avg_handler.model
@@ -511,16 +473,6 @@ def load_model_optimizer_gradient_averager(
         gc.collect()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
-
-    # if hasattr(self, "model"):
-    #     try:
-    #         self.model._reset_lazy_init()  # tells FSDP to free params if possible
-    #     except Exception:
-    #         pass
-    #     del self.model
-    #     gc.collect()
-    #     torch.cuda.synchronize()
-    #     torch.cuda.empty_cache()
 
     loading_success = 0
     optimizer_state = None
@@ -1103,12 +1055,6 @@ def save_and_upload_state(
                     bucket=self.config.r2.bucket_name,
                     prefix=f"epoch-{epoch}/",
                 )
-
-                # archive_root_bucket(
-                #     r2=self.r2["global"],
-                #     bucket=self.config.r2.bucket_name,
-                #     epoch=self.local_progress.epoch,
-                # )
 
                 log_peerid_to_r2(self, prefix=f"epoch-{self.local_progress.epoch}/")
                 log_peerid_to_r2(self)

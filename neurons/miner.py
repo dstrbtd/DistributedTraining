@@ -256,7 +256,8 @@ class Miner(BaseMinerNeuron):
             self.loop.run_until_complete(
                 self.all_reduce_local(
                     distributed_training.protocol.AllReduce(
-                        min_group_size=self.config.neuron.min_group_size, timeout=self.allreduce_timeout
+                        min_group_size=self.config.neuron.min_group_size,
+                        timeout=self.allreduce_timeout,
                     )
                 )
             )

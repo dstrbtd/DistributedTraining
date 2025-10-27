@@ -566,7 +566,6 @@ class DTGradAverager(DTAverager):
 
         self.local_rank = local_rank
         self.world_size = world_size
-        # self.ordered_fqns = ordered_fqns
 
         super().__init__(
             averaged_tensors=averaged_grads,
@@ -627,113 +626,27 @@ class DTGradAverager(DTAverager):
 
         return control.result(timeout) if wait else control
 
-    # @torch.no_grad()
-    # def compute_and_load_pseudo_grad_into_averager(self):
-    #     """compute pseudo gradient by subtracting the offloaded optimizer parameters with the main parameters and load them in the averager"""
-    #     opt_parameters = [
-    #         param
-    #         for group in self.offloaded_optimizer.param_groups
-    #         for param in group["params"]
-    #     ]
-    #     with self.get_tensors() as averaged_grads:
-    #         for opt_param, averaged_grad, main_param in zip(
-    #             opt_parameters, averaged_grads, self.main_parameters
-    #         ):
-    #             # opt_param is the param that will be all_reduce, it is suppose to be on cpu
-    #             # main_param is the param that has been updated by the inner optimizer, it is suppose to be on gpu
-    #             grad = opt_param.data - main_param.detach().to(opt_param.device)
-    #             averaged_grad.copy_(grad, non_blocking=True)
-
-    # @torch.no_grad()
-    # def compute_and_load_pseudo_grad_into_averager(self):
-    #     """
-    #     Rank 0: request shards via RPC, reassemble full params,
-    #     subtract CPU offloaded optimizer state, load pseudo-grads into averager.
-    #     """
-    #     assert self.local_rank == 0, "Only rank 0 should call this function!"
-
-    #     opt_parameters = [
-    #         p for g in self.offloaded_optimizer.param_groups for p in g["params"]
-    #     ]
-
-    #     with self.get_tensors() as averaged_grads:
-    #         for idx, (opt_param, averaged_grad, main_param) in enumerate(
-    #             zip(opt_parameters, averaged_grads, self.main_parameters)
-    #         ):
-    #             # TODO Change to self.logger
-    #             bt.logging.info(idx)
-    #             # 1. Gather shards from all ranks
-    #             shards = []
-    #             for r in range(self.world_size):
-    #                 fut = rpc.rpc_async(f"worker{r}", get_param_shard, args=(main_param,))
-    #                 shards.append(fut.wait())
-
-    #             bt.logging.info("Length of shards: " + str(len(shards)))
-    #             # include local shard directly
-    #             shards.insert(0, main_param.detach().cpu().clone())
-    #             bt.logging.info("Length of shards: " + str(len(shards)))
-
-    #             # 2. Reassemble full param on CPU
-    #             full_param_cpu = torch.cat([s.view(-1) for s in shards]).view_as(opt_param)
-    #             bt.logging.info("Length of shards: " + str(len(full_param_cpu)))
-    #             # 3. Compute pseudo-grad on CPU
-    #             grad = opt_param.data - full_param_cpu.to(opt_param.device)
-    #             bt.logging.info("Length of shards: " + str(len(grad)))
-
-    #             # 4. Write into averager
-    #             averaged_grad.copy_(grad, non_blocking=True)
+    @torch.no_grad()
+    def compute_and_load_pseudo_grad_into_averager(self):
+        """compute pseudo gradient by subtracting the offloaded optimizer parameters with the main parameters and load them in the averager"""
+        opt_parameters = [
+            param
+            for group in self.offloaded_optimizer.param_groups
+            for param in group["params"]
+        ]
+        with self.get_tensors() as averaged_grads:
+            for opt_param, averaged_grad, main_param in zip(
+                opt_parameters, averaged_grads, self.main_parameters
+            ):
+                # opt_param is the param that will be all_reduce, it is suppose to be on cpu
+                # main_param is the param that has been updated by the inner optimizer, it is suppose to be on gpu
+                grad = opt_param.data - main_param.detach().to(opt_param.device)
+                averaged_grad.copy_(grad, non_blocking=True)
 
     # worker1, worker2, ... define this
     def get_param_shard(self, idx: int) -> torch.Tensor:
         # idx is the index into self.main_parameters
         return self.main_parameters[idx]
-
-    @torch.no_grad()
-    def compute_and_load_pseudo_grad_into_averager(self):
-        """
-        Rank 0 only:
-        - Requests shards via RPC from other ranks one at a time.
-        - Reconstructs parameter shard by shard on CPU.
-        - Computes pseudo-gradients and loads into averager.
-        """
-        assert self.local_rank == 0, "Only rank 0 should call this function!"
-
-        opt_parameters = [
-            p for g in self.offloaded_optimizer.param_groups for p in g["params"]
-        ]
-
-        with self.get_tensors() as averaged_grads:
-            for idx, (opt_param, averaged_grad, main_param) in enumerate(
-                zip(opt_parameters, averaged_grads, self.main_parameters)
-            ):
-                # TODO Change to self.logger
-                bt.logging.info(idx)
-                # 1. Start with local shard (rank 0)
-                shards = [main_param.detach().cpu().clone()]
-                bt.logging.info("Length of shards: " + str(len(shards)))
-
-                # 2. Fetch remote shards one at a time to minimize CPU memory
-                for r in range(1, self.world_size):
-                    # cpu_param = main_param.detach().cpu()
-                    # fut = rpc.rpc_async(f"worker{r}",  global_shard_provider.get_param_shard, args=(idx,))
-                    fut = rpc.rpc_async(f"worker{r}", srd2.get_param_shard, args=(idx,))
-                    shard = fut.wait()
-                    bt.logging.info(f"Length of shards {r}: {len(shards)}")
-                    shards.append(shard)
-
-                bt.logging.info("Length of shards: " + str(len(shards)))
-                # 3. Reassemble full parameter on CPU (concatenate along flattened dimension)
-                full_param_cpu = torch.cat([s.view(-1) for s in shards]).view_as(
-                    opt_param
-                )
-
-                bt.logging.info("Length of full_param_cpu: " + str(len(full_param_cpu)))
-                # 4. Compute pseudo-gradient
-                grad = opt_param.data - full_param_cpu.to(opt_param.device)
-
-                bt.logging.info("Length of grad: " + str(len(grad)))
-                # 5. Write into averager
-                averaged_grad.copy_(grad, non_blocking=True)
 
     def notify_used_averaged_gradients(self):
         """Notify averager that the results of a previous averaging round are accounted for"""

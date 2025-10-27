@@ -11,9 +11,9 @@ def log_r2_to_chain(self):
             )
             self.subtensor.commit(self.wallet, self.config.netuid, str(metadata))
             self.r2_credentials_logged_to_chain = True
-            self.logger.info(f"Metadata dict succesfully logged to chain.")
+            self.logger.info(f"Metadata Dict Succesfully Logged To Chain.")
         except Exception as e:
             self.peer_id_logged_to_chain = False
             self.logger.info(
-                f"Unable to log bucket data to chain due to error {e}. Retrying on the next step."
+                f"Unable To Log Bucket Data To Chain Due To Error {e}. Retrying On The Next Step."
             )

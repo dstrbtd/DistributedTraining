@@ -219,15 +219,13 @@ class AveragingHandler:
 
                 # Perform offloaded outer optimization steps
                 # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                bt.logging.info("Performing Outer Optimizer Step..")
+                bt.logging.info("Outer Optimizer Step Started")
                 self.outer_optimizer.step()
+                bt.logging.info("Outer Optimizer Step Finished")
 
                 bt.logging.info(
                     ":white_heavy_check_mark: Finished Outer Optimizer Step."
                 )
-
-                # # Validate weight updates
-                # await self._validate_weight_update(initial_weights, block)
 
                 all_reduce_success_status = True
                 results = {
@@ -240,7 +238,6 @@ class AveragingHandler:
                 }
             else:
                 all_reduce_success_status = False
-            # raise Exception("Forcing AllReduce Failure for Testing")
 
         except Exception as e:
             bt.logging.error(f"Unexpected error during Averaging Process: {str(e)}")
@@ -430,7 +427,7 @@ class AveragingHandler:
                 # Perform offloaded outer optimization steps
                 # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
-                bt.logging.info("Performing Outer Optimizer Step")
+                bt.logging.info("Outer Optimizer Step Started")
                 for i, group in enumerate(self.outer_optimizer.param_groups):
                     for p in group["params"]:
                         bt.logging.info(
@@ -438,7 +435,7 @@ class AveragingHandler:
                         )
                         break
                 self.outer_optimizer.step()
-                bt.logging.info("OPT STEP COMPLETED")
+                bt.logging.info("Outer Optimizer Step Finisheds")
                 for i, group in enumerate(self.outer_optimizer.param_groups):
                     for p in group["params"]:
                         bt.logging.info(
@@ -450,10 +447,10 @@ class AveragingHandler:
                 synapse.completion = False
 
         except Exception as e:
-            bt.logging.error(f"Unexpected error during Averaging Process: {str(e)}")
+            bt.logging.error(f"Unexpected Error During Averaging Process: {str(e)}")
             synapse.completion = False
             raise AllReduceError(
-                f"Unexpected error during Averaging Process: {str(e)}"
+                f"Unexpected Error During Averaging Process: {str(e)}"
             ) from e
 
         finally:
@@ -511,4 +508,4 @@ class AveragingHandler:
             ):
                 opt_param.data.copy_(main_param.data, non_blocking=True)
         except Exception as e:
-            self.logger.info(f"Failed to reset optimizer parameters with error: {e}")
+            self.logger.info(f"Failed To Reset Optimizer Parameters With Error: {e}")

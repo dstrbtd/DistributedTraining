@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-bucket = "llama-1b-ws-2-000"
+bucket = "llama-1b-ws-4-000"
 
 r2 = boto3.client(
     "s3",

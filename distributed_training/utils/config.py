@@ -230,7 +230,7 @@ def add_args(cls, parser, prefix=None):
     parser.add_argument(
         "--neuron.show_all_rank_logs",
         action="store_true",
-        help="Toggles wandb logging for the project",
+        help="Set to true to show logs of all ranks",
         default=False,
     )
 
