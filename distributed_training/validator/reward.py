@@ -281,10 +281,10 @@ def get_uids_blocks(self, uid: int, prefix=str) -> list[int]:
         destination=bucket_name,
     )
     uid_blocks = json.load(open(config_path))["block_list"]
-    if False:
-        # if (self.current_block - max(uid_blocks)) > (
-        #     self.config.neuron.blocks_per_allreduce / 2
-        # ):
+    # if False:
+    if (self.current_block - max(uid_blocks)) > (
+        self.config.neuron.blocks_per_allreduce / 2
+    ):
         raise Exception(
             f"Uploaded datatset block older than {((self.config.neuron.blocks_per_allreduce / 2) *12) / 60} minutes"
         )
@@ -398,7 +398,7 @@ async def score_uids(self, uids: list):
             revision = revision_list[0]
 
             # Revision Checks
-            if revision.split(".")[-1] == 0:
+            if int(revision.split(".")[-1]) == 0:
                 raise Exception(f"Revision {revision} has 0 inner steps")
 
             # ──────────────────────────────────────────────────────────────────────────
@@ -467,6 +467,7 @@ async def score_uids(self, uids: list):
             self.logger.info(f"UID {uid:03d}: Score status {score_status[0].item()}")
             if (score_status[0].item() != self.world_size) and self.master:
                 reset_uid_train_scores(self, uid)
+                self.uid_tracker[uid].train.updated_time = test_time
             elif self.master:
                 # Mark update time for UID
                 self.uid_tracker[uid].train.updated_time = test_time
@@ -510,6 +511,7 @@ def benchmark_uids(self):
     else:
         epoch = self.global_progress.epoch
         prefix = ""
+    prefix = f"epoch-{epoch}/"
 
     for uid in self.uid_tracker:
         try:

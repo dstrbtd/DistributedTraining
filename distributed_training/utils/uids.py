@@ -173,7 +173,6 @@ def get_next_uid_api(self):
             f"Error {e} getting UID from: {self.uid_api_url}. Attempting to get UID manually."
         )
         uids = get_next_uids_manual(self, k=self.config.neuron.sample_size)
-
     return uids
 
 

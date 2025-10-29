@@ -261,6 +261,7 @@ class Miner(BaseMinerNeuron):
                 )
             )
         elif not self.all_reduce_success_status:
+            block_list = self.model.config.block_list
             if self.local_progress.epoch > self.global_progress.epoch:
                 self.logger.info(
                     f"Local Epoch {self.local_progress.epoch} Ahead Of Global Epoch {self.global_progress.epoch}. Loading Latest Model State."
@@ -275,7 +276,7 @@ class Miner(BaseMinerNeuron):
                     uid=self.uid,
                     epoch=self.global_progress.epoch,
                 )
-            self.model.config.block_list = []
+            self.model.config.block_list = block_list
             self.resume_training()
             self.all_reduce_success_status = True
         else:
@@ -446,7 +447,9 @@ class Miner(BaseMinerNeuron):
                             self.logger.info(
                                 "Cancelling Ongoing Model Upload For AllReduce Operation"
                             )
-                            self.model.config.block_list = block_list + self.model.config.block_list
+                            self.model.config.block_list = (
+                                block_list + self.model.config.block_list
+                            )
                             return False
                         else:
                             time.sleep(5)
@@ -472,7 +475,9 @@ class Miner(BaseMinerNeuron):
                         "Maximum retry limit reached. Unable to upload state to HF Hub."
                     )
                     if self.master:
-                        self.model.config.block_list = block_list + self.model.config.block_list
+                        self.model.config.block_list = (
+                            block_list + self.model.config.block_list
+                        )
                     raise
 
         return False
@@ -576,7 +581,7 @@ class Miner(BaseMinerNeuron):
 
                 pages = await DatasetLoader.next_pages(
                     offset=self.current_block,
-                    n_pages=35,
+                    n_pages=5,
                     seed=self.uid + self.local_rank,
                 )
                 rng = np.random.default_rng(hash(self.uid) & 0xFFFFFFFF)

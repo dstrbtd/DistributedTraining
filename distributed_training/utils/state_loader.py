@@ -387,12 +387,15 @@ def check_cache_sync(self, r2, local_model_name, epoch, output_dir):
             metadata["inner_step"],
         ):
             files = os.listdir(local_output_dir)
-            required_files = [
-                "config.json",
-                "model.safetensors",
-                "outer_optimzer.pt",
-                "metadata.json",
-            ]
+            if local_model_name == self.config.neuron.global_model_name:
+                required_files = [
+                    "config.json",
+                    "model.safetensors",
+                    "outer_optimizer.pt",
+                    "metadata.json",
+                ]
+            else:
+                required_files = ["config.json", "model.safetensors", "metadata.json"]
             for i in range(self.world_size):
                 required_files.append(
                     f"inner_optimizer.rank{i+1:04d}-of-{self.world_size}.pt"
@@ -451,7 +454,7 @@ def load_model_optimizer_gradient_averager(
     global_output_dir = os.path.join(os.getcwd(), global_model_name)
     use_cache = check_cache_sync(self, r2, local_model_name, prefix, output_dir)
     use_global_cache = check_cache_sync(
-        self, r2, local_model_name, prefix, global_output_dir
+        self, r2, global_model_name, prefix, global_output_dir
     )
 
     # Delete existing average handler

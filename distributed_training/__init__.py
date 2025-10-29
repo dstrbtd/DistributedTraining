@@ -17,7 +17,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 # version nomenclature = __training_type__.__model__.__other_changes__
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 __run__ = "0"
 version_split = __version__.split(".")
 __spec_version__ = (

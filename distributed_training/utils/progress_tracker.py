@@ -109,6 +109,13 @@ def get_r2_client(self, uid: int, donwload_on_all_ranks: bool):
 
     self.logger.debug(account_id, access_key_id, secret_access_key)
 
+    if (
+        (account_id == "x" * 32)
+        or (access_key_id == "x" * 32)
+        or (secret_access_key == "x" * 64)
+    ):
+        raise ValueError(f"UID {uid:03d} has no R2 credentials.")
+
     return self.session.client(
         "s3",
         endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
@@ -135,12 +142,12 @@ def get_progress(
     elif (local_or_global == "global") or (uid == self.master_uid):
         bucket_name = self.config.neuron.global_model_name
 
-    if uid is not None:
-        r2 = get_r2_client(self, uid, donwload_on_all_ranks)
-    else:
-        r2 = self.r2[local_or_global]
-
     try:
+        if uid is not None:
+            r2 = get_r2_client(self, uid, donwload_on_all_ranks)
+        else:
+            r2 = self.r2[local_or_global]
+
         obj = r2.get_object(Bucket=bucket_name, Key="metadata.json")
         data = obj["Body"].read()
         metadata = json.loads(data)

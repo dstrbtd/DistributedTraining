@@ -102,7 +102,7 @@ async def forward(self):
                 # Get active miners
                 while len(self.miner_uids) < min_sample_size:
                     self.logger.info(
-                        f"Found {len(self.miner_uids)} UIDs. Attempting to find {min_sample_size - len(self.miner_uids) - 1} more UIDs."
+                        f"Found {len(self.miner_uids)} UIDs. Attempting to find {min_sample_size - len(self.miner_uids)} more UIDs."
                     )
                     self.miner_uids = await get_random_uids(
                         self,
@@ -110,6 +110,10 @@ async def forward(self):
                         k=sample_size,
                         epoch=self.local_progress.epoch,
                     )
+                    if (len(self.miner_uids) < min_sample_size) and (
+                        min_sample_size > 3
+                    ):
+                        min_sample_size = min_sample_size - 1
             dist.barrier()
         else:
             # For non-master validators
@@ -400,7 +404,7 @@ async def forward(self):
         )
 
         # Update scores
-        self.update_scores()
+        self.update_scores(self.miner_uids)
 
         self.event.update(self.get_validator_info())
 

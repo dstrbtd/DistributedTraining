@@ -36,8 +36,10 @@ from distributed_training.utils.config import (
     R2Access,
     R2Config,
 )
+from distributed_training.utils.logger import setup_logging
 from distributed_training.utils.misc import ttl_get_block
 from dotenv import load_dotenv
+
 
 import torch, torch.distributed as dist
 import datetime as dt
@@ -167,6 +169,9 @@ class BaseNeuron(ABC):
         dist.broadcast(master_uid, src=0, group=self.gloo_group)
         self.master_uid = master_uid[0].item()
 
+        # Setup Logging
+        setup_logging(self, config=self.config)
+
         # Create the R2 data model
         r2 = R2Config(
             bucket_name=f"{self.config.neuron.global_model_name.split('/')[-1]}-{self.uid:03d}"
@@ -186,6 +191,11 @@ class BaseNeuron(ABC):
 
         # Save directory
         self.output_dir = os.path.join(os.getcwd(), self.config.r2.bucket_name)
+        os.makedirs(self.output_dir, exist_ok=True)
+        os.makedirs(
+            os.path.join(os.getcwd(), self.config.neuron.global_model_name),
+            exist_ok=True,
+        )
 
         # Init Step
         self.step = 0
@@ -258,10 +268,12 @@ class BaseNeuron(ABC):
         self.reload_state_event = threading.Event()
 
     # @abstractmethod # miner is not using this anymore
-    async def forward(self, synapse: bt.Synapse) -> bt.Synapse: ...
+    async def forward(self, synapse: bt.Synapse) -> bt.Synapse:
+        ...
 
     @abstractmethod
-    def run(self): ...
+    def run(self):
+        ...
 
     def sync(self):
         """

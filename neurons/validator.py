@@ -55,7 +55,6 @@ from distributed_training.utils.misc import (
     init_dht,
     load_wandb,
 )
-from distributed_training.utils.logger import setup_logging
 from distributed_training.utils.progress_tracker import (
     GlobalTrainingProgress,
     LocalTrainingProgress,
@@ -232,8 +231,6 @@ class Validator(BaseValidatorNeuron):
 
     def _init_basic_components(self):
         """Initialize basic validator components"""
-        setup_logging(self, config=self.config)
-
         # Core setup
         self.device = self.config.neuron.device
         init_dht(self)
