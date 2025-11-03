@@ -450,7 +450,6 @@ async def score_uids(self, uids: list):
             if self.master:
                 for k, v in loss_scores.items():
                     setattr(self.uid_tracker[uid].train.assigned, k, v)
-
             self.logger.info(
                 f"UID {uid:03d}: Assigned <=> Absolute loss improvement: {loss_scores['absolute']:.6f}"
             )
@@ -480,9 +479,9 @@ def score_repo(self, uid: int, prefix: str) -> bool:
     """
     Check if the miner's R2 manifest exists and is recent enough.
     """
-    bucket_name = f"{self.config.neuron.global_model_name}-{uid:03d}"
-    r2 = get_r2_client(self, uid, donwload_on_all_ranks=False)
     try:
+        bucket_name = f"{self.config.neuron.global_model_name}-{uid:03d}"
+        r2 = get_r2_client(self, uid, donwload_on_all_ranks=False)
         response = r2.head_object(Bucket=bucket_name, Key=f"{prefix}gradients.pt")
         last_modified = (
             email.utils.parsedate_to_datetime(
@@ -516,9 +515,9 @@ def benchmark_uids(self):
     for uid in self.uid_tracker:
         try:
             self.uid_tracker[uid].train.is_valid = score_repo(self, uid, prefix)
-        except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
-            # self.logger.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
-            self.uid_tracker[uid].train.is_valid = False
+        # except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
+        #     # self.logger.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
+        #     self.uid_tracker[uid].train.is_valid = False
         except Exception as e:
             self.logger.info(
                 f"UID {uid} benchmarking failed with error {e}. Keeping score as is."
@@ -652,9 +651,12 @@ def update_train_scores(self, uids: list):
                 > self.uid_tracker[uid].train.random.absolute
             )
         )
-        self.uid_tracker[uid].train.score = (
-            self.uid_tracker[uid].train.random.score
-            * self.uid_tracker[uid].train.assigned.score
+        self.uid_tracker[uid].train.score = max(
+            0,
+            (
+                self.uid_tracker[uid].train.random.score
+                * self.uid_tracker[uid].train.assigned.score
+            ),
         )
 
     display_rankings(self, uids, original_openskill_scores)

@@ -129,6 +129,10 @@ async def forward(self):
 
         compute_and_load_pseudo_grad_into_averager(self)
         if self.master:
+            for uid in self.miner_uids:
+                self.uid_tracker[
+                    uid
+                ].train.revision = f"{__run__}.{self.global_progress.epoch}.{get_progress(self, 'local', uid=uid, donwload_on_all_ranks=False)[1]}"
             self.miner_uids = np.flip(
                 np.array(
                     [
@@ -136,8 +140,9 @@ async def forward(self):
                         for i in np.argsort(
                             [
                                 # self.metagraph.incentive[i].item()
-                                self.uid_tracker[i].total.score
-                                * self.uid_tracker[i].train.is_valid
+                                # self.uid_tracker[i].total.score
+                                # * self.uid_tracker[i].train.is_valid
+                                int(self.uid_tracker[i].train.revision.split(".")[-1])
                                 for i in self.miner_uids
                             ]
                         )
@@ -162,8 +167,9 @@ async def forward(self):
                 if top_uid_index < len(self.miner_uids):
                     top_uid = self.miner_uids[top_uid_index]
                 else:
-                    top_uid = 244
+                    top_uid = 212
                 self.local_progress.epoch = self.global_progress.epoch
+
                 self.logger.info(f"Top UID identified as: {top_uid}")
 
                 self.local_progress.inner_step = get_progress(
@@ -345,7 +351,7 @@ async def forward(self):
             else:
                 self.logger.info("Succesfully completed allreduce & upload process")
                 self.all_reduce_success_status = True
-                self.config.neuron.blocks_per_allreduce = 500
+                self.config.neuron.blocks_per_allreduce = 750
 
     else:
         if self.master:

@@ -162,7 +162,7 @@ def add_args(cls, parser, prefix=None):
         "--neuron.blocks_per_allreduce",
         type=int,
         help="Amount of blocks between each all reduce",
-        default=250,
+        default=750,
     )
 
     parser.add_argument(

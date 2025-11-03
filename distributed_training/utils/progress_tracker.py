@@ -137,6 +137,8 @@ def get_progress(
     # uid is used for validators to cycle through progress of different uids
     if (local_or_global != "global") and (bucket_name is None) and (uid is None):
         bucket_name = self.config.r2.bucket_name
+    elif (local_or_global != "global") and (uid == self.master_uid):
+        bucket_name = f"{self.config.neuron.global_model_name}-{uid:03d}"
     elif (uid is not None) and (uid != self.master_uid):
         bucket_name = f"{self.config.neuron.global_model_name}-{uid:03d}"
     elif (local_or_global == "global") or (uid == self.master_uid):
