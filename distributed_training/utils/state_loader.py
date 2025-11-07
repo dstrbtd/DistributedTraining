@@ -378,6 +378,7 @@ def check_cache_sync(self, r2, local_model_name, epoch, output_dir):
                 bucket=local_model_name,
                 key=f"epoch-{epoch}/metadata.json",
                 donwload_on_all_ranks=False,
+                run_on_all_ranks=True,
                 destination=output_dir,
             )
         with open(metadata_file_path, "r") as file:
@@ -409,7 +410,7 @@ def check_cache_sync(self, r2, local_model_name, epoch, output_dir):
             self.logger.info("Local Cache Out Of Sync - Re-Downloading")
             return False
     except Exception as e:
-        self.logger.info(f"Error {e} checking local cache")
+        self.logger.info(f"Error {e} Checking Local Cache")
         return False
 
 
@@ -495,23 +496,28 @@ def load_model_optimizer_gradient_averager(
 
         if not hasattr(self, "model"):
             if use_cache is False:
-                _ = r2_download(
-                    self,
-                    r2=r2,
-                    bucket=local_model_name,
-                    key=f"{prefix}model.safetensors",
-                    donwload_on_all_ranks=False,
-                    destination=output_dir,
-                )
+                # if False:
+                self.logger.info("Downloading Config State")
                 _ = r2_download(
                     self,
                     r2=r2,
                     bucket=local_model_name,
                     key=f"{prefix}config.json",
                     donwload_on_all_ranks=False,
+                    run_on_all_ranks=True,
                     destination=output_dir,
                 )
-                dist.barrier()
+                self.logger.info("Downloading Model State")
+                _ = r2_download(
+                    self,
+                    r2=r2,
+                    bucket=local_model_name,
+                    key=f"{prefix}model.safetensors",
+                    donwload_on_all_ranks=False,
+                    run_on_all_ranks=True,
+                    destination=output_dir,
+                )
+            self.logger.info("Setting Model")
             self.model = AutoModelForCausalLM.from_pretrained(
                 output_dir,  # directory containing model files
                 trust_remote_code=False,
@@ -535,32 +541,31 @@ def load_model_optimizer_gradient_averager(
             fully_shard(self.model, mesh=self.mesh, mp_policy=mp_policy)
             self.logger.info("Sharded Model State")
         else:
-            if self.master:
-                if use_cache is False:
-                    saftensors_path = r2_download(
-                        self,
-                        r2=r2,
-                        bucket=local_model_name,
-                        key=f"{prefix}model.safetensors",
-                        donwload_on_all_ranks=False,
-                        destination=output_dir,
-                    )
-                else:
-                    saftensors_path = os.path.join(self.output_dir, "model.safetensors")
+            if use_cache is False:
+                saftensors_path = r2_download(
+                    self,
+                    r2=r2,
+                    bucket=local_model_name,
+                    key=f"{prefix}model.safetensors",
+                    donwload_on_all_ranks=False,
+                    run_on_all_ranks=True,
+                    destination=output_dir,
+                )
+            else:
+                saftensors_path = os.path.join(self.output_dir, "model.safetensors")
 
+            if self.master:
                 model_state = load_file(saftensors_path, device="cpu")
             else:
                 model_state = None
 
-            # objs = [model_state]
-            # dist.broadcast_object_list(objs, src=0, group=self.gloo_group)
-            # m_blob = objs[0]
             self.logger.info(self.print_memory_usage())
             self.logger.info("Downloaded Model State")
             model_loading_options = StateDictOptions(
                 full_state_dict=True, cpu_offload=True, broadcast_from_rank0=True
             )
             dist.barrier()
+            self.logger.info("Model State Dict")
             set_model_state_dict(self.model, model_state, options=model_loading_options)
             self.logger.info("Sharded Model State")
             self.logger.info(self.print_memory_usage())
@@ -616,6 +621,7 @@ def load_model_optimizer_gradient_averager(
                     bucket=local_model_name,
                     key=f"{prefix}inner_optimizer.rank{self.local_rank+1:04d}-of-{self.world_size}.pt",
                     donwload_on_all_ranks=True,
+                    run_on_all_ranks=True,
                     destination=output_dir,
                 )
             else:
@@ -737,6 +743,7 @@ def load_model_optimizer_gradient_averager(
                         bucket=global_model_name,
                         key=f"{prefix}outer_optimizer.pt",
                         donwload_on_all_ranks=False,
+                        run_on_all_ranks=False,
                         destination=global_output_dir,
                     )
                 else:
@@ -1023,16 +1030,6 @@ def save_and_upload_state(
                     os.path.join(self.output_dir, "outer_optimizer.pt"),
                 )
                 self.logger.info("Save optimizer")
-
-                # # # Save metadata
-                # metadata = {
-                #     "run": int(__run__),
-                #     "outer_step": int(self.local_progress.epoch),
-                #     "inner_step": int(self.local_progress.inner_step),
-                #     "peer_id": str(self.dht.peer_id.to_base58()),
-                # }
-                # with open(os.path.join(self.output_dir, f"metadata.json"), "w") as f:
-                #     json.dump(metadata, f, indent=4, sort_keys=True)
 
             # Save inner optimizer state
             inner_optimizer_state = {

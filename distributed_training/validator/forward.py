@@ -42,6 +42,7 @@ from distributed_training.validator.reward import (
     score_uids,
     update_total_scores,
     update_train_scores,
+    evaluate_model,
 )
 from distributed_training.averaging.averagers import (
     compute_and_load_pseudo_grad_into_averager,
@@ -81,6 +82,13 @@ async def forward(self):
     self.logger.info(
         f"Current block {self.current_block} | Blocks Since Last AllReduce: {self.blocks_since_allreduce} | Should AllReduce: {self.should_all_reduce}"
     )
+    if (
+        self.blocks_since_allreduce < (self.config.neuron.blocks_per_allreduce / 2)
+    ) and (self.global_progress.epoch != 0):
+        epoch = self.global_progress.epoch - 1
+    else:
+        epoch = self.global_progress.epoch
+    # epoch = self.global_progress.epoch
 
     responses = [[]]
 
@@ -104,12 +112,15 @@ async def forward(self):
                     self.logger.info(
                         f"Found {len(self.miner_uids)} UIDs. Attempting to find {min_sample_size - len(self.miner_uids)} more UIDs."
                     )
-                    self.miner_uids = await get_random_uids(
-                        self,
-                        dendrite=self.dendrite,
-                        k=sample_size,
-                        epoch=self.local_progress.epoch,
-                    )
+                    self.miner_uids += (
+                        await get_random_uids(
+                            self,
+                            dendrite=self.dendrite,
+                            k=sample_size,
+                            epoch=self.local_progress.epoch,
+                        )
+                    ).tolist()
+                    self.miner_uids = list(set(self.miner_uids))
                     if (len(self.miner_uids) < min_sample_size) and (
                         min_sample_size > 3
                     ):
@@ -211,7 +222,20 @@ async def forward(self):
                 all_reduce_success_status_tensor, src=0, group=self.gloo_group
             )
             if all_reduce_success_status_tensor[0].item() == 1:
-                self.logger.info(f"Apply optimizer parameters to model")
+                (
+                    total_loss_before,
+                    _,
+                    n_batches_sampled_before,
+                ) = await evaluate_model(
+                    self,
+                    model=self.model,
+                    blocks=[self.current_block],
+                    uid=self.uid,
+                    samples=None,
+                    n_pages=2,
+                )
+                average_loss_before = total_loss_before / n_batches_sampled_before
+
                 apply_optimizer_parameters(self)
 
                 bt.logging.info(
@@ -219,14 +243,33 @@ async def forward(self):
                 )
 
                 if self.master:
-                    # TODO Get actaul initial weights
-                    # initial_weights = None
-                    self.logger.info("Validate weights")
+                    self.logger.info("Validate Weights After Opt Step")
                     # Validate weight updates
                     await self.avg_handler._validate_weight_update(
                         initial_weights, self.current_block
                     )
-                    self.logger.info("Validate weights Done")
+
+                self.logger.info(f"Apply optimizer parameters to model")
+                (
+                    total_loss_after,
+                    _,
+                    n_batches_sampled_after,
+                ) = await evaluate_model(
+                    self,
+                    model=self.model,
+                    blocks=[self.current_block],
+                    uid=self.uid,
+                    samples=None,
+                    n_pages=2,
+                )
+                average_loss_after = total_loss_after / n_batches_sampled_after
+
+                if (
+                    (average_loss_after - average_loss_before) / (average_loss_after)
+                ) > 0.25:
+                    raise Exception(
+                        f"Average Loss After All Reduce {average_loss_after} > 25% higher than Average Loss Before {average_loss_before}"
+                    )
 
                 self.set_current_block_across_ranks()
                 # Reset allreduce block tracker
@@ -311,6 +354,7 @@ async def forward(self):
                             participating_miners_count=len(
                                 results["participating_peers"]
                             ),
+                            failed_miners_count=results["failed_peers"],
                             bandwidth=avg_bandwidth,
                         )
                         # -------
@@ -360,6 +404,7 @@ async def forward(self):
             miner_uids = torch.tensor(
                 get_next_uid_api(
                     self,
+                    epoch,
                 )
             )
         else:
@@ -377,7 +422,7 @@ async def forward(self):
             self.event.update({"UIDs": self.miner_uids})
         self.logger.info(f"UIDs:  {self.miner_uids}")
 
-        await score_uids(self, self.miner_uids)
+        await score_uids(self, epoch, self.miner_uids)
 
         if self.master:
             # Update train.scores for each UID
@@ -388,7 +433,7 @@ async def forward(self):
 
             # Post
             if self.uid == self.master_uid:
-                post_next_uid_api(self)
+                post_next_uid_api(self, epoch)
 
     if self.master:
         self.event.update(

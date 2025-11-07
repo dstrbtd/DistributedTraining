@@ -152,23 +152,22 @@ async def evaluate_model(
 
         with torch.no_grad():
             model.eval()
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
-                for i, batch in enumerate(dataset):
-                    inputs, labels = batch
-                    if inputs is None or len(inputs) == 0:
-                        self.logger.info(f"Empty batch at index {i}, skipping")
-                        continue
-                    n_batches_total += 1
-                    if (samples is not None) and (i not in samples):
-                        continue
+            for i, batch in enumerate(dataset):
+                inputs, labels = batch
+                if inputs is None or len(inputs) == 0:
+                    self.logger.info(f"Empty batch at index {i}, skipping")
+                    continue
+                n_batches_total += 1
+                if (samples is not None) and (i not in samples):
+                    continue
+                inputs = inputs.to(device)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    outputs = model(input_ids=inputs, labels=inputs)
 
-                    inputs = inputs.to(device)
-                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                        outputs = model(input_ids=inputs, labels=inputs)
-                    total_loss += outputs.loss.item()
-                    n_batches_sampled += 1
-                    del inputs, labels, outputs
-                    torch.cuda.empty_cache()
+                total_loss += outputs.loss.item()
+                n_batches_sampled += 1
+                del inputs, labels, outputs
+                torch.cuda.empty_cache()
 
     return total_loss, n_batches_total, n_batches_sampled
 
@@ -195,8 +194,25 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
     ) = await evaluate_model(
         self, model=model_base, blocks=blocks, uid=uid, samples=None, n_pages=1
     )
+
+    # local aggregates
+    total_loss_before_tensor = torch.tensor(
+        [total_loss_before], dtype=torch.float64, device="cuda"
+    )
+    n_batches_sampled_before_tensor = torch.tensor(
+        [n_batches_sampled_before], dtype=torch.int64, device="cuda"
+    )
+
+    # sum across all ranks (in-place; now identical on every rank)
+    dist.all_reduce(total_loss_before_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(n_batches_sampled_before_tensor, op=dist.ReduceOp.SUM)
+
+    total_loss_before = float(total_loss_before_tensor.item())
+    n_batches_sampled_before = int(n_batches_sampled_before_tensor.item())
+
     average_loss_before = total_loss_before / n_batches_sampled_before
-    self.logger.debug(
+
+    self.logger.info(
         f"UID {uid:03d}: Model loss before gradient update {average_loss_before:6f}"
     )
 
@@ -213,12 +229,12 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
         bucket=f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
         key=f"{prefix}gradients.pt",
         donwload_on_all_ranks=False,
+        run_on_all_ranks=True,
         destination=os.path.join(
             os.getcwd(),
             f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
         ),
     )
-    dist.barrier()
     gradient = torch.load(
         gradient_path,
         weights_only=True,
@@ -238,8 +254,25 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
     ) = await evaluate_model(
         self, model=model_t1, blocks=blocks, uid=uid, samples=None, n_pages=1
     )
+
+    # local aggregates
+    total_loss_after_tensor = torch.tensor(
+        [total_loss_after], dtype=torch.float64, device="cuda"
+    )
+    n_batches_sampled_after_tensor = torch.tensor(
+        [n_batches_sampled_after], dtype=torch.int64, device="cuda"
+    )
+
+    # sum across all ranks (in-place; now identical on every rank)
+    dist.all_reduce(total_loss_after_tensor, op=dist.ReduceOp.SUM)
+    dist.all_reduce(n_batches_sampled_after_tensor, op=dist.ReduceOp.SUM)
+
+    total_loss_after = float(total_loss_after_tensor.item())
+    n_batches_sampled_after = int(n_batches_sampled_after_tensor.item())
+
     average_loss_after = total_loss_after / n_batches_sampled_after
-    self.logger.debug(
+
+    self.logger.info(
         f"UID {uid:03d}: Model loss after gradient update {average_loss_after:6f}"
     )
 
@@ -278,6 +311,7 @@ def get_uids_blocks(self, uid: int, prefix=str) -> list[int]:
         bucket=bucket_name,
         key=f"{prefix}config.json",
         donwload_on_all_ranks=True,
+        run_on_all_ranks=True,
         destination=bucket_name,
     )
     uid_blocks = json.load(open(config_path))["block_list"]
@@ -314,7 +348,7 @@ def reset_uid_train_scores(self, uid: int):
         setattr(self.uid_tracker[uid].train.assigned, k, v)
 
 
-async def score_uids(self, uids: list):
+async def score_uids(self, epoch: int, uids: list):
     """
     Score each UID by calculating the loss before and after applying their pseudo gradient.
 
@@ -332,10 +366,8 @@ async def score_uids(self, uids: list):
     if (
         self.blocks_since_allreduce < (self.config.neuron.blocks_per_allreduce / 2)
     ) and (self.global_progress.epoch != 0):
-        epoch = self.global_progress.epoch - 1
         prefix = f"epoch-{epoch}/"
     else:
-        epoch = self.global_progress.epoch
         prefix = ""
     prefix = f"epoch-{epoch}/"
 
@@ -431,6 +463,16 @@ async def score_uids(self, uids: list):
             # Step 2: Evaluate on UID's assigned data
             # ──────────────────────────────────────────────────────────────────────────
 
+            # Reset model state dict before an evaluation
+            set_model_state_dict(
+                self.model,
+                dict(model_state_dict),
+                options=StateDictOptions(
+                    full_state_dict=False,  # We saved only local shards, so load them back as such
+                    strict=True,  # Ensure all keys match
+                ),
+            )
+
             self.logger.info(f"UID {uid:03d}: Sampling dataset indices for testing")
             self.set_current_block_across_ranks()
             assigned_block = get_uids_blocks(self, uid, prefix)
@@ -510,6 +552,7 @@ def benchmark_uids(self):
     else:
         epoch = self.global_progress.epoch
         prefix = ""
+    # epoch = self.global_progress.epoch
     prefix = f"epoch-{epoch}/"
 
     for uid in self.uid_tracker:

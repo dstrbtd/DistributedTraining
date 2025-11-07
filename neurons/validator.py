@@ -42,8 +42,8 @@ torch.backends.cudnn.allow_tf32 = False
 
 import math
 import threading
+import torch.distributed as dist
 
-import bittensor as bt
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 from transformers import AutoTokenizer
@@ -70,9 +70,6 @@ from distributed_training.validator import forward
 from distributed_training import __run__
 
 from distributed_training.utils.compression import CompressDCT, TransformDCT
-from typing import Any
-
-import torch.distributed as dist
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
 )
@@ -80,6 +77,8 @@ from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     StateDictOptions,
 )
+from distributed_training.utils.r2 import r2_download
+from distributed_training.utils.state_loader import get_r2_client
 
 
 class Validator(BaseValidatorNeuron):
@@ -93,6 +92,44 @@ class Validator(BaseValidatorNeuron):
         self._init_network_components()
         self._init_uid_components()
         self._load_gradient_compressors()
+
+    def test_gradient(self, epoch, uid):
+        prefix = f"epoch-{epoch}/"
+        destination_dir = os.path.join(
+            os.getcwd(),
+            "gradients",
+        )
+        final_name = f"uid-{uid:03d}-epoch-{epoch}.pt"
+        final_path = os.path.join(destination_dir, final_name)
+
+        r2 = get_r2_client(self, uid, donwload_on_all_ranks=True)
+        gradient_path = r2_download(
+            self,
+            r2=r2,
+            bucket=f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}",
+            key=f"{prefix}gradients.pt",
+            donwload_on_all_ranks=False,
+            run_on_all_ranks=False,
+            destination=destination_dir,
+        )
+        if self.local_rank == 0:
+            os.makedirs(destination_dir, exist_ok=True)
+            # if r2_download returned the directory, assume file is "<dest_dir>/gradients.pt"
+            src = (
+                gradient_path
+                if gradient_path.endswith(".pt")
+                else os.path.join(destination_dir, "gradients.pt")
+            )
+            if os.path.abspath(src) != os.path.abspath(final_path):
+                os.replace(src, final_path)  # atomic on POSIX
+
+        gradient_path = final_path
+        dist.barrier()
+        gradient = torch.load(
+            gradient_path,
+            weights_only=True,
+            map_location="cpu",
+        )
 
     def _update_wandb_project(self):
         suffix = "_validators" if self.neuron_type == "ValidatorNeuron" else "_miners"

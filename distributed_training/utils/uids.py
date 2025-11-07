@@ -12,6 +12,7 @@ from bittensor.core.chain_data import decode_account_id
 from hivemind.p2p import PeerID
 from hivemind.utils.timed_storage import ValueWithExpiration
 from distributed_training.utils.state_loader import get_progress
+from distributed_training import __run__
 
 
 async def check_uid(self, dendrite, axon, uid, epoch=None):
@@ -137,19 +138,29 @@ async def get_random_uids(
     return uids
 
 
-def get_next_uids_manual(self, k: int = 25) -> List[int]:
+def get_next_uids_manual(self, epoch: int, k: int = 25) -> List[int]:
     try:
+        for uid in self.uid_tracker.keys():
+            self.uid_tracker[
+                uid
+            ].train.revision = f"{__run__}.{epoch}.{get_progress(self, 'local', uid=uid, donwload_on_all_ranks=False)[1]}"
+
         # Rank miners based off train_similarity_score_last_updated
-        self.uid_tracker = dict(
-            sorted(
-                self.uid_tracker.items(),
-                key=lambda item: (
-                    not item[1].train.is_valid,
-                    item[1].train.updated_time,
-                ),
-            )
+        uids = list(
+            dict(
+                sorted(
+                    (
+                        (uid, rec)
+                        for uid, rec in self.uid_tracker.items()
+                        if rec.train.revision.split(".")[-1] != "0"
+                    ),
+                    key=lambda item: (
+                        not item[1].train.is_valid,
+                        item[1].train.updated_time,
+                    ),
+                )
+            ).keys()
         )
-        uids = list(self.uid_tracker.keys())
         uids = uids[:k]
         return uids
 
@@ -157,8 +168,9 @@ def get_next_uids_manual(self, k: int = 25) -> List[int]:
         self.logger.info(f"Error getting UID manually: {e}")
 
 
-def get_next_uid_api(self):
+def get_next_uid_api(self, epoch: int = None) -> List[int]:
     try:
+        raise Exception("Forcing manual UID retrieval")
         response = requests.get(
             url=self.uid_api_url, headers={"Authorization": self.uid_api_get_token}
         )
@@ -172,12 +184,12 @@ def get_next_uid_api(self):
         self.logger.info(
             f"Error {e} getting UID from: {self.uid_api_url}. Attempting to get UID manually."
         )
-        uids = get_next_uids_manual(self, k=self.config.neuron.sample_size)
+        uids = get_next_uids_manual(self, epoch, k=self.config.neuron.sample_size)
     return uids
 
 
-def post_next_uid_api(self):
-    uids = get_next_uids_manual(self, k=self.config.neuron.sample_size)
+def post_next_uid_api(self, epoch: int = None):
+    uids = get_next_uids_manual(self, epoch, k=self.config.neuron.sample_size)
     try:
         response = requests.post(
             url=self.uid_api_url,

@@ -58,7 +58,10 @@ class AveragingHandler:
 
     def _get_weights_sample(self) -> List[float]:
         """Get a sample of model weights for validation."""
-        return [p for p in self.model.parameters()][-2].to_local()[-10:].tolist()
+        p = list(self.model.parameters())[-2]
+        if hasattr(p, "to_local"):  # sharded/DTensor
+            return p.to_local()[-10:].tolist()
+        return p.detach().flatten()[-10:].cpu().tolist()
 
     async def _validate_weight_update(
         self, initial_weights: List[float], block: int
@@ -485,6 +488,7 @@ class AveragingHandler:
                     bucket=model_name,
                     key=f"{prefix}model.safetensors",
                     donwload_on_all_ranks=False,
+                    run_on_all_ranks=False,
                     destination=output_dir,
                 )
                 _ = r2_download(
@@ -493,6 +497,7 @@ class AveragingHandler:
                     bucket=model_name,
                     key=f"{prefix}/config.json",
                     donwload_on_all_ranks=False,
+                    run_on_all_ranks=False,
                     destination=output_dir,
                 )
             main_parameters = AutoModelForCausalLM.from_pretrained(

@@ -6,11 +6,14 @@ from zoneinfo import ZoneInfo
 from typing import Callable, Dict
 
 from dotenv import load_dotenv
+import boto3
 import os
 import gc
+import sys
 import torch
 import shutil
 import json
+import torch.distributed as dist
 from distributed_training import __run__
 from distributed_training.data.dataset import DatasetLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -19,6 +22,18 @@ from huggingface_hub.constants import HF_HUB_CACHE
 from pathlib import Path
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from tabulate import tabulate
+from torch.distributed._tensor import DeviceMesh
+from torch.distributed._composable.fsdp import (
+    fully_shard,
+    MixedPrecisionPolicy,
+)
+from botocore.config import Config
+from distributed_training.utils.r2 import (
+    upload_folder_to_r2,
+    r2_download,
+    log_peerid_to_r2,
+)
+import logging
 
 load_dotenv()
 # === CONFIG ===
@@ -27,18 +42,71 @@ INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN")
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET")
 INFLUXDB_MEASUREMENT = "evaluation_metrics"
-REPO_ID = "dstrbtd/llama-1b"
+BUCKET = "llama-4b-ws-4"
 DATASET_ID = "HuggingFaceFW/fineweb-edu"
 DATASET_SKIP_PROBABILITY = 0.9
-EVAL_DURATION_MINUTES = 30
+EVAL_DURATION_MINUTES = 15
 EVAL_TYPES = ["fineweb", "lm_eval"]  # Add lm-eval harness tasks in the future
-__run__ = "11"
+R2 = boto3.session.Session().client(
+    "s3",
+    endpoint_url=f"https://{os.getenv('R2_ACCOUNT_ID')}.r2.cloudflarestorage.com",
+    aws_access_key_id=os.getenv("R2_READ_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("R2_READ_SECRET_ACCESS_KEY"),
+    region_name="auto",
+    config=Config(
+        retries={"max_attempts": 10, "mode": "adaptive"},  # or "standard"
+        connect_timeout=30,
+        read_timeout=120,
+        max_pool_connections=50,
+    ),
+)
+__run__ = "1"
+
+# === LOGGER SETUP ===
+logging.basicConfig(
+    level=logging.INFO,  # allow INFO through
+    format="%(asctime)s %(levelname)s [%(name)s:%(lineno)d] %(message)s",
+    force=True,  # override any prior config
+)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+h = logging.StreamHandler(sys.stdout)
+h.setLevel(logging.INFO)
+h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+logger.addHandler(h)
+logger.propagate = False
 
 # === INFLUXDB SETUP ===
 influx = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = influx.write_api()
 query_api = influx.query_api()
 delete_api = influx.delete_api()
+
+
+class Dummy:
+    def __init__(self):
+        # Set distributed variables
+        self.world_size = int(os.getenv("WORLD_SIZE", 1))
+        self.local_rank = int(os.getenv("LOCAL_RANK", 0))
+        torch.cuda.set_device(self.local_rank)
+        self.master = self.local_rank == 0
+
+        if not dist.is_initialized():
+            if not dist.is_initialized():
+                dist.init_process_group(
+                    backend="nccl",
+                    init_method="tcp://127.0.0.1:29500",
+                    rank=self.local_rank,
+                    world_size=self.world_size,
+                )
+            if not hasattr(self, "gloo_group"):
+                self.gloo_group = dist.new_group(
+                    backend="gloo",
+                )
+        self.logger = logger
+
+
+SELF = Dummy()
 
 
 def tag_exists(tag: str, task: str) -> bool:
@@ -52,11 +120,6 @@ def tag_exists(tag: str, task: str) -> bool:
     """
     result = query_api.query(org=INFLUXDB_ORG, query=query)
     return len(result) > 0
-
-
-# query = f'''from(bucket: "{INFLUXDB_BUCKET}") |> range(start: -365d) |> filter(fn: (r) => r._measurement == "{INFLUXDB_MEASUREMENT}" and r.tag == "{tag}" and r.task == "{task}") |> limit(n:1)'''
-# query = f'''from(bucket: "{INFLUXDB_BUCKET}") |> range(start: -365d) |> filter(fn: (r) => r._measurement == "{INFLUXDB_MEASUREMENT}")'''
-# delete_api.delete('1970-01-01T00:00:00Z', '2025-08-11T00:00:00Z', f'_measurement="{INFLUXDB_MEASUREMENT}"', bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG)
 
 
 def log_score(
@@ -75,7 +138,7 @@ def log_score(
         )
         write_api.write(bucket=INFLUXDB_BUCKET, org=INFLUXDB_ORG, record=point)
     else:
-        directory = f"{os.getcwd()}/{output_dir}/{REPO_ID.replace('/', '__')}"
+        directory = f"{os.getcwd()}/{output_dir}/{BUCKET.replace('/', '__')}"
         json_file = f"{directory}/{os.listdir(directory)[0]}"
         new_output_dir = (
             f"{os.path.dirname(os.path.abspath(__file__))}/{output_dir}.json"
@@ -178,14 +241,24 @@ async def fetch_training_data(tokenizer):
     retry_limit = 10
     retry_delay = 60
     attempt = 0
-    current_block = random.randint(6193881 * 2, 6193881 * 4)
-    uid = random.randint(300, 1000000)
     local_batch_size_train = 4
+    if dist.get_rank() == 0:
+        current_block = random.randint(6193881 * 2, 6193881 * 4)
+        uid = random.randint(300, 1000000)
+        tensor = torch.tensor([current_block, uid], dtype=torch.long, device="cuda")
+    else:
+        tensor = torch.zeros(2, dtype=torch.long, device="cuda")
+
+    # Broadcast from rank 0 to all others
+    dist.broadcast(tensor, src=0)
+    current_block = int(tensor[0].item())
+    uid = int(tensor[1].item())
+    # print(SELF.local_rank, f"Fetched block {current_block} with uid {uid}")
     while attempt < retry_limit:
         try:
             pages = await DatasetLoader.next_pages(
                 offset=current_block,
-                n_pages=35,
+                n_pages=5,
                 seed=uid,
             )
             random.seed(uid)
@@ -197,6 +270,10 @@ async def fetch_training_data(tokenizer):
                 pages_info=pages,
                 tokenizer=tokenizer,
             )
+
+            dataset_length = torch.tensor(len(dataset.buffer))
+            dist.all_reduce(dataset_length, op=dist.ReduceOp.MIN, group=SELF.gloo_group)
+            dataset.buffer = dataset.buffer[:dataset_length]
 
             return dataset
         except Exception as e:
@@ -229,13 +306,39 @@ def evaluate_fineweb(
     Returns:
         Average loss
     """
-    print(f"[⏳] Downloading model for tag {tag}...")
-    model_path = snapshot_download(repo_id=REPO_ID, revision=tag)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    prefix = f"epoch-{tag.split('.')[1]}/"
+    output_dir = os.path.join(os.getcwd(), BUCKET)
+    _ = r2_download(
+        SELF,
+        r2=R2,
+        bucket=BUCKET,
+        key=f"{prefix}model.safetensors",
+        donwload_on_all_ranks=False,
+        destination=output_dir,
+    )
+    _ = r2_download(
+        SELF,
+        r2=R2,
+        bucket=BUCKET,
+        key=f"{prefix}config.json",
+        donwload_on_all_ranks=False,
+        destination=output_dir,
+    )
+    dist.barrier(device_ids=[SELF.local_rank])
+    tokenizer = AutoTokenizer.from_pretrained("dstrbtd/llama-1b")
     tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16
-    ).to(device)
+    model = AutoModelForCausalLM.from_pretrained(output_dir, torch_dtype=torch.bfloat16)
+
+    mp_policy = MixedPrecisionPolicy(
+        param_dtype=torch.bfloat16,  # match your autocast compute dtype
+        reduce_dtype=torch.bfloat16,
+        output_dtype=torch.bfloat16,  # required by FSDP2 policy
+    )
+
+    # Build a 1D device mesh over all ranks
+    mesh = DeviceMesh("cuda", list(range(dist.get_world_size())))
+    # Keep a plain HF module and enable FSDP2 on it
+    fully_shard(model, mesh=mesh, mp_policy=mp_policy)
 
     model.eval()
     total_loss = 0.0
@@ -244,13 +347,12 @@ def evaluate_fineweb(
 
     loop = asyncio.new_event_loop()
 
-    while (time.time() - start_time) <= (max_minutes * 60):
+    while (time.time() - start_time) <= (max_minutes * 30):
         # Use streaming mode
         dataset = loop.run_until_complete(fetch_training_data(tokenizer))
 
         with torch.no_grad():
             for i, batch in enumerate(dataset):
-                # breakpoint()
                 if random.random() > (1 - DATASET_SKIP_PROBABILITY):
                     continue
 
@@ -266,14 +368,33 @@ def evaluate_fineweb(
                     outputs = model(input_ids=inputs, labels=inputs)
                     total_loss += outputs.loss.item()
                     n_batches += 1
-                    # print(total_loss/n_batches)
+                    if n_batches % 20 == 0 and SELF.master:
+                        SELF.logger.info(total_loss / n_batches)
 
     del model, tokenizer
     gc.collect()
     torch.cuda.empty_cache()
 
-    score = total_loss / n_batches if n_batches > 0 else float("inf")
-    log_score(tag, "fineweb", score)
+    # local aggregates
+    local_loss = torch.tensor([total_loss], dtype=torch.float64, device="cuda")
+    local_count = torch.tensor([n_batches], dtype=torch.int64, device="cuda")
+
+    logger.info(f"{SELF.local_rank},{local_loss},{local_count}")
+    # sum across all ranks (in-place; now identical on every rank)
+    dist.all_reduce(local_loss, op=dist.ReduceOp.SUM)
+    dist.all_reduce(local_count, op=dist.ReduceOp.SUM)
+    logger.info(f"{SELF.local_rank},{local_loss},{local_count}")
+    global_total_loss = float(local_loss.item())
+    global_n_batches = int(local_count.item())
+
+    score = (
+        (global_total_loss / global_n_batches) if global_n_batches > 0 else float("inf")
+    )
+    logger.info(f"{SELF.local_rank},{score}")
+
+    if SELF.master:
+        log_score(tag, "fineweb", score)
+    dist.barrier(device_ids=[SELF.local_rank])
     return score
 
 
@@ -337,38 +458,35 @@ def get_evaluator(task: str) -> Callable:
 
 
 def evaluate_all_tags_once():
-    api = HfApi()
-    refs = api.list_repo_refs(REPO_ID)
-    tags = sorted(
-        refs.tags, key=lambda p: (int(p.name.split(".")[0]), int(p.name.split(".")[1]))
-    )
-    sorted(
-        refs.tags, key=lambda p: (int(p.name.split(".")[0]), int(p.name.split(".")[1]))
-    )
+    result = R2.list_objects_v2(Bucket=BUCKET, Prefix="", Delimiter="/")
+
+    # Extract subfolders like epoch-0/, epoch-1/, etc.
+    folders = [
+        o.get("Prefix").rstrip("/").split("/")[-1]
+        for o in result.get("CommonPrefixes", [])
+        if o.get("Prefix").startswith("epoch-")
+    ]
+
+    # Sort by epoch number (epoch-0, epoch-1, ...)
+    epochs = sorted(folders, key=lambda x: int(x.split("-")[1]))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    for tag_obj in tags:
-        tag = tag_obj.name
+    for epoch in epochs:
+        epoch = epoch.split("-")[1]
+        tag = f"{__run__}.{epoch}.0"
         try:
             if tag.split(".")[0] != __run__:
                 continue
             else:
                 print(f"\n=== [TAG] {tag} ===")
 
-            # if int(tag.split(".")[1]) < 113:
-            #     continue
-            # if (int(tag.split(".")[1]) != 115) and (int(tag.split(".")[1]) != 120) and (int(tag.split(".")[1]) != 125) and (int(tag.split(".")[1]) != 130) and (int(tag.split(".")[1]) != 135):
-            # if (int(tag.split(".")[1]) != 134):
-            #     continue
-
             for task in EVAL_TYPES:
-                # if tag_exists(tag, "fineweb"):
                 if tag_exists(tag, task):
                     print(f"[✓] {task}: already evaluated")
                     continue
 
-                # if task != "fineweb":
-                #     continue
+                if task != "fineweb":
+                    continue
 
                 print(f"[⏳] Evaluating {task}...")
                 evaluator = get_evaluator(task)
@@ -378,12 +496,12 @@ def evaluate_all_tags_once():
         except Exception as e:
             print(f"[⚠️] Error evaluating tag {tag}: {e}")
 
-        finally:
-            cache_dir = HF_HUB_CACHE
-            cache_dir = Path(cache_dir).expanduser().resolve()
-            for cache in cache_dir.iterdir():
-                if os.path.isdir(cache):
-                    shutil.rmtree(str(cache))
+        # finally:
+        #     cache_dir = HF_HUB_CACHE
+        #     cache_dir = Path(cache_dir).expanduser().resolve()
+        #     for cache in cache_dir.iterdir():
+        #         if os.path.isdir(cache):
+        #             shutil.rmtree(str(cache))
 
 
 # === Optional Continuous Mode ===
@@ -400,5 +518,4 @@ def monitor_repo(poll_interval_sec: int = 18000):
 # === Entry ===
 
 if __name__ == "__main__":
-    # evaluate_all_tags_once()
     monitor_repo()

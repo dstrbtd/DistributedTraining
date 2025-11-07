@@ -171,7 +171,15 @@ def restore_from_epoch(r2: BaseClient, bucket: str, epoch: int):
     r2.close()
 
 
-def r2_download(self, r2, bucket, key, donwload_on_all_ranks=True, destination=None):
+def r2_download(
+    self,
+    r2,
+    bucket,
+    key,
+    donwload_on_all_ranks=True,
+    run_on_all_ranks=True,
+    destination=None,
+):
     if destination is None:
         fd, destination_path = tempfile.mkstemp()
         os.close(fd)
@@ -195,7 +203,7 @@ def r2_download(self, r2, bucket, key, donwload_on_all_ranks=True, destination=N
     else:
         success = torch.tensor([0], dtype=torch.int, device="cuda")
 
-    if donwload_on_all_ranks:
+    if donwload_on_all_ranks or run_on_all_ranks:
         # Broadcast success flag from master to everyone
         dist.broadcast(success, src=0)
 

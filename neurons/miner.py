@@ -169,6 +169,10 @@ class Miner(BaseMinerNeuron):
     def reload_state_watcher(self):
         """Background thread on every rank; only sets a local flag on rank 0."""
         while not self.stop_event.is_set():
+            try:
+                self.sync()
+            except Exception as e:
+                self.logger.debug(f"Error {e} when trying to sync")
             if not self.all_reduce_success_status:
                 wait_time = (
                     self.allreduce_timeout
@@ -209,10 +213,6 @@ class Miner(BaseMinerNeuron):
             #     # time.sleep(self.allreduce_timeout+self.upload_state_duration)
             else:
                 # TODO convert this to a listener
-                try:
-                    self.sync()
-                except Exception as e:
-                    self.logger.debug(f"Error {e} when trying to sync")
                 if (self.last_allreduce_block is not None) and (
                     (time.perf_counter() - self.all_reduce_start_time)
                     > (self.allreduce_timeout + self.upload_state_duration)
@@ -222,7 +222,7 @@ class Miner(BaseMinerNeuron):
                     self.current_block - self.starting_block > 25
                 ):
                     self.reload_state_event.set()
-            time.sleep(1)
+            time.sleep(10)
 
     def maybe_sync_and_reload(self):
         if not hasattr(self, "gloo_group"):
@@ -1359,6 +1359,7 @@ class Miner(BaseMinerNeuron):
                     archive=True,
                 )
                 self.all_reduce_flag = 0
+                self.reload_state_event.clear()
                 # Resume training when done
                 self.resume_training()
 
