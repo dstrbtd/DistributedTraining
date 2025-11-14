@@ -11,7 +11,12 @@ import gc
 import torch
 import shutil
 import json
+<<<<<<< Updated upstream
 from distributed_training import __run__
+=======
+import torch.distributed as dist
+from distributed_training import __run__, __spec_version__
+>>>>>>> Stashed changes
 from distributed_training.data.dataset import DatasetLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from huggingface_hub import HfApi, snapshot_download
@@ -70,6 +75,7 @@ def log_score(
             Point(INFLUXDB_MEASUREMENT)
             .tag("tag", tag)
             .tag("task", task)
+            .tag("spec_version", __spec_version__)
             .field("score", score)
             .time(datetime.datetime.now(datetime.timezone.utc), WritePrecision.NS)
         )
@@ -98,6 +104,7 @@ def log_score(
                         Point(INFLUXDB_MEASUREMENT)  # measurement
                         .tag("tag", tag)
                         .tag("task", f"{task}.{metric.replace(',none', '')}")
+                        .tag("spec_version", __spec_version__)
                         .field("score", score)
                         .time(timestamp, WritePrecision.NS)
                     )
@@ -284,7 +291,7 @@ def evaluate_with_lm_harness(
     """
     Evaluate model using lm-eval-harness (e.g. HellaSwag, ARC).
     """
-    output_dir = f"{REPO_ID.split('/')[1].replace('-', '_')}_{tag.replace('.','_')}_{datetime.datetime.now(ZoneInfo('Africa/Cairo')).strftime('%Y_%m_%dT%H_%M_%S')}"
+    output_dir = f"{BUCKET.split('/')[1].replace('-', '_')}_{tag.replace('.','_')}_{datetime.datetime.now(ZoneInfo('Africa/Cairo')).strftime('%Y_%m_%dT%H_%M_%S')}"
     tasks = [
         "hellaswag",
         "arc_challenge",
@@ -298,10 +305,10 @@ def evaluate_with_lm_harness(
     cmd_parts = [
         "lm-eval",
         "--model hf",
-        f"--model_args pretrained={REPO_ID},revision={tag}",
+        f"--model_args pretrained=/roort/{BUCKET},parallelize=True",
         f"--tasks {','.join(tasks)}",
-        f"--device {device}",
-        f"--batch_size 4",
+        # f"--device {device}",
+        f"--batch_size 256",
         f"--output_path {output_dir}",
     ]
 
