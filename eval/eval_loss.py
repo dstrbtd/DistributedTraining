@@ -11,12 +11,8 @@ import gc
 import torch
 import shutil
 import json
-<<<<<<< Updated upstream
-from distributed_training import __run__
-=======
 import torch.distributed as dist
 from distributed_training import __run__, __spec_version__
->>>>>>> Stashed changes
 from distributed_training.data.dataset import DatasetLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from huggingface_hub import HfApi, snapshot_download
@@ -33,6 +29,7 @@ INFLUXDB_ORG = os.getenv("INFLUXDB_ORG")
 INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET")
 INFLUXDB_MEASUREMENT = "evaluation_metrics"
 REPO_ID = "dstrbtd/llama-1b"
+BUCKET = "llama-4b-ws-4"
 DATASET_ID = "HuggingFaceFW/fineweb-edu"
 DATASET_SKIP_PROBABILITY = 0.9
 EVAL_DURATION_MINUTES = 30
@@ -52,7 +49,7 @@ def tag_exists(tag: str, task: str) -> bool:
     query = f"""
     from(bucket: "{INFLUXDB_BUCKET}")
     |> range(start: -365d)
-    |> filter(fn: (r) => r._measurement == "{INFLUXDB_MEASUREMENT}" and r.tag == "{tag}" and r.task == "{task}")
+    |> filter(fn: (r) => r._measurement == "{INFLUXDB_MEASUREMENT}" and r.tag == "{tag}" and r.task == "{task}" and r.spec_version == "{__spec_version__}")
     |> limit(n:1)
     """
     result = query_api.query(org=INFLUXDB_ORG, query=query)
@@ -291,7 +288,7 @@ def evaluate_with_lm_harness(
     """
     Evaluate model using lm-eval-harness (e.g. HellaSwag, ARC).
     """
-    output_dir = f"{BUCKET.split('/')[1].replace('-', '_')}_{tag.replace('.','_')}_{datetime.datetime.now(ZoneInfo('Africa/Cairo')).strftime('%Y_%m_%dT%H_%M_%S')}"
+    output_dir = f"{BUCKET.replace('-', '_')}_{tag.replace('.','_')}_{datetime.datetime.now(ZoneInfo('Africa/Cairo')).strftime('%Y_%m_%dT%H_%M_%S')}"
     tasks = [
         "hellaswag",
         "arc_challenge",
@@ -305,7 +302,7 @@ def evaluate_with_lm_harness(
     cmd_parts = [
         "lm-eval",
         "--model hf",
-        f"--model_args pretrained=/roort/{BUCKET},parallelize=True",
+        f"--model_args pretrained=/root/{BUCKET},tokenizer={REPO_ID},parallelize=True",
         f"--tasks {','.join(tasks)}",
         # f"--device {device}",
         f"--batch_size 256",
@@ -374,8 +371,8 @@ def evaluate_all_tags_once():
                     print(f"[✓] {task}: already evaluated")
                     continue
 
-                # if task != "fineweb":
-                #     continue
+                if task == "fineweb":
+                    continue
 
                 print(f"[⏳] Evaluating {task}...")
                 evaluator = get_evaluator(task)
