@@ -89,7 +89,7 @@ async def forward(self):
         epoch = self.global_progress.epoch - 1
     else:
         epoch = self.global_progress.epoch
-    epoch = self.global_progress.epoch
+    # epoch = self.global_progress.epoch
 
     responses = [[]]
 
@@ -326,7 +326,6 @@ async def forward(self):
                     event=self.event,
                     metagraph=self.metagraph,
                 )
-
 
             model_state_options = StateDictOptions(
                 full_state_dict=True,  # gather a full (HF-style) state dict
