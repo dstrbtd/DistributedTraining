@@ -513,6 +513,16 @@ async def score_uids(self, epoch: int, uids: list):
                 # Mark update time for UID
                 self.uid_tracker[uid].train.updated_time = test_time
 
+    # Reset model state dict before an evaluation
+    set_model_state_dict(
+        self.model,
+        dict(model_state_dict),
+        options=StateDictOptions(
+            full_state_dict=False,  # We saved only local shards, so load them back as such
+            strict=True,  # Ensure all keys match
+        ),
+    )
+
     # Remove stale gradient cache
     cleanup_old_cache(self)
 

@@ -40,7 +40,7 @@ def custom_command():
             "git+https://github.com/learning-at-home/hivemind.git@3a4cc15e29ce51b20c5d415a4c579abbae435718",
         ]
     )
-    pip.main(["install", "bittensor==9.10.1"])
+    pip.main(["install", "bittensor==9.12.2"])
     pip.main(["install", "py-multihash==2.0.1"])
 
     # Install Go and HFDownloader

@@ -14,6 +14,10 @@ from distributed_training.data.dataset import DatasetLoader
 from distributed_training.utils.dendrite import (
     async_dendrite_forward,
 )
+from distributed_training.averaging.averagers import (
+    apply_optimizer_parameters,
+    compute_and_load_pseudo_grad_into_averager,
+)
 from distributed_training.utils.r2 import r2_download
 from transformers import AutoModelForCausalLM
 
@@ -150,14 +154,11 @@ class AveragingHandler:
             - results: Dictionary containing peers and bandwidth info if successful, empty dict if failed
         """
         query_tasks = []
-        all_reduce_success_status = True
         results = {}
+        all_reduce_success_status = True
         initial_weights = None
 
         try:
-            # Clip gradients
-            # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-
             # Used for load balancing and scoring
             if bandwidth is not None:
                 self.grad_averager.bandwidth = bandwidth["download"]
@@ -219,16 +220,6 @@ class AveragingHandler:
 
                 initial_weights = self._get_weights_sample()
                 bt.logging.info(f"Initial Weights Sample: {initial_weights}")
-
-                # Perform offloaded outer optimization steps
-                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                bt.logging.info("Outer Optimizer Step Started")
-                self.outer_optimizer.step()
-                bt.logging.info("Outer Optimizer Step Finished")
-
-                bt.logging.info(
-                    ":white_heavy_check_mark: Finished Outer Optimizer Step."
-                )
 
                 all_reduce_success_status = True
                 results = {
@@ -423,28 +414,6 @@ class AveragingHandler:
                 initial_weights = self._get_weights_sample()
                 bt.logging.info(f"Initial Weights Sample: {initial_weights}")
 
-                # bt.logging.info(
-                #     f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
-                # )
-
-                # Perform offloaded outer optimization steps
-                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-
-                bt.logging.info("Outer Optimizer Step Started")
-                for i, group in enumerate(self.outer_optimizer.param_groups):
-                    for p in group["params"]:
-                        bt.logging.info(
-                            f"group {i} param {p.shape} grad mean={p.grad.float().mean().item()} p mean={p.float().mean().item()}"
-                        )
-                        break
-                self.outer_optimizer.step()
-                bt.logging.info("Outer Optimizer Step Finisheds")
-                for i, group in enumerate(self.outer_optimizer.param_groups):
-                    for p in group["params"]:
-                        bt.logging.info(
-                            f"group {i} param {p.shape} grad mean={p.grad.float().mean().item()} p mean={p.float().mean().item()}"
-                        )
-                        break
                 synapse.completion = True
             else:
                 synapse.completion = False
