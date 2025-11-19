@@ -14,10 +14,6 @@ from distributed_training.data.dataset import DatasetLoader
 from distributed_training.utils.dendrite import (
     async_dendrite_forward,
 )
-from distributed_training.averaging.averagers import (
-    apply_optimizer_parameters,
-    compute_and_load_pseudo_grad_into_averager,
-)
 from distributed_training.utils.r2 import r2_download
 from transformers import AutoModelForCausalLM
 
