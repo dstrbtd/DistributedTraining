@@ -53,10 +53,6 @@ import torch
 import json
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
-    LocalOptimStateDictConfig,
-    StateDictType,
-    LocalStateDictConfig,
-    # FullStateDictConfig,
 )
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
@@ -96,10 +92,9 @@ from distributed_training.utils.state_loader import (
     cleanup_old_cache,
     load_state_from_peer,
 )
-from distributed_training.utils.r2 import archive_root_bucket, log_peerid_to_r2
+from distributed_training.utils.r2 import log_peerid_to_r2
 from distributed_training.utils.compression import TransformDCT, CompressDCT
 import torch.distributed as dist
-from threading import Thread
 import distributed_training
 
 
@@ -108,6 +103,7 @@ import torch.distributed as dist
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
 )
+from distributed_training.utils.dist import gloabl_dist_checkpoint
 from safetensors.torch import save_file
 
 import faulthandler, signal
@@ -190,18 +186,16 @@ class Miner(BaseMinerNeuron):
                 self.global_progress.epoch = get_progress(self, "global")[0]
                 self.reload_state_event.set()
             # elif (
-            #     (
-            #         self.local_progress.epoch == 0
-            #         and (self.local_progress.inner_step % 10 == 0)
-            #     )
-            #     or (
-            #         self.local_progress.epoch != 0
-            #         and self.local_progress.inner_step > 20
-            #     )
-            # ) and (self.all_reduce_flag != 1):
-            #     # elif (datetime.datetime.now().minute % 30 == 0) and (
-            #     #     self.all_reduce_flag != 1
-            #     # ):
+            #     self.local_progress.epoch == 0
+            #     and (self.local_progress.inner_step % 10 == 0)
+            # ) or (
+            #     self.local_progress.epoch != 0
+            #     and (self.local_progress.inner_step % 2 == 0)
+            # ):
+            #     # ) and (self.all_reduce_flag != 1):
+            #     #     # elif (datetime.datetime.now().minute % 30 == 0) and (
+            #     #     #     self.all_reduce_flag != 1
+            #     #     # ):
             #     self.loop.run_until_complete(
             #         self.all_reduce(
             #             distributed_training.protocol.AllReduce(
@@ -210,7 +204,7 @@ class Miner(BaseMinerNeuron):
             #             )
             #         )
             #     )
-            #     # time.sleep(self.allreduce_timeout+self.upload_state_duration)
+            #     time.sleep(self.allreduce_timeout + self.upload_state_duration)
             else:
                 # TODO convert this to a listener
                 if (self.last_allreduce_block is not None) and (
@@ -369,7 +363,7 @@ class Miner(BaseMinerNeuron):
         archive=False,
     ):
         # self.pause_training()
-        bt.logging.info("Upload Model Start")
+        self.logger.info("Upload Model Start")
         # """Unified function to save and upload both model and optimizer state"""
         attempt = 0
         while attempt < self.model_upload_retry_limit:
@@ -1109,7 +1103,7 @@ class Miner(BaseMinerNeuron):
                         encoded, self.config.neuron.topk_compression, quantize
                     )
                 if totalk is None:
-                    bt.logging.info("totalk is None")
+                    self.logger.info("totalk is None")
                 del encoded  # Free the encoded tensor immediately
 
                 if quantize:
@@ -1254,6 +1248,7 @@ class Miner(BaseMinerNeuron):
         self.logger.info("Received Local All Reduce Call")
         self.all_reduce_start_time = time.perf_counter()
         initial_weights = None
+        synapse.completion = True
         try:
             async with self.training_lock:
                 # Cancel any ongoing upload
@@ -1269,10 +1264,12 @@ class Miner(BaseMinerNeuron):
                 # Run inner optimizer step
                 self.inner_optimizer_step()
 
-                bt.logging.info(":wait: Starting Compute Pseudo Gradients")
+                self.logger.info(":wait: Starting Compute Pseudo Gradients")
                 self.compute_and_load_pseudo_grad_into_averager()
-                bt.logging.info(":wait: Finished Compute Pseudo Gradients")
-                # with self.grad_averager.get_tensors() as averaged_grads: print(averaged_grads)
+                self.logger.info(":wait: Finished Compute Pseudo Gradients")
+
+                # Clip gradients
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
                 if self.master:
                     # Update gradient averager params to latest synapse values
@@ -1322,50 +1319,88 @@ class Miner(BaseMinerNeuron):
             raise Exception(f"Unexpected error during AllReduce: {str(e)}") from e
 
         finally:
-            synapse_completion = (
-                torch.tensor([1]) if synapse.completion else torch.tensor([0])
-            )
-            dist.broadcast(synapse_completion, src=0, group=self.gloo_group)
-            self.logger.info("Synapse Completion" + str(synapse_completion[0].item()))
-            if synapse_completion[0].item() == 1:
-                self.logger.info(f"Apply opt params")
-                self.apply_optimizer_parameters()
+            if not gloabl_dist_checkpoint(synapse.completion, self.gloo_group):
+                self.all_reduce_flag = 0
+                self.all_reduce_success_status = False
+                self.resume_training()
+                self.maybe_sync_and_reload()
+                self.logger.info(f"All Reduce Failed At Checkpoint 1")
+                return synapse
 
-                bt.logging.info(
-                    ":white_heavy_check_mark: Finished Outer Optimizer Step."
-                )
-
-                if self.master:
-                    # Validate weight updates
-                    await self.avg_handler._validate_weight_update(
-                        initial_weights, self.current_block
-                    )
-
+            # Normalize averaged gradients
+            try:
                 self.logger.info(
                     f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
                 )
-                # self.avg_handler.update_main_param_after_outer_step()
-                dist.barrier(group=self.gloo_group)
+                # Perform offloaded outer optimization steps
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            except Exception:
+                synapse.completion = False
 
-                # Reset inner_step and update epoch
-                self.local_progress.samples_accumulated = 0
-                self.local_progress.inner_step = 0
-                self.local_progress.epoch += 1
-                self.set_current_block_across_ranks()
-                self.last_allreduce_block = self.current_block
-                self.logger.info("AllReduce Operation Finished Succesfully")
-                self.start_background_upload(
-                    epoch=self.local_progress.epoch,
-                    archive=True,
-                )
-                self.all_reduce_flag = 0
-                self.reload_state_event.clear()
-                # Resume training when done
-                self.resume_training()
+            if self.master:
+                self.logger.info("Outer Optimizer Step Started")
+                for i, group in enumerate(self.outer_optimizer.param_groups):
+                    for p in group["params"]:
+                        self.logger.info(
+                            f"group {i} param {p.shape} grad mean={p.grad.float().mean().item()} p mean={p.float().mean().item()}"
+                        )
+                        break
+                self.outer_optimizer.step()
+                self.logger.info("Outer Optimizer Step Finisheds")
+                for i, group in enumerate(self.outer_optimizer.param_groups):
+                    for p in group["params"]:
+                        self.logger.info(
+                            f"group {i} param {p.shape} grad mean={p.grad.float().mean().item()} p mean={p.float().mean().item()}"
+                        )
+                        break
 
-            else:
+            if not gloabl_dist_checkpoint(synapse.completion, self.gloo_group):
                 self.all_reduce_flag = 0
                 self.all_reduce_success_status = False
+                self.resume_training()
+                self.maybe_sync_and_reload()
+                self.logger.info(f"All Reduce Failed At Checkpoint 2")
+                return synapse
+
+            self.logger.info(f"Apply opt params")
+            self.apply_optimizer_parameters()
+
+            self.logger.info(":white_heavy_check_mark: Finished Outer Optimizer Step.")
+
+            if self.master:
+                # Validate weight updates
+                await self.avg_handler._validate_weight_update(
+                    initial_weights, self.current_block
+                )
+
+            self.logger.info(
+                f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
+            )
+
+            if not gloabl_dist_checkpoint(synapse.completion, self.gloo_group):
+                self.all_reduce_flag = 0
+                self.all_reduce_success_status = False
+                self.resume_training()
+                self.maybe_sync_and_reload()
+                self.logger.info(f"All Reduce Failed At Checkpoint 3")
+                return synapse
+
+            # Reset inner_step and update epoch
+            self.local_progress.samples_accumulated = 0
+            self.local_progress.inner_step = 0
+            self.local_progress.epoch += 1
+            self.set_current_block_across_ranks()
+            self.last_allreduce_block = self.current_block
+            self.logger.info("AllReduce Operation Finished Succesfully")
+            self.start_background_upload(
+                epoch=self.local_progress.epoch,
+                archive=True,
+            )
+            self.all_reduce_flag = 0
+            self.reload_state_event.clear()
+
+            # Resume training when done
+            self.resume_training()
             self.maybe_sync_and_reload()
             return synapse
 

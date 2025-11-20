@@ -68,7 +68,7 @@ class AveragingHandler:
     ) -> bool:
         """Validate model weight updates."""
         final_weights = self._get_weights_sample()
-        bt.logging.info(f"Final Weights Sample: {final_weights}")
+        self.logger.info(f"Final Weights Sample: {final_weights}")
 
         if final_weights == initial_weights:
             raise ModelStateError("Weights unchanged after update")
@@ -102,15 +102,15 @@ class AveragingHandler:
 
                 return dataset
             except Exception as e:
-                bt.logging.error(f"Error fetching training data: {str(e)}")
+                self.logger.error(f"Error fetching training data: {str(e)}")
                 attempt += 1
-                bt.logging.warning(
+                self.logger.warning(
                     f"Failed to fetch data, retrying. Attempt {attempt}/{self.retry_limit}"
                 )
                 if attempt < self.retry_limit:
                     time.sleep(self.retry_delay * attempt)  # Wait before the next retry
                 else:
-                    bt.logging.error(
+                    self.logger.error(
                         "Maximum retry limit reached. Unable to fetch data."
                     )
                     raise
@@ -150,19 +150,16 @@ class AveragingHandler:
             - results: Dictionary containing peers and bandwidth info if successful, empty dict if failed
         """
         query_tasks = []
-        all_reduce_success_status = True
         results = {}
+        all_reduce_success_status = True
         initial_weights = None
 
         try:
-            # Clip gradients
-            # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-
             # Used for load balancing and scoring
             if bandwidth is not None:
                 self.grad_averager.bandwidth = bandwidth["download"]
 
-            bt.logging.info(":wait: Starting Pseudo Gradient Averaging..")
+            self.logger.info(":wait: Starting Pseudo Gradient Averaging..")
             # Start gradient averaging without waiting
             start_ar_time = time.perf_counter()
             gradient_averaging_step = self.grad_averager.step(
@@ -174,7 +171,7 @@ class AveragingHandler:
 
             if master:
                 # Send AllReduce query to pause miner training and perform global sync
-                bt.logging.info(
+                self.logger.info(
                     ":wait: AllReduce Query Sent Out. Waiting for AllReduce to finish.."
                 )
                 await async_dendrite_forward(
@@ -192,7 +189,7 @@ class AveragingHandler:
                     connection_limit=len(miner_uids),
                     timeout=timeout,
                 )
-                bt.logging.info("AllReduce Query Responses Received..")
+                self.logger.info("AllReduce Query Responses Received..")
 
             start_time = time.perf_counter()
 
@@ -204,7 +201,7 @@ class AveragingHandler:
             if gradient_averaging_step.done():
                 end_ar_time = time.perf_counter()
 
-                bt.logging.info(
+                self.logger.info(
                     ":white_heavy_check_mark: Finished Averaging Pseudo Gradients"
                 )
                 self.grad_averager.notify_used_averaged_gradients()
@@ -218,17 +215,7 @@ class AveragingHandler:
                 ) = gradient_averaging_step.result()
 
                 initial_weights = self._get_weights_sample()
-                bt.logging.info(f"Initial Weights Sample: {initial_weights}")
-
-                # Perform offloaded outer optimization steps
-                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                bt.logging.info("Outer Optimizer Step Started")
-                self.outer_optimizer.step()
-                bt.logging.info("Outer Optimizer Step Finished")
-
-                bt.logging.info(
-                    ":white_heavy_check_mark: Finished Outer Optimizer Step."
-                )
+                self.logger.info(f"Initial Weights Sample: {initial_weights}")
 
                 all_reduce_success_status = True
                 results = {
@@ -243,15 +230,15 @@ class AveragingHandler:
                 all_reduce_success_status = False
 
         except Exception as e:
-            bt.logging.error(f"Unexpected error during Averaging Process: {str(e)}")
+            self.logger.error(f"Unexpected error during Averaging Process: {str(e)}")
             all_reduce_success_status = False
 
         finally:
             if gradient_averaging_step:
                 gradient_averaging_step.cancel()
-                bt.logging.info("Gradient Step Cleaned Up")
+                self.logger.info("Gradient Step Cleaned Up")
             if all_reduce_success_status:
-                bt.logging.success("Averaging Round Finished Succesfully")
+                self.logger.success("Averaging Round Finished Succesfully")
             return all_reduce_success_status, results, initial_weights
 
     def calculate_allreduce_scores(
@@ -346,7 +333,7 @@ class AveragingHandler:
                     else:
                         bandwidth_bonus = 0.5 * (uid_bandwidths[uid] / max_bandwidth)
                         final_score += bandwidth_bonus
-                        bt.logging.info(
+                        self.logger.info(
                             f"UID {uid} score breakdown - Base: {base_score:.2f}, Bandwidth bonus: {bandwidth_bonus:.2f}"
                         )
 
@@ -368,14 +355,14 @@ class AveragingHandler:
         rewards = torch.tensor([reward for reward in scores.values()])
 
         # Log participation and scoring details
-        bt.logging.info(f"Failed UIDs: {failed_uids}")
-        bt.logging.info(f"Participating UIDs: {participating_uids}")
+        self.logger.info(f"Failed UIDs: {failed_uids}")
+        self.logger.info(f"Participating UIDs: {participating_uids}")
         if modes is not None:
-            bt.logging.info(f"Modes by UID: {uid_modes}")
+            self.logger.info(f"Modes by UID: {uid_modes}")
         if bandwidths is not None:
-            bt.logging.info(f"Bandwidths by UID: {uid_bandwidths}")
-        bt.logging.info(f"AllReduce UID Scores: {scores}")
-        bt.logging.info(f"AllReduce UID Rewards: {rewards}")
+            self.logger.info(f"Bandwidths by UID: {uid_bandwidths}")
+        self.logger.info(f"AllReduce UID Scores: {scores}")
+        self.logger.info(f"AllReduce UID Rewards: {rewards}")
 
         return (
             rewards,
@@ -401,7 +388,7 @@ class AveragingHandler:
             # Used for load balancing and scoring
             if bandwidth is not None:
                 self.grad_averager.bandwidth = bandwidth["download"]
-            bt.logging.info(":wait: Starting Pseudo Gradient Averaging..")
+            self.logger.info(":wait: Starting Pseudo Gradient Averaging..")
             gradient_averaging_step = self.grad_averager.step(
                 timeout=(synapse.timeout - 20),
                 wait=False,
@@ -414,43 +401,21 @@ class AveragingHandler:
                 await asyncio.sleep(1)
 
             if gradient_averaging_step.done():
-                bt.logging.info(
+                self.logger.info(
                     ":white_heavy_check_mark: Finished Averaging Pseudo Gradients"
                 )
                 self.grad_averager.notify_used_averaged_gradients()
-                bt.logging.info("B: returned from notify_used_averaged_gradients")
+                self.logger.info("B: returned from notify_used_averaged_gradients")
 
                 initial_weights = self._get_weights_sample()
-                bt.logging.info(f"Initial Weights Sample: {initial_weights}")
+                self.logger.info(f"Initial Weights Sample: {initial_weights}")
 
-                # bt.logging.info(
-                #     f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
-                # )
-
-                # Perform offloaded outer optimization steps
-                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-
-                bt.logging.info("Outer Optimizer Step Started")
-                for i, group in enumerate(self.outer_optimizer.param_groups):
-                    for p in group["params"]:
-                        bt.logging.info(
-                            f"group {i} param {p.shape} grad mean={p.grad.float().mean().item()} p mean={p.float().mean().item()}"
-                        )
-                        break
-                self.outer_optimizer.step()
-                bt.logging.info("Outer Optimizer Step Finisheds")
-                for i, group in enumerate(self.outer_optimizer.param_groups):
-                    for p in group["params"]:
-                        bt.logging.info(
-                            f"group {i} param {p.shape} grad mean={p.grad.float().mean().item()} p mean={p.float().mean().item()}"
-                        )
-                        break
                 synapse.completion = True
             else:
                 synapse.completion = False
 
         except Exception as e:
-            bt.logging.error(f"Unexpected Error During Averaging Process: {str(e)}")
+            self.logger.error(f"Unexpected Error During Averaging Process: {str(e)}")
             synapse.completion = False
             raise AllReduceError(
                 f"Unexpected Error During Averaging Process: {str(e)}"
@@ -459,9 +424,9 @@ class AveragingHandler:
         finally:
             if gradient_averaging_step:
                 gradient_averaging_step.cancel()
-                bt.logging.info("Gradient Step Cleaned Up")
+                self.logger.info("Gradient Step Cleaned Up")
             if synapse.completion:
-                bt.logging.success("Averaging Round Finished Succesfully")
+                self.logger.success("Averaging Round Finished Succesfully")
             return synapse, initial_weights
 
     # TODO Test if this is necissary and if it is make this FSDP compliant

@@ -48,6 +48,7 @@ from distributed_training.averaging.averagers import (
     compute_and_load_pseudo_grad_into_averager,
     apply_optimizer_parameters,
 )
+from distributed_training.utils.dist import gloabl_dist_checkpoint
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     StateDictOptions,
@@ -138,7 +139,6 @@ async def forward(self):
             self.last_allreduce_block = self.current_block
             return responses
 
-        compute_and_load_pseudo_grad_into_averager(self)
         if self.master:
             for uid in self.miner_uids:
                 self.uid_tracker[
@@ -173,29 +173,37 @@ async def forward(self):
         self.miner_uids = miner_uids.tolist()
 
         try:
-            top_uid_index = 0
-            while True:
-                if top_uid_index < len(self.miner_uids):
-                    top_uid = self.miner_uids[top_uid_index]
-                else:
-                    top_uid = 212
-                self.local_progress.epoch = self.global_progress.epoch
+            #     top_uid_index = 0
+            #     while True:
+            #         if top_uid_index < len(self.miner_uids):
+            #             top_uid = self.miner_uids[top_uid_index]
+            #         else:
+            #             top_uid = 212
+            #         self.local_progress.epoch = self.global_progress.epoch
 
-                self.logger.info(f"Top UID identified as: {top_uid}")
+            #         self.logger.info(f"Top UID identified as: {top_uid}")
 
-                self.local_progress.inner_step = get_progress(
-                    self, local_or_global="local", uid=top_uid
-                )[1]
-                top_uid_revision = f"{__run__}.{self.local_progress.epoch}.{self.local_progress.inner_step}"
-                load_state_from_peer(
-                    self,
-                    uid=top_uid,
-                    revision=top_uid_revision,
-                )
-                if self.scheduler.__dict__["_step_count"] != 0:
-                    break
-                else:
-                    top_uid_index += 1
+            #         self.local_progress.inner_step = get_progress(
+            #             self, local_or_global="local", uid=top_uid
+            #         )[1]
+            #         top_uid_revision = f"{__run__}.{self.local_progress.epoch}.{self.local_progress.inner_step}"
+            #         load_state_from_peer(
+            #             self,
+            #             uid=top_uid,
+            #             revision=top_uid_revision,
+            #         )
+            #         if self.scheduler.__dict__["_step_count"] != 0:
+            #             break
+            #         else:
+            #             top_uid_index += 1
+
+            all_reduce_success_status = True
+
+            # Create and normalize gradients
+            self.logger.info(":wait: Starting Compute Pseudo Gradients")
+            compute_and_load_pseudo_grad_into_averager(self)
+            self.logger.info(":wait: Finished Compute Pseudo Gradients")
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
             if self.master:
                 (
@@ -213,15 +221,26 @@ async def forward(self):
                     min_group_size=self.config.neuron.min_group_size,
                 )
 
-            all_reduce_success_status_tensor = (
-                torch.tensor([1])
-                if self.master and all_reduce_success_status
-                else torch.tensor([0])
-            )
-            dist.broadcast(
-                all_reduce_success_status_tensor, src=0, group=self.gloo_group
-            )
-            if all_reduce_success_status_tensor[0].item() == 1:
+            if not gloabl_dist_checkpoint(all_reduce_success_status, self.gloo_group):
+                raise Exception(f"All Reduce Failed At Checkpoint 1")
+
+            # Normalize averaged gradients
+            try:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            except Exception:
+                all_reduce_success_status = False
+
+            if not gloabl_dist_checkpoint(all_reduce_success_status, self.gloo_group):
+                raise Exception(f"All Reduce Failed At Checkpoint 2")
+
+            if self.master:
+                # Perform offloaded outer optimization steps
+                self.outer_optimizer.step()
+                self.logger.info(
+                    ":white_heavy_check_mark: Finished Outer Optimizer Step."
+                )
+
+            try:
                 (
                     total_loss_before,
                     _,
@@ -236,19 +255,25 @@ async def forward(self):
                 )
                 average_loss_before = total_loss_before / n_batches_sampled_before
 
-                apply_optimizer_parameters(self)
-
-                bt.logging.info(
+                self.logger.info(
                     ":white_heavy_check_mark: Finished Outer Optimizer Step."
                 )
+            except Exception:
+                all_reduce_success_status = False
 
-                if self.master:
-                    self.logger.info("Validate Weights After Opt Step")
-                    # Validate weight updates
-                    await self.avg_handler._validate_weight_update(
-                        initial_weights, self.current_block
-                    )
+            if not gloabl_dist_checkpoint(all_reduce_success_status, self.gloo_group):
+                raise Exception(f"All Reduce Failed At Checkpoint 3")
 
+            apply_optimizer_parameters(self)
+
+            if self.master:
+                self.logger.info("Validate Weights After Opt Step")
+                # Validate weight updates
+                await self.avg_handler._validate_weight_update(
+                    initial_weights, self.current_block
+                )
+
+            try:
                 self.logger.info(f"Apply optimizer parameters to model")
                 (
                     total_loss_after,
@@ -267,102 +292,102 @@ async def forward(self):
                 if (
                     (average_loss_after - average_loss_before) / (average_loss_after)
                 ) > 0.25:
+                    all_reduce_success_status = False
                     raise Exception(
                         f"Average Loss After All Reduce {average_loss_after} > 25% higher than Average Loss Before {average_loss_before}"
                     )
+            except Exception:
+                all_reduce_success_status = False
 
-                self.set_current_block_across_ranks()
-                # Reset allreduce block tracker
-                self.last_allreduce_block = self.current_block
-                # Update state after successful allreduce
-                self.local_progress.epoch += 1
-                self.local_progress.samples_accumulated = 0
+            if not gloabl_dist_checkpoint(all_reduce_success_status, self.gloo_group):
+                raise Exception(f"All Reduce Failed At Checkpoint 4")
 
-                if self.master:
-                    # Update scoring based on allreduce participation
-                    (
-                        self.allreduce_scores,
-                        self.allreduce_status_dict,
-                        self.event,
-                        successful_peers_count,
-                    ) = self.avg_handler.calculate_allreduce_scores(
-                        participating_peers=results["participating_peers"],
-                        failed_peers=results["failed_peers"],
-                        alive_uids=alive_uids,
-                        modes=results["modes"],
-                        bandwidths=results["bandwidths"],
-                        peerids_to_uids=self.peerids_to_uids,
-                        event=self.event,
-                        metagraph=self.metagraph,
+            self.set_current_block_across_ranks()
+            # Reset allreduce block tracker
+            self.last_allreduce_block = self.current_block
+            # Update state after successful allreduce
+            self.local_progress.epoch += 1
+            self.local_progress.samples_accumulated = 0
+
+            if self.master:
+                # Update scoring based on allreduce participation
+                (
+                    self.allreduce_scores,
+                    self.allreduce_status_dict,
+                    self.event,
+                    successful_peers_count,
+                ) = self.avg_handler.calculate_allreduce_scores(
+                    participating_peers=results["participating_peers"],
+                    failed_peers=results["failed_peers"],
+                    alive_uids=alive_uids,
+                    modes=results["modes"],
+                    bandwidths=results["bandwidths"],
+                    peerids_to_uids=self.peerids_to_uids,
+                    event=self.event,
+                    metagraph=self.metagraph,
+                )
+
+            model_state_options = StateDictOptions(
+                full_state_dict=True,  # gather a full (HF-style) state dict
+                cpu_offload=True,  # offload to host RAM (no GPU OOM)
+            )
+            model_state = get_model_state_dict(self.model, options=model_state_options)
+
+            inner_optimizer_options = StateDictOptions(
+                full_state_dict=False, cpu_offload=True
+            )
+            inner_optimizer_state = get_optimizer_state_dict(
+                self.model, self.inner_optimizer, options=inner_optimizer_options
+            )
+            self.logger.info(f"Extracted Optimizer & Model State Dict")
+
+            # Upload new global state to HF
+            upload_new_state(
+                self,
+                self.local_progress.epoch,
+                results if self.master else {},
+                model_state,
+                inner_optimizer_state,
+                self.inner_optimizer.param_groups[0]["lr"],
+                self.current_block,
+            )
+
+            if self.master:
+                update_total_scores(self)
+
+                try:
+                    # ---- Report allreduce metrics to dashboard ---
+                    participating_count = len(results["participating_peers"])
+                    success_rate = 0.0
+                    if participating_count > 0:
+                        success_rate = successful_peers_count / participating_count
+
+                    avg_bandwidth = None
+                    if results["bandwidths"]:
+                        valid_bandwidths = [
+                            b for b in results["bandwidths"] if b is not None
+                        ]
+                        if valid_bandwidths:
+                            avg_bandwidth = sum(valid_bandwidths) / len(
+                                valid_bandwidths
+                            )
+
+                    self.report_allreduce_scores(
+                        op_id=self.current_block,
+                        epoch=self.local_progress.epoch,
+                        validator_uid=self.uid,
+                        success_rate=success_rate,
+                        duration=results["duration"],
+                        participating_miners_count=len(results["participating_peers"]),
+                        failed_miners_count=len(results["failed_peers"]),
+                        bandwidth=avg_bandwidth,
                     )
+                    # -------
 
-                    self.model.config.all_reduce_scores = self.allreduce_status_dict
-
-                model_state_options = StateDictOptions(
-                    full_state_dict=True,  # gather a full (HF-style) state dict
-                    cpu_offload=True,  # offload to host RAM (no GPU OOM)
-                )
-                model_state = get_model_state_dict(
-                    self.model, options=model_state_options
-                )
-
-                inner_optimizer_options = StateDictOptions(
-                    full_state_dict=False, cpu_offload=True
-                )
-                inner_optimizer_state = get_optimizer_state_dict(
-                    self.model, self.inner_optimizer, options=inner_optimizer_options
-                )
-                self.logger.info(f"Extracted Optimizer & Model State Dict")
-
-                # Upload new global state to HF
-                upload_new_state(
-                    self,
-                    self.local_progress.epoch,
-                    results if self.master else {},
-                    model_state,
-                    inner_optimizer_state,
-                    self.inner_optimizer.param_groups[0]["lr"],
-                    self.current_block,
-                )
-
-                if self.master:
-                    update_total_scores(self)
-
-                    try:
-                        # ---- Report allreduce metrics to dashboard ---
-                        participating_count = len(results["participating_peers"])
-                        success_rate = 0.0
-                        if participating_count > 0:
-                            success_rate = successful_peers_count / participating_count
-
-                        avg_bandwidth = None
-                        if results["bandwidths"]:
-                            valid_bandwidths = [
-                                b for b in results["bandwidths"] if b is not None
-                            ]
-                            if valid_bandwidths:
-                                avg_bandwidth = sum(valid_bandwidths) / len(
-                                    valid_bandwidths
-                                )
-
-                        self.report_allreduce_scores(
-                            op_id=self.current_block,
-                            epoch=self.local_progress.epoch,
-                            validator_uid=self.uid,
-                            success_rate=success_rate,
-                            duration=results["duration"],
-                            participating_miners_count=len(
-                                results["participating_peers"]
-                            ),
-                            failed_miners_count=results["failed_peers"],
-                            bandwidth=avg_bandwidth,
-                        )
-                        # -------
-
-                    except Exception as e:
-                        self.logger.info(
-                            f"Error reporting allreduce metrics to dashboard {e}"
-                        )
+                except Exception as e:
+                    self.logger.info(
+                        f"Error reporting allreduce metrics to dashboard {e}"
+                    )
 
                 self.all_reduce_success_status = (
                     True if all_reduce_success_status_tensor[0].item() == 1 else False
