@@ -200,9 +200,9 @@ async def forward(self):
             all_reduce_success_status = True
 
             # Create and normalize gradients
-            bt.logging.info(":wait: Starting Compute Pseudo Gradients")
+            self.logger.info(":wait: Starting Compute Pseudo Gradients")
             compute_and_load_pseudo_grad_into_averager(self)
-            bt.logging.info(":wait: Finished Compute Pseudo Gradients")
+            self.logger.info(":wait: Finished Compute Pseudo Gradients")
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
             if self.master:
@@ -236,7 +236,7 @@ async def forward(self):
             if self.master:
                 # Perform offloaded outer optimization steps
                 self.outer_optimizer.step()
-                bt.logging.info(
+                self.logger.info(
                     ":white_heavy_check_mark: Finished Outer Optimizer Step."
                 )
 
@@ -255,7 +255,7 @@ async def forward(self):
                 )
                 average_loss_before = total_loss_before / n_batches_sampled_before
 
-                bt.logging.info(
+                self.logger.info(
                     ":white_heavy_check_mark: Finished Outer Optimizer Step."
                 )
             except Exception:

@@ -190,7 +190,7 @@ class Miner(BaseMinerNeuron):
             #     and (self.local_progress.inner_step % 10 == 0)
             # ) or (
             #     self.local_progress.epoch != 0
-            #     and (self.local_progress.inner_step % 5 == 0)
+            #     and (self.local_progress.inner_step % 2 == 0)
             # ):
             #     # ) and (self.all_reduce_flag != 1):
             #     #     # elif (datetime.datetime.now().minute % 30 == 0) and (
@@ -363,7 +363,7 @@ class Miner(BaseMinerNeuron):
         archive=False,
     ):
         # self.pause_training()
-        bt.logging.info("Upload Model Start")
+        self.logger.info("Upload Model Start")
         # """Unified function to save and upload both model and optimizer state"""
         attempt = 0
         while attempt < self.model_upload_retry_limit:
@@ -1103,7 +1103,7 @@ class Miner(BaseMinerNeuron):
                         encoded, self.config.neuron.topk_compression, quantize
                     )
                 if totalk is None:
-                    bt.logging.info("totalk is None")
+                    self.logger.info("totalk is None")
                 del encoded  # Free the encoded tensor immediately
 
                 if quantize:
@@ -1264,9 +1264,9 @@ class Miner(BaseMinerNeuron):
                 # Run inner optimizer step
                 self.inner_optimizer_step()
 
-                bt.logging.info(":wait: Starting Compute Pseudo Gradients")
+                self.logger.info(":wait: Starting Compute Pseudo Gradients")
                 self.compute_and_load_pseudo_grad_into_averager()
-                bt.logging.info(":wait: Finished Compute Pseudo Gradients")
+                self.logger.info(":wait: Finished Compute Pseudo Gradients")
 
                 # Clip gradients
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
@@ -1329,7 +1329,7 @@ class Miner(BaseMinerNeuron):
 
             # Normalize averaged gradients
             try:
-                bt.logging.info(
+                self.logger.info(
                     f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
                 )
                 # Perform offloaded outer optimization steps
@@ -1338,18 +1338,18 @@ class Miner(BaseMinerNeuron):
                 synapse.completion = False
 
             if self.master:
-                bt.logging.info("Outer Optimizer Step Started")
+                self.logger.info("Outer Optimizer Step Started")
                 for i, group in enumerate(self.outer_optimizer.param_groups):
                     for p in group["params"]:
-                        bt.logging.info(
+                        self.logger.info(
                             f"group {i} param {p.shape} grad mean={p.grad.float().mean().item()} p mean={p.float().mean().item()}"
                         )
                         break
                 self.outer_optimizer.step()
-                bt.logging.info("Outer Optimizer Step Finisheds")
+                self.logger.info("Outer Optimizer Step Finisheds")
                 for i, group in enumerate(self.outer_optimizer.param_groups):
                     for p in group["params"]:
-                        bt.logging.info(
+                        self.logger.info(
                             f"group {i} param {p.shape} grad mean={p.grad.float().mean().item()} p mean={p.float().mean().item()}"
                         )
                         break
@@ -1365,7 +1365,7 @@ class Miner(BaseMinerNeuron):
             self.logger.info(f"Apply opt params")
             self.apply_optimizer_parameters()
 
-            bt.logging.info(":white_heavy_check_mark: Finished Outer Optimizer Step.")
+            self.logger.info(":white_heavy_check_mark: Finished Outer Optimizer Step.")
 
             if self.master:
                 # Validate weight updates
