@@ -186,18 +186,16 @@ class Miner(BaseMinerNeuron):
                 self.global_progress.epoch = get_progress(self, "global")[0]
                 self.reload_state_event.set()
             # elif (
-            #     (
-            #         self.local_progress.epoch == 0
-            #         and (self.local_progress.inner_step % 10 == 0)
-            #     )
-            #     or (
-            #         self.local_progress.epoch != 0
-            #         and self.local_progress.inner_step > 20
-            #     )
-            # ) and (self.all_reduce_flag != 1):
-            #     # elif (datetime.datetime.now().minute % 30 == 0) and (
-            #     #     self.all_reduce_flag != 1
-            #     # ):
+            #     self.local_progress.epoch == 0
+            #     and (self.local_progress.inner_step % 10 == 0)
+            # ) or (
+            #     self.local_progress.epoch != 0
+            #     and (self.local_progress.inner_step % 5 == 0)
+            # ):
+            #     # ) and (self.all_reduce_flag != 1):
+            #     #     # elif (datetime.datetime.now().minute % 30 == 0) and (
+            #     #     #     self.all_reduce_flag != 1
+            #     #     # ):
             #     self.loop.run_until_complete(
             #         self.all_reduce(
             #             distributed_training.protocol.AllReduce(
@@ -206,7 +204,7 @@ class Miner(BaseMinerNeuron):
             #             )
             #         )
             #     )
-            #     # time.sleep(self.allreduce_timeout+self.upload_state_duration)
+            #     time.sleep(self.allreduce_timeout + self.upload_state_duration)
             else:
                 # TODO convert this to a listener
                 if (self.last_allreduce_block is not None) and (
@@ -1250,6 +1248,7 @@ class Miner(BaseMinerNeuron):
         self.logger.info("Received Local All Reduce Call")
         self.all_reduce_start_time = time.perf_counter()
         initial_weights = None
+        synapse.completion = True
         try:
             async with self.training_lock:
                 # Cancel any ongoing upload
@@ -1323,14 +1322,20 @@ class Miner(BaseMinerNeuron):
             if not gloabl_dist_checkpoint(synapse.completion, self.gloo_group):
                 self.all_reduce_flag = 0
                 self.all_reduce_success_status = False
+                self.resume_training()
                 self.maybe_sync_and_reload()
-                raise Exception(f"All Reduce Failed At Checkpoint 1")
+                self.logger.info(f"All Reduce Failed At Checkpoint 1")
+                return synapse
 
-            bt.logging.info(
-                f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
-            )
-            # Perform offloaded outer optimization steps
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            # Normalize averaged gradients
+            try:
+                bt.logging.info(
+                    f"Initial Weights NORM: {torch.norm(torch.cat([p.data.view(-1) for p in self.model.parameters()]))}"
+                )
+                # Perform offloaded outer optimization steps
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            except Exception:
+                synapse.completion = False
 
             if self.master:
                 bt.logging.info("Outer Optimizer Step Started")
@@ -1352,8 +1357,10 @@ class Miner(BaseMinerNeuron):
             if not gloabl_dist_checkpoint(synapse.completion, self.gloo_group):
                 self.all_reduce_flag = 0
                 self.all_reduce_success_status = False
+                self.resume_training()
                 self.maybe_sync_and_reload()
-                raise Exception(f"All Reduce Failed At Checkpoint 1")
+                self.logger.info(f"All Reduce Failed At Checkpoint 2")
+                return synapse
 
             self.logger.info(f"Apply opt params")
             self.apply_optimizer_parameters()
@@ -1373,8 +1380,10 @@ class Miner(BaseMinerNeuron):
             if not gloabl_dist_checkpoint(synapse.completion, self.gloo_group):
                 self.all_reduce_flag = 0
                 self.all_reduce_success_status = False
+                self.resume_training()
                 self.maybe_sync_and_reload()
-                raise Exception(f"All Reduce Failed At Checkpoint 1")
+                self.logger.info(f"All Reduce Failed At Checkpoint 3")
+                return synapse
 
             # Reset inner_step and update epoch
             self.local_progress.samples_accumulated = 0
@@ -1389,9 +1398,9 @@ class Miner(BaseMinerNeuron):
             )
             self.all_reduce_flag = 0
             self.reload_state_event.clear()
+
             # Resume training when done
             self.resume_training()
-
             self.maybe_sync_and_reload()
             return synapse
 
