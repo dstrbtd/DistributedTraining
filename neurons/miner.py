@@ -566,15 +566,13 @@ class Miner(BaseMinerNeuron):
         self.training_status = TrainingStatus.RUNNING
         self.logger.info(":white_heavy_check_mark: Resuming continuous training.")
 
-    async def fetch_training_data(self):
+    async def fetch_training_data(self, block: int):
         """Async function to fetch training data"""
         attempt = 0
         while attempt < self.retry_limit:
             try:
-                self.set_current_block_across_ranks()
-
                 pages = await DatasetLoader.next_pages(
-                    offset=self.current_block,
+                    offset=block,
                     n_pages=5,
                     seed=self.uid + self.local_rank,
                 )
@@ -1193,16 +1191,19 @@ class Miner(BaseMinerNeuron):
                 # Wait if training is paused
                 self.training_active.wait()
 
-                self.logger.debug(":pages: Fetching fineweb-edu pages")
+                self.set_current_block_across_ranks()
+                block_at_start = self.current_block
+                self.logger.debug(f"Block passed to dataloader and block list: {block_at_start}")
+
                 dataset = self.training_loop.run_until_complete(
-                    self.fetch_training_data()
+                    self.fetch_training_data(block_at_start)
                 )
 
                 # Wait if training is paused
                 self.training_active.wait()
 
                 if self.master:
-                    self.model.config.block_list.append(self.current_block)
+                    self.model.config.block_list.append(block_at_start)
 
                 self._process_training_batch(dataset)
             except Exception as e:
