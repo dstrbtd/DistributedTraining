@@ -158,5 +158,5 @@ def get_progress(
         local_peer_id = metadata["peer_id"]
         return local_epoch, local_inner_step, local_peer_id
     except Exception as e:
-        self.logger.warning(f"Error in get_progress: {str(e)}")
+        self.logger.debug(f"Error in get_progress: {str(e)}")
         return None, 0, None
