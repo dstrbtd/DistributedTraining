@@ -15,6 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import os
 import time
 import torch
 import torch.distributed as dist
@@ -73,6 +74,11 @@ async def forward(self):
 
         # Benchmark UIDs
         benchmark_uids(self)
+
+        valid_uids = sum(
+            [self.uid_tracker[uid].train.is_valid for uid in self.uid_tracker.keys()]
+        )
+        self.logger.info(f"Number of valid UIDs: {valid_uids}")
 
     # Get number of blocks since last allreduce
     self.set_current_block_across_ranks()
@@ -385,31 +391,19 @@ async def forward(self):
                     # -------
 
                 except Exception as e:
+                    self.all_reduce_success_status = False
                     self.logger.info(
                         f"Error reporting allreduce metrics to dashboard {e}"
                     )
 
-                self.all_reduce_success_status = (
-                    True if all_reduce_success_status_tensor[0].item() == 1 else False
-                )
-            else:
-                raise GradientAveragingError("Unsuccessful AllReduce Step")
-
         except Exception as e:
+            all_reduce_success_status = False
             self.all_reduce_success_status = False
             self.logger.error(f"All Reduce failed with error {e}")
             return
 
         finally:
-            upload_update_completion_tensor = (
-                torch.tensor([1])
-                if self.all_reduce_success_status is True
-                else torch.tensor([0])
-            )
-            dist.broadcast(
-                upload_update_completion_tensor, src=0, group=self.gloo_group
-            )
-            if upload_update_completion_tensor[0].item() != 1:
+            if not gloabl_dist_checkpoint(all_reduce_success_status, self.gloo_group):
                 self.logger.info("Failed to completed allreduce & upload process")
                 self.global_progress.epoch = get_progress(self, "global")[0]
                 self.all_reduce_success_status = False
@@ -421,6 +415,32 @@ async def forward(self):
                 self.logger.info("Succesfully completed allreduce & upload process")
                 self.all_reduce_success_status = True
                 self.config.neuron.blocks_per_allreduce = 750
+
+                for i in range(256):
+                    self.logger.info(i)
+                    self.save_gradient(self.global_progress.epoch, i)
+                if self.master:
+                    np.save(
+                        os.path.join(
+                            os.getcwd(),
+                            "gradients",
+                            f"epoch-{self.global_progress.epoch}",
+                            "incentive.npy",
+                        ),
+                        self.metagraph.incentive,
+                    )
+                    np.save(
+                        os.path.join(
+                            os.getcwd(),
+                            "gradients",
+                            f"epoch-{self.global_progress.epoch}",
+                            "scores.npy",
+                        ),
+                        self.scores,
+                    )
+                self.logger.info(
+                    "Succesfully saved gradients after allreduce & upload process"
+                )
 
     else:
         if self.master:

@@ -60,7 +60,7 @@ from botocore.session import get_session
 # Set scoring weights
 TRAIN_SCORE_WEIGHT = 0.75
 ALL_REDUCE_SCORE_WEIGHT = 0.25
-MAX_UPLOAD_INTERVAL = 2400  # Seconds
+MAX_UPLOAD_INTERVAL = 4800  # Seconds
 
 api = HfApi()
 
@@ -544,9 +544,10 @@ def score_repo(self, uid: int, prefix: str) -> bool:
         )
 
         age_seconds = (datetime.now(timezone.utc) - last_modified).total_seconds()
+        self.logger.info(f"UID {uid:03d}: Repo Score {age_seconds < MAX_UPLOAD_INTERVAL}. Age: {age_seconds}. Max Uplaod Interval: {MAX_UPLOAD_INTERVAL}")
         return age_seconds < MAX_UPLOAD_INTERVAL
     except Exception as e:
-        self.logger.info(f"UID {uid:03d}: Manifest check failed — {e}")
+        self.logger.debug(f"UID {uid:03d}: Manifest check failed — {e}")
         return False
 
 
@@ -572,7 +573,7 @@ def benchmark_uids(self):
         #     # self.logger.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
         #     self.uid_tracker[uid].train.is_valid = False
         except Exception as e:
-            self.logger.info(
+            self.logger.debug(
                 f"UID {uid} benchmarking failed with error {e}. Keeping score as is."
             )
 

@@ -65,6 +65,7 @@ from distributed_training.utils.state_loader import (
     cleanup_old_cache,
     load_state_from_peer,
 )
+from distributed_training.utils.dist import gloabl_dist_checkpoint
 from distributed_training.utils.uids import map_uid_to_peerid, update_run_peerid_list
 from distributed_training.validator import forward
 from distributed_training import __run__
@@ -79,6 +80,7 @@ from torch.distributed.checkpoint.state_dict import (
 )
 from distributed_training.utils.r2 import r2_download
 from distributed_training.utils.state_loader import get_r2_client
+from distributed_training.validator.reward import update_total_scores
 
 
 class Validator(BaseValidatorNeuron):
@@ -91,13 +93,44 @@ class Validator(BaseValidatorNeuron):
         self._init_network_components()
         self._init_uid_components()
         self._load_gradient_compressors()
+        if self.master:
+            map_uid_to_peerid(self)
+        for i in range(256):
+            self.logger.info(i)
+            self.save_gradient(self.global_progress.epoch, i)
+        if self.master:
+            np.save(
+                os.path.join(
+                    os.getcwd(),
+                    "gradients",
+                    f"epoch-{self.global_progress.epoch}",
+                    "incentive.npy",
+                ),
+                self.metagraph.incentive,
+            )
+            np.save(
+                os.path.join(
+                    os.getcwd(),
+                    "gradients",
+                    f"epoch-{self.global_progress.epoch}",
+                    "scores.npy",
+                ),
+                self.scores,
+            )
 
-    def test_gradient(self, epoch, uid):
+    def save_gradient(self, epoch, uid):
         try:
+            success_status = 1
             prefix = f"epoch-{epoch}/"
             destination_dir = os.path.join(os.getcwd(), "gradients", prefix)
             final_name = f"uid-{uid:03d}-epoch-{epoch}.pt"
             final_path = os.path.join(destination_dir, final_name)
+
+            if self.master and (self.uid_tracker[uid].train.account_id == 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' or self.uid_tracker[uid].train.access_key_id == 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' or self.uid_tracker[uid].train.secret_access_key == 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'):
+                success_status = 0
+
+            if not gloabl_dist_checkpoint(success_status, self.gloo_group):
+                return
 
             r2 = get_r2_client(self, uid, donwload_on_all_ranks=True)
             gradient_path = r2_download(
@@ -177,7 +210,6 @@ class Validator(BaseValidatorNeuron):
         """Send validator scoring metrics to InfluxDB"""
         try:
             points = []
-
             for uid, data in self.uid_tracker.items():
                 fields = self.flatten_model(data)  # dotted key dict
                 point = (
@@ -312,7 +344,7 @@ class Validator(BaseValidatorNeuron):
         self.load_state_timeout = 180
 
         # Core parameters
-        self.learning_rate_maximum = 2.5e-4
+        self.learning_rate_maximum = 1.5e-4
         self.learning_rate_eval = 0.5
         self.weight_decay = 0.1
         self.num_inner_steps = 500

@@ -170,7 +170,7 @@ def get_next_uids_manual(self, epoch: int, k: int = 25) -> List[int]:
 
 def get_next_uid_api(self, epoch: int = None) -> List[int]:
     try:
-        raise Exception("Forcing manual UID retrieval")
+        # raise Exception("Forcing manual UID retrieval")
         response = requests.get(
             url=self.uid_api_url, headers={"Authorization": self.uid_api_get_token}
         )
