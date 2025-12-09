@@ -544,8 +544,10 @@ def score_repo(self, uid: int, prefix: str) -> bool:
         )
 
         age_seconds = (datetime.now(timezone.utc) - last_modified).total_seconds()
-        self.logger.info(f"UID {uid:03d}: Repo Score {age_seconds < MAX_UPLOAD_INTERVAL}. Age: {age_seconds}. Max Uplaod Interval: {MAX_UPLOAD_INTERVAL}")
-        return age_seconds < MAX_UPLOAD_INTERVAL
+        self.logger.info(
+            f"UID {uid:03d}: Repo Score {age_seconds < self.max_upload_interval }. Age: {age_seconds}. Max Uplaod Interval: {self.max_upload_interval }"
+        )
+        return age_seconds < self.max_upload_interval
     except Exception as e:
         self.logger.debug(f"UID {uid:03d}: Manifest check failed — {e}")
         return False

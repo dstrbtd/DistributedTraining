@@ -126,7 +126,14 @@ class Validator(BaseValidatorNeuron):
             final_name = f"uid-{uid:03d}-epoch-{epoch}.pt"
             final_path = os.path.join(destination_dir, final_name)
 
-            if self.master and (self.uid_tracker[uid].train.account_id == 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' or self.uid_tracker[uid].train.access_key_id == 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' or self.uid_tracker[uid].train.secret_access_key == 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'):
+            if self.master and (
+                self.uid_tracker[uid].train.account_id
+                == "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                or self.uid_tracker[uid].train.access_key_id
+                == "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                or self.uid_tracker[uid].train.secret_access_key
+                == "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            ):
                 success_status = 0
 
             if not gloabl_dist_checkpoint(success_status, self.gloo_group):
