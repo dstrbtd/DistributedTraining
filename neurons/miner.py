@@ -839,7 +839,7 @@ class Miner(BaseMinerNeuron):
 
     def _setup_model_params(self):
         # Optimizer settings
-        self.learning_rate_maximum = 1.5e-4
+        self.learning_rate_maximum = 2.5e-4
         self.weight_decay = 0.1
         self.num_inner_steps = 500
         self.offload_optimizer = True

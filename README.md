@@ -62,7 +62,7 @@ brew update && brew install jq && brew install npm && sudo npm install pm2 -g &&
 
 ---
 # Running a Miner
-Once you have installed this repo you can run a miner with **auto updates enabled** using the following commands.
+Once you have installed this repo you can run a miner with **auto updates enabled** using the following commands:
 ```bash
 chmod +x run_miner.sh
 pm2 start run_miner.sh --name distributed_training_miner_auto_update --
@@ -79,7 +79,7 @@ pm2 start run_miner.sh --name distributed_training_miner_auto_update --
 ---
 
 # Running a Validator
-Once you have installed this repo you should request access to the Distributed org on HF using the following [link](https://huggingface.co/login?next=%2Fdistributed). You can then run a validator **auto updates enabled** using the following command.
+Once you have installed this repo you can then run a validator **auto updates enabled** using the following command:
 ```bash
 chmod +x run_validator.sh
 pm2 start run_validator.sh --name distributed_training_auto_update --

@@ -179,29 +179,29 @@ async def forward(self):
         self.miner_uids = miner_uids.tolist()
 
         try:
-            #     top_uid_index = 0
-            #     while True:
-            #         if top_uid_index < len(self.miner_uids):
-            #             top_uid = self.miner_uids[top_uid_index]
-            #         else:
-            #             top_uid = 212
-            #         self.local_progress.epoch = self.global_progress.epoch
+            top_uid_index = 0
+            while True:
+                if top_uid_index < len(self.miner_uids):
+                    top_uid = self.miner_uids[top_uid_index]
+                else:
+                    top_uid = 212
+                self.local_progress.epoch = self.global_progress.epoch
 
-            #         self.logger.info(f"Top UID identified as: {top_uid}")
+                self.logger.info(f"Top UID identified as: {top_uid}")
 
-            #         self.local_progress.inner_step = get_progress(
-            #             self, local_or_global="local", uid=top_uid
-            #         )[1]
-            #         top_uid_revision = f"{__run__}.{self.local_progress.epoch}.{self.local_progress.inner_step}"
-            #         load_state_from_peer(
-            #             self,
-            #             uid=top_uid,
-            #             revision=top_uid_revision,
-            #         )
-            #         if self.scheduler.__dict__["_step_count"] != 0:
-            #             break
-            #         else:
-            #             top_uid_index += 1
+                self.local_progress.inner_step = get_progress(
+                    self, local_or_global="local", uid=top_uid
+                )[1]
+                top_uid_revision = f"{__run__}.{self.local_progress.epoch}.{self.local_progress.inner_step}"
+                load_state_from_peer(
+                    self,
+                    uid=top_uid,
+                    revision=top_uid_revision,
+                )
+                if self.scheduler.__dict__["_step_count"] != 0:
+                    break
+                else:
+                    top_uid_index += 1
 
             all_reduce_success_status = True
 

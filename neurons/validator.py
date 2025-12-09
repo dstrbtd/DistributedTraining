@@ -344,7 +344,7 @@ class Validator(BaseValidatorNeuron):
         self.load_state_timeout = 180
 
         # Core parameters
-        self.learning_rate_maximum = 1.5e-4
+        self.learning_rate_maximum = 2.5e-4
         self.learning_rate_eval = 0.5
         self.weight_decay = 0.1
         self.num_inner_steps = 500
