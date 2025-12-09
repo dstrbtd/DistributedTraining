@@ -34,7 +34,10 @@ from distributed_training.utils.weight_utils import (
 )
 from distributed_training.utils.progress_tracker import UidTracker, get_progress
 from distributed_training.utils.state_loader import load_state_from_peer
-from distributed_training.validator.reward import update_total_scores
+from distributed_training.validator.reward import (
+    update_total_scores,
+    MAX_UPLOAD_INTERVAL,
+)
 from openskill.models import PlackettLuce
 from torch import distributed as dist
 
@@ -103,6 +106,9 @@ class BaseValidatorNeuron(BaseNeuron):
 
         # Log PeerID to chain flag
         self.r2_credentials_logged_to_chain = False
+
+        # Set max upload interval
+        self.max_upload_interval = MAX_UPLOAD_INTERVAL
 
     def serve_axon(self):
         """Serve axon to enable external connections."""

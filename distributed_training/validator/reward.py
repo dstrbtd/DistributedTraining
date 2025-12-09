@@ -192,7 +192,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
         n_batches_total_before,
         n_batches_sampled_before,
     ) = await evaluate_model(
-        self, model=model_base, blocks=blocks, uid=uid, samples=None, n_pages=1
+        self, model=model_base, blocks=blocks, uid=uid, samples=None, n_pages=2
     )
 
     # local aggregates
@@ -252,7 +252,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
         n_batches_total_after,
         n_batches_sampled_after,
     ) = await evaluate_model(
-        self, model=model_t1, blocks=blocks, uid=uid, samples=None, n_pages=1
+        self, model=model_t1, blocks=blocks, uid=uid, samples=None, n_pages=2
     )
 
     # local aggregates
@@ -544,8 +544,10 @@ def score_repo(self, uid: int, prefix: str) -> bool:
         )
 
         age_seconds = (datetime.now(timezone.utc) - last_modified).total_seconds()
-        self.logger.info(f"UID {uid:03d}: Repo Score {age_seconds < MAX_UPLOAD_INTERVAL}. Age: {age_seconds}. Max Uplaod Interval: {MAX_UPLOAD_INTERVAL}")
-        return age_seconds < MAX_UPLOAD_INTERVAL
+        self.logger.info(
+            f"UID {uid:03d}: Repo Score {age_seconds < self.max_upload_interval }. Age: {age_seconds}. Max Uplaod Interval: {self.max_upload_interval }"
+        )
+        return age_seconds < self.max_upload_interval
     except Exception as e:
         self.logger.debug(f"UID {uid:03d}: Manifest check failed — {e}")
         return False
