@@ -192,7 +192,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
         n_batches_total_before,
         n_batches_sampled_before,
     ) = await evaluate_model(
-        self, model=model_base, blocks=blocks, uid=uid, samples=None, n_pages=1
+        self, model=model_base, blocks=blocks, uid=uid, samples=None, n_pages=2
     )
 
     # local aggregates
@@ -252,7 +252,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
         n_batches_total_after,
         n_batches_sampled_after,
     ) = await evaluate_model(
-        self, model=model_t1, blocks=blocks, uid=uid, samples=None, n_pages=1
+        self, model=model_t1, blocks=blocks, uid=uid, samples=None, n_pages=2
     )
 
     # local aggregates
