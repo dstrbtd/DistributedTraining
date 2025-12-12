@@ -177,52 +177,43 @@ class DatasetLoader(BatchLoader):
         seed = int(hashlib.sha256(seed_str.encode()).hexdigest(), 16) % (2**32)
         return random.Random(seed)
     
-    def select_configs(self, configs, max_configs):
+    def select_configs(self, configs):
         rng = self.generate_rng("config_selection")
-        n = min(len(configs), max_configs)
+        n = min(len(configs), self.max_configs)
         indexes = rng.sample(range(len(configs)), n)
         self.debug and self.logger.debug(f"Config idxs chosen: {indexes}")
         return [configs[i] for i in indexes]
 
-    def select_shards(self, shards, max_shards, context="shard_selection"):
+    def select_shards(self, shards, context="shard_selection"):
         rng = self.generate_rng(context)
-        n = min(len(shards), max_shards)
+        n = min(len(shards), self.max_shards)
         indexes = rng.sample(range(len(shards)), n)
         self.debug and self.logger.debug(f"Shard idxs chosen: {indexes}")
         return [shards[i] for i in indexes]
 
-    def select_row_groups(self, num_row_groups, max_row_groups, context="row_group"):
+    def select_row_groups(self, num_row_groups, context="row_group"):
         rng = self.generate_rng(context)
-        start_idx = rng.randint(0, num_row_groups - max_row_groups) if num_row_groups > max_row_groups else 0
-        rg_indices = list(range(start_idx, start_idx + max_row_groups))
+        start_idx = rng.randint(0, num_row_groups - self.max_row_groups) if num_row_groups > self.max_row_groups else 0
+        rg_indices = list(range(start_idx, start_idx + self.max_row_groups))
         return rg_indices
 
-    def select_rows(self, num_rows, max_rows_per_group, context="row"):
+    def select_rows(self, num_rows, context="row"):
         rng = self.generate_rng(context)
-        start_idx = rng.randint(0, num_rows - max_rows_per_group) if num_rows > max_rows_per_group else 0
-        end_idx = min(start_idx + max_rows_per_group, num_rows)
+        start_idx = rng.randint(0, num_rows - self.max_rows_per_group) if num_rows > self.max_rows_per_group else 0
+        end_idx = min(start_idx + self.max_rows_per_group, num_rows)
         return start_idx, end_idx
 
-    async def load_bucket_data_to_buffer(self, max_configs=None, max_rows_per_group=None):
-        """
-        Load data from bucket into buffer.
-        
-        Args:
-            max_configs: Override default max_configs if provided
-            max_rows_per_group: Override default max_rows_per_group if provided
-        """
-        max_configs = max_configs or self.max_configs
-        max_rows_per_group = max_rows_per_group or self.max_rows_per_group
+    async def load_bucket_data_to_buffer(self):
+        """Load data from bucket into buffer."""
         
         if not self.metadata or not self.shard_sizes:
             self.load_bucket_configs()
 
-        all_shards = await self.get_shards_from_configs(max_configs=max_configs)
+        all_shards = await self.get_shards_from_configs()
         start_time = time.perf_counter()
 
         self.buffer = await self.fetch_data_for_shards(
             shard_paths=all_shards, 
-            max_rows_per_group=max_rows_per_group
         )
 
         end_time = time.perf_counter()
@@ -249,9 +240,9 @@ class DatasetLoader(BatchLoader):
         with open(local_path, "wb") as dst:
             dst.write(data)            
 
-    async def get_shards_from_configs(self, max_configs=3):
+    async def get_shards_from_configs(self):
         configs = await self.get_configs()
-        configs = self.select_configs(configs, max_configs)
+        configs = self.select_configs(configs)
 
         shard_lists = await asyncio.gather(
             *(asyncio.to_thread(self.list_shard_files, c) for c in configs)
@@ -259,7 +250,7 @@ class DatasetLoader(BatchLoader):
 
         all_shards = []
         for shards in shard_lists:
-            selected = self.select_shards(shards, self.max_shards, context=f"shard_{shards[0] if shards else ''}")
+            selected = self.select_shards(shards, context=f"shard_{shards[0] if shards else ''}")
             all_shards.extend(selected)
 
         # self.debug and self.logger.debug(f"All_shards: {all_shards}\n")
@@ -279,15 +270,15 @@ class DatasetLoader(BatchLoader):
         shards = config_info.get("shards", [])
         return [shard["path"] for shard in shards]
             
-    async def fetch_data_for_shards(self, shard_paths, max_rows_per_group=2):
+    async def fetch_data_for_shards(self, shard_paths):
         semaphore = asyncio.Semaphore(10)
         async def load_with_limit(shard):
             async with semaphore:
-                return await self.load_shard(shard_path=shard, max_rows_per_group=max_rows_per_group)
+                return await self.load_shard(shard_path=shard)
         results = await asyncio.gather(*(load_with_limit(p) for p in shard_paths))
         return [token for shard_buffer in results for token in shard_buffer]
     
-    async def load_shard(self, shard_path, max_rows_per_group=2):
+    async def load_shard(self, shard_path):
         buffer = []
         try:
             reader = await asyncio.to_thread(pq.ParquetFile, f"s3://{shard_path}", filesystem=self.fs)
@@ -296,12 +287,12 @@ class DatasetLoader(BatchLoader):
             return buffer
 
         num_row_groups = reader.num_row_groups
-        rg_indices = self.select_row_groups(num_row_groups, self.max_row_groups, context=f"row_group_{shard_path}")
+        rg_indices = self.select_row_groups(num_row_groups, context=f"row_group_{shard_path}")
 
         for rg_idx in rg_indices:
             row_group = await asyncio.to_thread(reader.read_row_group, rg_idx, columns=["text"], use_threads=True)
             num_rows = len(row_group)
-            start_idx, end_idx = self.select_rows(num_rows, max_rows_per_group, context=f"row_{shard_path}_rg{rg_idx}")
+            start_idx, end_idx = self.select_rows(num_rows, context=f"row_{shard_path}_rg{rg_idx}")
             rows = row_group.slice(offset=start_idx, length=end_idx - start_idx)
 
             encodings = await self.tokenize_texts(rows["text"].to_pylist())
