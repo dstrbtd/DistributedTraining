@@ -1177,64 +1177,6 @@ class Miner(BaseMinerNeuron):
                 ":white_heavy_check_mark: Starting continuous training worker"
             )
 
-    def pause_training(self):
-        """Pauses the continuous training loop"""
-        self.training_active.clear()
-        time.sleep(1)
-        self.training_status = TrainingStatus.PAUSED
-        self.logger.info(":warning:  Pausing continuous training.")
-
-    def resume_training(self):
-        """Resumes the continuous training loop"""
-        self.training_active.set()
-        self.training_status = TrainingStatus.RUNNING
-        self.logger.info(":white_heavy_check_mark: Resuming continuous training.")
-
-    async def fetch_training_data(self):
-        """Async function to fetch training data"""
-        attempt = 0
-        while attempt < self.retry_limit:
-            try:
-                debug = True
-                randomness = True
-                sequence_length = 1024
-
-                max_configs = 3
-                max_rows_per_group = 100
-
-                batch_size = 4
-
-                loader = DatasetLoader(
-                    debug=debug,
-                    randomness=randomness,
-                    sequence_length=sequence_length,
-                    tokenizer=self.tokenizer,
-                    uid=self.uid,
-                    current_block=self.current_block,
-                )
-
-                await loader.load_bucket_data_to_buffer(
-                    max_configs=max_configs,
-                    max_rows_per_group=max_rows_per_group
-                )
-
-                loader.prepare_batches(batch_size=batch_size)
-
-                return loader
-            except Exception as e:
-                self.logger.error(f"Error fetching training data: {str(e)}")
-                attempt += 1
-                self.logger.warning(
-                    f"Failed to fetch data, retrying. Attempt {attempt}/{self.retry_limit}"
-                )
-                if attempt < self.retry_limit:
-                    time.sleep(self.retry_delay * attempt)  # Wait before the next retry
-                else:
-                    self.logger.error(
-                        "Maximum retry limit reached. Unable to fetch data."
-                    )
-                    raise
-
     def _training_worker(self):
         """Worker function that runs in the ThreadPoolExecutor"""
 
