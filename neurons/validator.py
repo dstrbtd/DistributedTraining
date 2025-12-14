@@ -95,7 +95,17 @@ class Validator(BaseValidatorNeuron):
         self._load_gradient_compressors()
         if self.master:
             map_uid_to_peerid(self)
-        for i in range(256):
+
+        if self.master:
+            metagraph_n_value = int(self.metagraph.n)
+            metagraph_n_tensor = torch.tensor([metagraph_n_value], dtype=torch.int32, device="cpu")
+        else:
+            metagraph_n_tensor = torch.tensor([0], dtype=torch.int32, device="cpu")
+
+        dist.broadcast(metagraph_n_tensor, src=0, group=self.gloo_group)
+        self.metagraph_n = metagraph_n_tensor[0].item()
+
+        for i in range(self.metagraph_n):
             self.logger.info(i)
             self.save_gradient(self.global_progress.epoch, i)
         if self.master:
