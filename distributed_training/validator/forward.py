@@ -270,7 +270,6 @@ async def forward(self):
                     blocks=[self.current_block],
                     uid=self.uid,
                     samples=None,
-                    n_pages=2,
                 )
                 average_loss_before = total_loss_before / n_batches_sampled_before
 
@@ -304,7 +303,6 @@ async def forward(self):
                     blocks=[self.current_block],
                     uid=self.uid,
                     samples=None,
-                    n_pages=2,
                 )
                 average_loss_after = total_loss_after / n_batches_sampled_after
 

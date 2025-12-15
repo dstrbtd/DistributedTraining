@@ -66,7 +66,7 @@ api = HfApi()
 
 
 async def fetch_training_data(
-    self, block: int, uid: int, n_pages: int
+    self, block: int, uid: int, max_buffer_size: int
 ) -> DatasetLoader:
     """
     Async function to fetch training data
@@ -80,6 +80,9 @@ async def fetch_training_data(
         DatasetLoader: An instance of DatasetLoader containing the training data.
 
     """
+
+    self.logger.info(f"[DEBUG] max_buffer_size: {max_buffer_size}")
+
     attempt = 0
     while attempt < self.retry_limit:
         try:
@@ -94,7 +97,9 @@ async def fetch_training_data(
             # 1) add method="truncate" for debugging
             # 2) default buffer quantity is 2300000 so we set to small quantity of 460000 (20%)
             #    similar to how old code used n_pages=1
-            loader.reduce_buffer_size(target_size=460000)
+            # 3) either using target_size=460000 or fraction=0.2 would have the same effect
+            loader.reduce_buffer_size(target_size=max_buffer_size)
+            # loader.reduce_buffer_size(fraction=0.2)  
 
             dataset_length = torch.tensor(len(loader.buffer))
             dist.all_reduce(dataset_length, op=dist.ReduceOp.MIN, group=self.gloo_group)
@@ -123,7 +128,7 @@ async def evaluate_model(
     model: torch.nn.Module,
     blocks: list[int],
     uid: int,
-    n_pages: int,
+    max_buffer_size: int = 460000,
     samples: list[int] = None,
 ) -> tuple[float, int, int]:
     """
@@ -133,7 +138,7 @@ async def evaluate_model(
         model (torch.nn.Module): The model to evaluate.
         blocks (list[int]): List of block numbers to use for fetching data.
         uid (int): The UID of the miner to evaluate.
-        n_pages (int): Number of pages to fetch for evaluation.
+        max_buffer_size (int): Maximum buffer size for fetching data.
         samples (list[int], optional): Sample indices to use for testing. Defaults to None.
         test_flag (bool, optional): Flag to indicate if this is a test run. Defaults to False.
 
@@ -147,7 +152,7 @@ async def evaluate_model(
     n_batches_sampled = 0
 
     for block in blocks:
-        dataset = await fetch_training_data(self, block, uid, n_pages)
+        dataset = await fetch_training_data(self, block, uid, max_buffer_size)
 
         with torch.no_grad():
             model.eval()
@@ -191,7 +196,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
         n_batches_total_before,
         n_batches_sampled_before,
     ) = await evaluate_model(
-        self, model=model_base, blocks=blocks, uid=uid, samples=None, n_pages=2
+        self, model=model_base, blocks=blocks, uid=uid, samples=None
     )
 
     # local aggregates
@@ -251,7 +256,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
         n_batches_total_after,
         n_batches_sampled_after,
     ) = await evaluate_model(
-        self, model=model_t1, blocks=blocks, uid=uid, samples=None, n_pages=2
+        self, model=model_t1, blocks=blocks, uid=uid, samples=None
     )
 
     # local aggregates
