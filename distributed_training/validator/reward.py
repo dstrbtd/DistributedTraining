@@ -89,7 +89,8 @@ async def fetch_training_data(
             loader = DatasetLoader(
                 tokenizer=self.tokenizer,
                 uid=uid + self.local_rank, # Assuming self.local_rank (1-4) is also what miner provided. 
-                current_block=block,              
+                current_block=block,
+                max_configs=1, # set similar to miner.py during debug         
             )
  
             await loader.load_bucket_data_to_buffer()
