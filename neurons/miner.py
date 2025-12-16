@@ -585,7 +585,7 @@ class Miner(BaseMinerNeuron):
                 loader = DatasetLoader(
                     tokenizer=self.tokenizer,
                     uid=self.uid + self.local_rank,
-                    current_block=self.current_block,
+                    current_block=block,
                     max_configs=1, # REMOVE BECAUSE JUT FOR DEBUGGING
                 )
             
