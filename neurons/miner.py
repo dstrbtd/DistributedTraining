@@ -169,6 +169,15 @@ class Miner(BaseMinerNeuron):
                 self.sync()
             except Exception as e:
                 self.logger.debug(f"Error {e} when trying to sync")
+
+            self.logger.debug(
+                f"[block_list] watcher | "
+                f"current_block={self.current_block} "
+                f"starting_block={self.starting_block} "
+                f"last_allreduce_block={self.last_allreduce_block} "
+                f"block_list={list(self.model.config.block_list)}"
+            )
+
             if not self.all_reduce_success_status:
                 wait_time = (
                     self.allreduce_timeout
