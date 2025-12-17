@@ -96,7 +96,7 @@ class BatchLoader:
 class DatasetLoader(BatchLoader):
     def __init__(
         self,
-        uid: int,
+        seed_base: int,
         current_block: int = 0,
         tokenizer=None,
 
@@ -117,7 +117,7 @@ class DatasetLoader(BatchLoader):
             sequence_length=sequence_length
         )
 
-        self.uid = uid
+        self.seed_base = seed_base
         self.current_block = current_block
         self.logger = bt.logging
         load_dotenv(find_dotenv())
@@ -167,13 +167,13 @@ class DatasetLoader(BatchLoader):
         self.total_row_groups_loaded = 0
         self.total_rows_loaded = 0
 
-        self.debug and self.logger.debug(f"DatasetLoader initialized with UID={self.uid}, block={self.current_block}")
+        self.debug and self.logger.debug(f"DatasetLoader initialized with seed_base={self.seed_base}, block={self.current_block}")
 
     def generate_rng(self, context: str = "") -> random.Random:
         """
-        Returns a reproducible RNG based on the stored UID and current block.
+        Returns a reproducible RNG based on the stored seed_base and current block.
         """
-        seed_str = f"{self.uid}-{context}-{self.current_block}"
+        seed_str = f"{self.seed_base}-{context}-{self.current_block}"
         seed = int(hashlib.sha256(seed_str.encode()).hexdigest(), 16) % (2**32)
         return random.Random(seed)
     
@@ -330,7 +330,7 @@ if __name__ == "__main__":
 
     loader = DatasetLoader(
         tokenizer=tokenizer,
-        uid=miner_uid,
+        seed_base=miner_uid,
         current_block=current_block,
         max_configs=1,
         # max_rows_per_group=100,

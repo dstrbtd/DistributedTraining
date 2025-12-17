@@ -580,11 +580,9 @@ class Miner(BaseMinerNeuron):
         attempt = 0
         while attempt < self.retry_limit:
             try:
-                self.set_current_block_across_ranks()
-                
                 loader = DatasetLoader(
                     tokenizer=self.tokenizer,
-                    uid=self.uid + self.local_rank,
+                    seed_base=self.uid + self.local_rank,
                     current_block=block,
                     max_configs=1, # REMOVE BECAUSE JUT FOR DEBUGGING
                 )
@@ -598,7 +596,8 @@ class Miner(BaseMinerNeuron):
                 loader.buffer = loader.buffer[:dataset_length]
                 self.logger.debug("Dataset Buffer Length", len(loader.buffer))                
 
-                loader.prepare_batches()                
+                loader.prepare_batches()
+
 
                 return loader
             except Exception as e:

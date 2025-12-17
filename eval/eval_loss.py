@@ -258,7 +258,7 @@ async def fetch_training_data(tokenizer):
         try:
             loader = DatasetLoader(
                 tokenizer=tokenizer,
-                uid=uid,
+                seed_base=uid,
                 current_block=current_block,
             )
 

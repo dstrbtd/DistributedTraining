@@ -88,14 +88,14 @@ async def fetch_training_data(
         try:
             loader = DatasetLoader(
                 tokenizer=self.tokenizer,
-                uid=uid + self.local_rank, # Assuming self.local_rank (1-4) is also what miner provided. 
+                seed_base=uid + self.local_rank, # Assuming self.local_rank (1-4) is also what miner provided. 
                 current_block=block,
                 max_configs=1, # set similar to miner.py during debug         
             )
  
             await loader.load_bucket_data_to_buffer()
      
-            # 1) add method="truncate" for debugging
+            # 1) add arg method="truncate" for debugging
             # 2) default buffer quantity is 2300000 so we set to small quantity of 460000 (20%)
             #    similar to how old code used n_pages=1
             # 3) either using target_size=460000 or fraction=0.2 would have the same effect
@@ -107,7 +107,18 @@ async def fetch_training_data(
             loader.buffer = loader.buffer[:dataset_length]
             self.logger.debug("Dataset Buffer Length", len(loader.buffer))
 
-            loader.prepare_batches()    
+            loader.prepare_batches()
+
+            for i, (inputs, labels) in enumerate(loader):
+                if i == 0:
+                    print(f"Batch {i}: input_ids shape {inputs.shape}")
+                    print(f"Batch {i}: labels shape {labels.shape}")
+
+                    first_example = inputs[0]
+                    print("First 10 tokens:", first_example[:10].tolist())
+                    print("Decoded:", self.tokenizer.decode(first_example[:10]))
+
+                break
 
             return loader
 
