@@ -148,9 +148,9 @@ class BaseMinerNeuron(BaseNeuron):
                     # Wait if training is paused
                     self.training_active.wait()
 
-                    block_at_start = self.current_block 
+                    self.set_current_block_across_ranks()
+                    block_at_start = self.current_block
                     self.logger.debug(f"block_at_start: {block_at_start}")
-                    self.logger.debug(f"self.model.config.block_list: {self.model.config.block_list}")
 
                     self.logger.debug(":pages: Fetching fineweb-edu pages")
                     dataset = self.training_loop.run_until_complete(

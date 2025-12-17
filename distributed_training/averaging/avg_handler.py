@@ -87,7 +87,7 @@ class AveragingHandler:
             try:
                 loader = DatasetLoader(
                     tokenizer=self.tokenizer,
-                    uid=self.uid,
+                    seed_base=self.uid,
                     current_block=block,
                 )
 

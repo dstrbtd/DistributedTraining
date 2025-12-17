@@ -580,11 +580,9 @@ class Miner(BaseMinerNeuron):
         attempt = 0
         while attempt < self.retry_limit:
             try:
-                self.set_current_block_across_ranks()
-                
                 loader = DatasetLoader(
                     tokenizer=self.tokenizer,
-                    uid=self.uid + self.local_rank,
+                    seed_base=self.uid + self.local_rank,
                     current_block=block,
                     max_configs=1, # REMOVE BECAUSE JUT FOR DEBUGGING
                 )
@@ -598,7 +596,8 @@ class Miner(BaseMinerNeuron):
                 loader.buffer = loader.buffer[:dataset_length]
                 self.logger.debug("Dataset Buffer Length", len(loader.buffer))                
 
-                loader.prepare_batches()                
+                loader.prepare_batches()
+
 
                 return loader
             except Exception as e:
@@ -1196,14 +1195,13 @@ class Miner(BaseMinerNeuron):
                 # Wait if training is paused
                 self.training_active.wait()
 
-                block_at_start = self.current_block 
+                self.set_current_block_across_ranks()
+                block_at_start = self.current_block       
                 self.logger.debug(f"block_at_start: {block_at_start}")
-                self.logger.debug(f"self.model.config.block_list: {self.model.config.block_list}")                
-
 
                 self.logger.debug(":pages: Fetching fineweb-edu pages")
                 dataset = self.training_loop.run_until_complete(
-                    self.fetch_training_data(self, block_at_start)
+                    self.fetch_training_data(block_at_start)
                 )
 
                 # Wait if training is paused
