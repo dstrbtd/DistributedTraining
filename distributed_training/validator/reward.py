@@ -466,6 +466,7 @@ async def score_uids(self, epoch: int, uids: list):
 
             if self.master:
                 for k, v in loss_scores.items():
+                    self.logger.debug("train.random scores: ", k, v)
                     setattr(self.uid_tracker[uid].train.random, k, v)
 
             self.logger.info(
@@ -507,6 +508,7 @@ async def score_uids(self, epoch: int, uids: list):
 
             if self.master:
                 for k, v in loss_scores.items():
+                    self.logger.debug("train.assigned scores: ", k, v)
                     setattr(self.uid_tracker[uid].train.assigned, k, v)
             self.logger.info(
                 f"UID {uid:03d}: Assigned <=> Absolute loss improvement: {loss_scores['absolute']:.6f}"
@@ -520,6 +522,9 @@ async def score_uids(self, epoch: int, uids: list):
             self.logger.info(f"UID {uid:03d}: Error calculating loss score: {e}")
 
         finally:
+            if self.master:
+                self.logger.debug(f"self.uid_tracker[uid]: {self.uid_tracker[uid]}")
+                self.logger.debug(f"score_status: {score_status}")
             dist.all_reduce(score_status, group=self.gloo_group)
             self.logger.info(f"UID {uid:03d}: Score status {score_status[0].item()}")
             if (score_status[0].item() != self.world_size) and self.master:
