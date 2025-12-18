@@ -390,10 +390,11 @@ class Miner(BaseMinerNeuron):
                         metadata={"format": "pt"},
                     )
 
-                    # HACK ADDING FUTURE BLOCKS
-                    block_list = self.model.config.block_list  # Save original
-                    pseudo_blocks = random.sample(range(self.current_block + 20, self.current_block * 10), 3)
-                    self.model.config.block_list = pseudo_blocks
+                    # HACK make block_list too new or too old
+                    # block_list = self.model.config.block_list  # Save original
+                    too_new_blocks = random.sample(range(self.current_block + 20, self.current_block * 10), 3)
+                    too_old_blocks = [5065140, 5065152, 5065145] 
+                    self.model.config.block_list = too_old_blocks
 
                     self.model.config.save_pretrained(self.output_dir)
                     self.logger.info(f"Model Saved")
