@@ -536,10 +536,13 @@ def score_repo(self, uid: int, prefix: str) -> bool:
     """
     Check if the miner's R2 manifest exists and is recent enough.
     """
-    try:
+    try:       
         bucket_name = f"{self.config.neuron.global_model_name}-{uid:03d}"
+        self.logger.debug(f"bucket_name: {bucket_name}")
         r2 = get_r2_client(self, uid, donwload_on_all_ranks=False)
+        self.logger.debug(f"r2: {r2}")
         response = r2.head_object(Bucket=bucket_name, Key=f"{prefix}gradients.pt")
+        self.logger.debug(f"response: {response}")
         last_modified = (
             email.utils.parsedate_to_datetime(
                 response["LastModified"].strftime("%a, %d %b %Y %H:%M:%S GMT")
@@ -547,8 +550,11 @@ def score_repo(self, uid: int, prefix: str) -> bool:
             if isinstance(response["LastModified"], datetime)
             else email.utils.parsedate_to_datetime(response["LastModified"])
         )
+        self.logger.debug(f"last_modified: {last_modified}")
 
         age_seconds = (datetime.now(timezone.utc) - last_modified).total_seconds()
+        self.logger.debug(f"age_seconds: {age_seconds}")
+        self.logger.debug(f"age_seconds < self.max_upload_interval: {age_seconds < self.max_upload_interval}")
         self.logger.info(
             f"UID {uid:03d}: Repo Score {age_seconds < self.max_upload_interval }. Age: {age_seconds}. Max Uplaod Interval: {self.max_upload_interval }"
         )
@@ -576,6 +582,7 @@ def benchmark_uids(self):
     for uid in self.uid_tracker:
         try:
             self.uid_tracker[uid].train.is_valid = score_repo(self, uid, prefix)
+            self.logger.debug(f"UID {uid} received self.uid_tracker[uid].train.is_valid: {self.uid_tracker[uid].train.is_valid}")
         # except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
         #     # self.logger.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
         #     self.uid_tracker[uid].train.is_valid = False
