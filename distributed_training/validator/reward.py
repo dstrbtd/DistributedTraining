@@ -109,17 +109,6 @@ async def fetch_training_data(
 
             loader.prepare_batches()
 
-            for i, (inputs, labels) in enumerate(loader):
-                if i == 0:
-                    print(f"Batch {i}: input_ids shape {inputs.shape}")
-                    print(f"Batch {i}: labels shape {labels.shape}")
-
-                    first_example = inputs[0]
-                    print("First 10 tokens:", first_example[:10].tolist())
-                    print("Decoded:", self.tokenizer.decode(first_example[:10]))
-
-                break
-
             return loader
 
         except Exception as e:
