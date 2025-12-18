@@ -309,7 +309,9 @@ def compute_loss_improvement(before: float, after: float) -> dict:
 def get_uids_blocks(self, uid: int, prefix=str) -> list[int]:
     """"""
     bucket_name = f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}"
+    self.logger.debug(f"bucket_name: {bucket_name}")
     r2 = get_r2_client(self, uid, donwload_on_all_ranks=True)
+    self.logger.debug(f"r2: {r2}")
     config_path = r2_download(
         self,
         r2=r2,
@@ -319,8 +321,16 @@ def get_uids_blocks(self, uid: int, prefix=str) -> list[int]:
         run_on_all_ranks=True,
         destination=bucket_name,
     )
+    self.logger.debug(f"config_path: {config_path}")
     uid_blocks = json.load(open(config_path))["block_list"]
+    self.logger.debug(f"uid_blocks: {uid_blocks}")
     # if False:
+    self.logger.debug(f"self.current_block: {self.current_block}")
+    self.logger.debug(f"max(uid_blocks): {max(uid_blocks)}")
+    self.logger.debug(f"self.config.neuron.blocks_per_allreduce: {self.config.neuron.blocks_per_allreduce}")
+    self.logger.debug(f"self.current_block - max(uid_blocks): {self.current_block - max(uid_blocks)}")
+    self.logger.debug(f"(self.config.neuron.blocks_per_allreduce / 2): {(self.config.neuron.blocks_per_allreduce / 2)}")
+    self.logger.debug(f"(self.current_block - max(uid_blocks)) > (self.config.neuron.blocks_per_allreduce / 2): {(self.current_block - max(uid_blocks)) > (self.config.neuron.blocks_per_allreduce / 2)}")
     if (self.current_block - max(uid_blocks)) > (
         self.config.neuron.blocks_per_allreduce / 2
     ):
@@ -330,6 +340,7 @@ def get_uids_blocks(self, uid: int, prefix=str) -> list[int]:
     else:
         random.seed(uid)
         assgined_blocks = random.sample(uid_blocks, 1)
+        self.logger.debug(f"assgined_blocks: {assgined_blocks}")
         return assgined_blocks
 
 
