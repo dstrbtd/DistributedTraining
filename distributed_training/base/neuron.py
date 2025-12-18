@@ -36,7 +36,7 @@ from distributed_training.utils.config import (
     R2Access,
     R2Config,
 )
-from distributed_training.utils.logger import setup_logging
+# from distributed_training.utils.logger import setup_logging
 from distributed_training.utils.misc import ttl_get_block
 from dotenv import load_dotenv
 
@@ -171,7 +171,7 @@ class BaseNeuron(ABC):
         self.master_uid = master_uid[0].item()
 
         # Setup Logging
-        setup_logging(self, config=self.config)
+        # setup_logging(self, config=self.config)
 
         # Create the R2 data model
         r2 = R2Config(
