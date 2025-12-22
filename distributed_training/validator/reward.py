@@ -36,7 +36,7 @@ from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundErro
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from distributed_training import __run__
-from distributed_training.data.dataset import DatasetLoader
+from distributed_training.data.dataset import DatasetLoader, get_dataset_loader
 from distributed_training.utils.progress_tracker import get_progress, get_r2_client
 from distributed_training.utils.state_loader import (
     cleanup_old_cache,
@@ -81,9 +81,13 @@ async def fetch_training_data(
 
     """
     attempt = 0
+    # Get the appropriate loader based on config
+    data_source = getattr(self.config.neuron, "data_source", "huggingface")
+    LoaderClass = get_dataset_loader(data_source)
+
     while attempt < self.retry_limit:
         try:
-            pages = await DatasetLoader.next_pages(
+            pages = await LoaderClass.next_pages(
                 offset=block,
                 n_pages=n_pages,
                 seed=uid + self.local_rank,
@@ -93,7 +97,7 @@ async def fetch_training_data(
 
             self.logger.debug(pages)
 
-            dataset = await DatasetLoader.create(
+            dataset = await LoaderClass.create(
                 batch_size=self.config.neuron.local_batch_size_train,
                 sequence_length=1024,
                 pages_info=pages,

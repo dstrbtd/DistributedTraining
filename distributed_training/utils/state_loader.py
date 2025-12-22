@@ -796,6 +796,7 @@ def load_model_optimizer_gradient_averager(
             self.device,
             self.logger,
             # parameters_list,
+            data_source=getattr(self.config.neuron, "data_source", "huggingface"),
         )
         if (
             (self.master)

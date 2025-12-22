@@ -15,7 +15,7 @@ import shutil
 import json
 import torch.distributed as dist
 from distributed_training import __run__
-from distributed_training.data.dataset import DatasetLoader
+from distributed_training.data.dataset import DatasetLoader, get_dataset_loader
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.constants import HF_HUB_CACHE
@@ -242,6 +242,11 @@ async def fetch_training_data(tokenizer):
     retry_delay = 60
     attempt = 0
     local_batch_size_train = 4
+
+    # Get data source from environment variable (default: huggingface)
+    data_source = os.getenv("DATA_SOURCE", "huggingface")
+    LoaderClass = get_dataset_loader(data_source)
+
     if dist.get_rank() == 0:
         current_block = random.randint(6193881 * 2, 6193881 * 4)
         uid = random.randint(300, 1000000)
@@ -256,7 +261,7 @@ async def fetch_training_data(tokenizer):
     # print(SELF.local_rank, f"Fetched block {current_block} with uid {uid}")
     while attempt < retry_limit:
         try:
-            pages = await DatasetLoader.next_pages(
+            pages = await LoaderClass.next_pages(
                 offset=current_block,
                 n_pages=5,
                 seed=uid,
@@ -264,7 +269,7 @@ async def fetch_training_data(tokenizer):
             random.seed(uid)
             random.shuffle(pages)
 
-            dataset = await DatasetLoader.create(
+            dataset = await LoaderClass.create(
                 batch_size=local_batch_size_train,
                 sequence_length=1024,
                 pages_info=pages,
