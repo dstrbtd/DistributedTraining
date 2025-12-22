@@ -180,6 +180,14 @@ def add_args(cls, parser, prefix=None):
     )
 
     parser.add_argument(
+        "--neuron.data_source",
+        type=str,
+        choices=["huggingface", "r2"],
+        help="Data source for training data: 'huggingface' (default) or 'r2' (Cloudflare R2)",
+        default="huggingface",
+    )
+
+    parser.add_argument(
         "--neuron.master_ss58_address",
         type=str,
         help="The ss58 address for the master validator UID",

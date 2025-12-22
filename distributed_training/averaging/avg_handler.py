@@ -10,7 +10,7 @@ import numpy as np
 from typing import Any, Dict, List, Tuple
 from distributed_training.averaging.exceptions import AllReduceError, ModelStateError
 from distributed_training.protocol import AllReduce
-from distributed_training.data.dataset import DatasetLoader
+from distributed_training.data.dataset import DatasetLoader, get_dataset_loader
 from distributed_training.utils.dendrite import (
     async_dendrite_forward,
 )
@@ -36,6 +36,7 @@ class AveragingHandler:
         device,
         logger,
         parameters_list=None,
+        data_source="huggingface",
     ):
         self.model = model
         self.inner_optimizer = optimizer
@@ -55,6 +56,7 @@ class AveragingHandler:
         self.logger = logger
         self.parameters_list = parameters_list
         self.master = True
+        self.data_source = data_source
 
     def _get_weights_sample(self) -> List[float]:
         """Get a sample of model weights for validation."""
@@ -83,9 +85,12 @@ class AveragingHandler:
     async def fetch_training_data(self, block):
         """Async function to fetch training data"""
         attempt = 0
+        # Get the appropriate loader based on config
+        LoaderClass = get_dataset_loader(self.data_source)
+
         while attempt < self.retry_limit:
             try:
-                pages = await DatasetLoader.next_pages(
+                pages = await LoaderClass.next_pages(
                     offset=block,
                     n_pages=5,
                     seed=self.uid,
@@ -93,7 +98,7 @@ class AveragingHandler:
                 random.seed(self.uid)
                 random.shuffle(pages)
 
-                dataset = await DatasetLoader.create(
+                dataset = await LoaderClass.create(
                     batch_size=4,
                     sequence_length=1024,
                     pages_info=pages,

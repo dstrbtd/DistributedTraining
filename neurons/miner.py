@@ -76,7 +76,7 @@ from distributed_training import __run__
 
 # from distributed_training.averaging.avg_handler import AllReduceError
 from distributed_training.base.miner import BaseMinerNeuron, TrainingStatus
-from distributed_training.data.dataset import DatasetLoader
+from distributed_training.data.dataset import DatasetLoader, get_dataset_loader
 from distributed_training.utils.chain import log_r2_to_chain
 from distributed_training.utils.misc import (
     init_dht,
@@ -569,11 +569,15 @@ class Miner(BaseMinerNeuron):
     async def fetch_training_data(self):
         """Async function to fetch training data"""
         attempt = 0
+        # Get the appropriate loader based on config
+        data_source = getattr(self.config.neuron, "data_source", "huggingface")
+        LoaderClass = get_dataset_loader(data_source)
+
         while attempt < self.retry_limit:
             try:
                 self.set_current_block_across_ranks()
 
-                pages = await DatasetLoader.next_pages(
+                pages = await LoaderClass.next_pages(
                     offset=self.current_block,
                     n_pages=5,
                     seed=self.uid + self.local_rank,
@@ -583,7 +587,7 @@ class Miner(BaseMinerNeuron):
 
                 self.logger.debug(pages)
 
-                dataset = await DatasetLoader.create(
+                dataset = await LoaderClass.create(
                     batch_size=self.config.neuron.local_batch_size_train,
                     sequence_length=1024,
                     pages_info=pages,

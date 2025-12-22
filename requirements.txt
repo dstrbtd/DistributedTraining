@@ -21,3 +21,5 @@ muon-optimizer @ git+https://github.com/KellerJordan/Muon@f90a42b28e00b8d9d2d058
 rich==14.1.0
 bittensor-cli==9.11.2
 boto3==1.40.45
+pyarrow>=14.0.0
+pandas>=2.0.0
