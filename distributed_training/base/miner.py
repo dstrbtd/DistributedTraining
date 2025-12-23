@@ -150,7 +150,9 @@ class BaseMinerNeuron(BaseNeuron):
 
                     self.set_current_block_across_ranks()
                     block_at_start = self.current_block
-                    self.logger.debug(f"Block passed to dataloader and block list: {block_at_start}")
+                    self.logger.debug(
+                        f"Block passed to dataloader and block list: {block_at_start}"
+                    )
 
                     self.logger.debug(":pages: Fetching fineweb-edu pages")
                     dataset = self.training_loop.run_until_complete(

@@ -676,7 +676,7 @@ def load_model_optimizer_gradient_averager(
     if self.master:
         if not hasattr(self, "outer_optimizer"):
             # Set outer optimizer
-            optimizer = partial(torch.optim.SGD, lr=1, momentum=0.9, nesterov=True)
+            optimizer = partial(torch.optim.SGD, lr=0.8, momentum=0.9, nesterov=True)
 
             # param_groups, main_parameters, parameter_names = check_params(optimizer, self.model.parameters(), None)
             param_groups, main_parameters, parameter_names = check_params(

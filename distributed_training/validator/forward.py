@@ -242,6 +242,17 @@ async def forward(self):
                 raise Exception(f"All Reduce Failed During Gradient Normalization.")
 
             if self.master:
+                if (
+                    len(results["participating_peers"]) - len(results["failed_peers"])
+                ) <= 2:
+                    all_reduce_success_status = False
+
+            if not gloabl_dist_checkpoint(all_reduce_success_status, self.gloo_group):
+                raise Exception(
+                    f"All Reduce Failed. 2 Or Less Miners Succeeded All Reduce."
+                )
+
+            if self.master:
                 # Perform offloaded outer optimization steps
                 self.outer_optimizer.step()
                 self.logger.info(
@@ -350,7 +361,6 @@ async def forward(self):
                 self.model, self.inner_optimizer, options=inner_optimizer_options
             )
             self.logger.info(f"Extracted Optimizer & Model State Dict")
-
             # Upload new global state to HF
             upload_new_state(
                 self,
