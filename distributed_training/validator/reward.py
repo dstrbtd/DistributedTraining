@@ -36,7 +36,7 @@ from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundErro
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from distributed_training import __run__
-from distributed_training.data.dataset import DatasetLoader
+from distributed_training.data.dataset_loader import DatasetLoader
 from distributed_training.utils.progress_tracker import get_progress, get_r2_client
 from distributed_training.utils.state_loader import (
     cleanup_old_cache,
@@ -66,7 +66,7 @@ api = HfApi()
 
 
 async def fetch_training_data(
-    self, block: int, uid: int, n_pages: int
+    self, block: int, uid: int, max_buffer_size: int
 ) -> DatasetLoader:
     """
     Async function to fetch training data
@@ -80,32 +80,37 @@ async def fetch_training_data(
         DatasetLoader: An instance of DatasetLoader containing the training data.
 
     """
+
+    self.logger.info(f"[DEBUG] max_buffer_size: {max_buffer_size}")
+
     attempt = 0
     while attempt < self.retry_limit:
         try:
-            pages = await DatasetLoader.next_pages(
-                offset=block,
-                n_pages=n_pages,
-                seed=uid + self.local_rank,
-            )
-            rng = np.random.default_rng(hash(self.uid) & 0xFFFFFFFF)
-            rng.shuffle(pages)
-
-            self.logger.debug(pages)
-
-            dataset = await DatasetLoader.create(
-                batch_size=self.config.neuron.local_batch_size_train,
-                sequence_length=1024,
-                pages_info=pages,
+            loader = DatasetLoader(
                 tokenizer=self.tokenizer,
+                seed_base=uid + self.local_rank, # Assuming self.local_rank (1-4) is also what miner provided. 
+                current_block=block,
+                max_configs=1, # set similar to miner.py during debug         
             )
+ 
+            await loader.load_bucket_data_to_buffer()
+     
+            # 1) add arg method="truncate" for debugging
+            # 2) default buffer quantity is 2300000 so we set to small quantity of 460000 (20%)
+            #    similar to how old code used n_pages=1
+            # 3) either using target_size=460000 or fraction=0.2 would have the same effect
+            loader.reduce_buffer_size(target_size=max_buffer_size)
+            # loader.reduce_buffer_size(fraction=0.2)  
 
-            dataset_length = torch.tensor(len(dataset.buffer))
+            dataset_length = torch.tensor(len(loader.buffer))
             dist.all_reduce(dataset_length, op=dist.ReduceOp.MIN, group=self.gloo_group)
-            dataset.buffer = dataset.buffer[:dataset_length]
-            self.logger.debug("Dataset Buffer Length", len(dataset.buffer))
+            loader.buffer = loader.buffer[:dataset_length]
+            self.logger.debug("Dataset Buffer Length", len(loader.buffer))
 
-            return dataset
+            loader.prepare_batches()
+
+            return loader
+
         except Exception as e:
             self.logger.error(f"Error fetching training data: {str(e)}")
             attempt += 1
@@ -124,7 +129,7 @@ async def evaluate_model(
     model: torch.nn.Module,
     blocks: list[int],
     uid: int,
-    n_pages: int,
+    max_buffer_size: int = 460000,
     samples: list[int] = None,
 ) -> tuple[float, int, int]:
     """
@@ -134,7 +139,7 @@ async def evaluate_model(
         model (torch.nn.Module): The model to evaluate.
         blocks (list[int]): List of block numbers to use for fetching data.
         uid (int): The UID of the miner to evaluate.
-        n_pages (int): Number of pages to fetch for evaluation.
+        max_buffer_size (int): Maximum buffer size for fetching data.
         samples (list[int], optional): Sample indices to use for testing. Defaults to None.
         test_flag (bool, optional): Flag to indicate if this is a test run. Defaults to False.
 
@@ -148,7 +153,7 @@ async def evaluate_model(
     n_batches_sampled = 0
 
     for block in blocks:
-        dataset = await fetch_training_data(self, block, uid, n_pages)
+        dataset = await fetch_training_data(self, block, uid, max_buffer_size)
 
         with torch.no_grad():
             model.eval()
@@ -192,7 +197,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
         n_batches_total_before,
         n_batches_sampled_before,
     ) = await evaluate_model(
-        self, model=model_base, blocks=blocks, uid=uid, samples=None, n_pages=2
+        self, model=model_base, blocks=blocks, uid=uid, samples=None
     )
 
     # local aggregates
@@ -252,7 +257,7 @@ async def evaluate_with_gradient(self, uid, model_base, blocks, revision, prefix
         n_batches_total_after,
         n_batches_sampled_after,
     ) = await evaluate_model(
-        self, model=model_t1, blocks=blocks, uid=uid, samples=None, n_pages=2
+        self, model=model_t1, blocks=blocks, uid=uid, samples=None
     )
 
     # local aggregates
@@ -304,7 +309,9 @@ def compute_loss_improvement(before: float, after: float) -> dict:
 def get_uids_blocks(self, uid: int, prefix=str) -> list[int]:
     """"""
     bucket_name = f"{self.config.neuron.global_model_name.split('/')[-1]}-{uid:03d}"
+    self.logger.debug(f"bucket_name: {bucket_name}")
     r2 = get_r2_client(self, uid, donwload_on_all_ranks=True)
+    self.logger.debug(f"r2: {r2}")
     config_path = r2_download(
         self,
         r2=r2,
@@ -314,8 +321,16 @@ def get_uids_blocks(self, uid: int, prefix=str) -> list[int]:
         run_on_all_ranks=True,
         destination=bucket_name,
     )
+    self.logger.debug(f"config_path: {config_path}")
     uid_blocks = json.load(open(config_path))["block_list"]
+    self.logger.debug(f"uid_blocks: {uid_blocks}")
     # if False:
+    self.logger.debug(f"self.current_block: {self.current_block}")
+    self.logger.debug(f"max(uid_blocks): {max(uid_blocks)}")
+    self.logger.debug(f"self.config.neuron.blocks_per_allreduce: {self.config.neuron.blocks_per_allreduce}")
+    self.logger.debug(f"self.current_block - max(uid_blocks): {self.current_block - max(uid_blocks)}")
+    self.logger.debug(f"(self.config.neuron.blocks_per_allreduce / 2): {(self.config.neuron.blocks_per_allreduce / 2)}")
+    self.logger.debug(f"(self.current_block - max(uid_blocks)) > (self.config.neuron.blocks_per_allreduce / 2): {(self.current_block - max(uid_blocks)) > (self.config.neuron.blocks_per_allreduce / 2)}")
     if (self.current_block - max(uid_blocks)) > (
         self.config.neuron.blocks_per_allreduce / 2
     ):
@@ -325,6 +340,7 @@ def get_uids_blocks(self, uid: int, prefix=str) -> list[int]:
     else:
         random.seed(uid)
         assgined_blocks = random.sample(uid_blocks, 1)
+        self.logger.debug(f"assgined_blocks: {assgined_blocks}")
         return assgined_blocks
 
 
@@ -450,6 +466,7 @@ async def score_uids(self, epoch: int, uids: list):
 
             if self.master:
                 for k, v in loss_scores.items():
+                    self.logger.debug("train.random scores: ", k, v)
                     setattr(self.uid_tracker[uid].train.random, k, v)
 
             self.logger.info(
@@ -491,6 +508,7 @@ async def score_uids(self, epoch: int, uids: list):
 
             if self.master:
                 for k, v in loss_scores.items():
+                    self.logger.debug("train.assigned scores: ", k, v)
                     setattr(self.uid_tracker[uid].train.assigned, k, v)
             self.logger.info(
                 f"UID {uid:03d}: Assigned <=> Absolute loss improvement: {loss_scores['absolute']:.6f}"
@@ -504,6 +522,9 @@ async def score_uids(self, epoch: int, uids: list):
             self.logger.info(f"UID {uid:03d}: Error calculating loss score: {e}")
 
         finally:
+            if self.master:
+                self.logger.debug(f"self.uid_tracker[uid]: {self.uid_tracker[uid]}")
+                self.logger.debug(f"score_status: {score_status}")
             dist.all_reduce(score_status, group=self.gloo_group)
             self.logger.info(f"UID {uid:03d}: Score status {score_status[0].item()}")
             if (score_status[0].item() != self.world_size) and self.master:
@@ -531,10 +552,13 @@ def score_repo(self, uid: int, prefix: str) -> bool:
     """
     Check if the miner's R2 manifest exists and is recent enough.
     """
-    try:
+    try:       
         bucket_name = f"{self.config.neuron.global_model_name}-{uid:03d}"
+        self.logger.debug(f"bucket_name: {bucket_name}")
         r2 = get_r2_client(self, uid, donwload_on_all_ranks=False)
+        self.logger.debug(f"r2: {r2}")
         response = r2.head_object(Bucket=bucket_name, Key=f"{prefix}gradients.pt")
+        self.logger.debug(f"response: {response}")
         last_modified = (
             email.utils.parsedate_to_datetime(
                 response["LastModified"].strftime("%a, %d %b %Y %H:%M:%S GMT")
@@ -542,8 +566,11 @@ def score_repo(self, uid: int, prefix: str) -> bool:
             if isinstance(response["LastModified"], datetime)
             else email.utils.parsedate_to_datetime(response["LastModified"])
         )
+        self.logger.debug(f"last_modified: {last_modified}")
 
         age_seconds = (datetime.now(timezone.utc) - last_modified).total_seconds()
+        self.logger.debug(f"age_seconds: {age_seconds}")
+        self.logger.debug(f"age_seconds < self.max_upload_interval: {age_seconds < self.max_upload_interval}")
         self.logger.info(
             f"UID {uid:03d}: Repo Score {age_seconds < self.max_upload_interval }. Age: {age_seconds}. Max Uplaod Interval: {self.max_upload_interval }"
         )
@@ -571,6 +598,7 @@ def benchmark_uids(self):
     for uid in self.uid_tracker:
         try:
             self.uid_tracker[uid].train.is_valid = score_repo(self, uid, prefix)
+            self.logger.debug(f"UID {uid} received self.uid_tracker[uid].train.is_valid: {self.uid_tracker[uid].train.is_valid}")
         # except (RepositoryNotFoundError, RevisionNotFoundError, OSError) as e:
         #     # self.logger.info(f"UID {uid} benchmarking failed with error {e}. Updating score to 0.")
         #     self.uid_tracker[uid].train.is_valid = False

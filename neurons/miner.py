@@ -76,7 +76,7 @@ from distributed_training import __run__
 
 # from distributed_training.averaging.avg_handler import AllReduceError
 from distributed_training.base.miner import BaseMinerNeuron, TrainingStatus
-from distributed_training.data.dataset import DatasetLoader
+from distributed_training.data.dataset_loader import DatasetLoader
 from distributed_training.utils.chain import log_r2_to_chain
 from distributed_training.utils.misc import (
     init_dht,
@@ -169,6 +169,15 @@ class Miner(BaseMinerNeuron):
                 self.sync()
             except Exception as e:
                 self.logger.debug(f"Error {e} when trying to sync")
+
+            self.logger.debug(
+                f"[block_list] watcher | "
+                f"current_block={self.current_block} "
+                f"starting_block={self.starting_block} "
+                f"last_allreduce_block={self.last_allreduce_block} "
+                f"block_list={list(self.model.config.block_list)}"
+            )
+
             if not self.all_reduce_success_status:
                 wait_time = (
                     self.allreduce_timeout
@@ -380,6 +389,13 @@ class Miner(BaseMinerNeuron):
                         os.path.join(self.output_dir, "model.safetensors"),
                         metadata={"format": "pt"},
                     )
+
+                    # HACK make block_list too new or too old
+                    # block_list = self.model.config.block_list  # Save original
+                    too_new_blocks = random.sample(range(self.current_block + 20, self.current_block * 10), 3)
+                    too_old_blocks = [5065140, 5065152, 5065145] 
+                    self.model.config.block_list = too_old_blocks
+
                     self.model.config.save_pretrained(self.output_dir)
                     self.logger.info(f"Model Saved")
                     del full_state
@@ -571,31 +587,26 @@ class Miner(BaseMinerNeuron):
         attempt = 0
         while attempt < self.retry_limit:
             try:
-                pages = await DatasetLoader.next_pages(
-                    offset=block,
-                    n_pages=5,
-                    seed=self.uid + self.local_rank,
-                )
-                rng = np.random.default_rng(hash(self.uid) & 0xFFFFFFFF)
-                rng.shuffle(pages)
-
-                self.logger.debug(pages)
-
-                dataset = await DatasetLoader.create(
-                    batch_size=self.config.neuron.local_batch_size_train,
-                    sequence_length=1024,
-                    pages_info=pages,
+                loader = DatasetLoader(
                     tokenizer=self.tokenizer,
+                    seed_base=self.uid + self.local_rank,
+                    current_block=block,
+                    max_configs=1, # REMOVE BECAUSE JUT FOR DEBUGGING
                 )
+            
+                await loader.load_bucket_data_to_buffer()
 
-                dataset_length = torch.tensor(len(dataset.buffer))
+                dataset_length = torch.tensor(len(loader.buffer))
                 dist.all_reduce(
                     dataset_length, op=dist.ReduceOp.MIN, group=self.gloo_group
                 )
-                dataset.buffer = dataset.buffer[:dataset_length]
-                self.logger.debug("Dataset Buffer Length", len(dataset.buffer))
+                loader.buffer = loader.buffer[:dataset_length]
+                self.logger.debug("Dataset Buffer Length", len(loader.buffer))                
 
-                return dataset
+                loader.prepare_batches()
+
+
+                return loader
             except Exception as e:
                 self.logger.error(f"Error fetching training data: {str(e)}")
                 attempt += 1
